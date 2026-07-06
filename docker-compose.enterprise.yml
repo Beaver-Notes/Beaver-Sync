@@ -1,0 +1,167 @@
+version: '3.9'
+
+# Beaver Sync - Enterprise Self-Hosted
+#
+# Fully air-gapped deployment: no external services required.
+# All traffic stays within the Docker internal network.
+#
+# Usage:
+#   cp .env.example .env && fill in SECRET_KEY, LICENSE_SECRET, etc.
+#   docker compose -f docker-compose.enterprise.yml up -d
+#
+# First-time setup:
+#   1. Set ENTERPRISE_MODE=true and LICENSE_SECRET in your .env
+#   2. docker compose -f docker-compose.enterprise.yml up -d
+#   3. Access the API at http://localhost:3000
+#   4. Generate license keys via src/lib/license.js:generateLicenseKey()
+
+networks:
+  beaver-internal:
+    driver: bridge
+
+volumes:
+  minio_data:
+  beaver_data:
+  glitchtip_db:
+  glitchtip_data:
+
+services:
+
+  # ── MinIO ────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    container_name: beaver-sync-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    networks:
+      - beaver-internal
+
+  minio-setup:
+    image: minio/mc:RELEASE.2025-02-21T16-00-46Z
+    container_name: beaver-sync-minio-setup
+    depends_on:
+      minio:
+        condition: service_started
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin}; do sleep 1; done &&
+      mc mb --ignore-existing local/${MINIO_BUCKET_NAME:-beaver-sync}"
+    networks:
+      - beaver-internal
+
+  # ── Glitchtip (Sentry-compatible error monitoring) ──────────────
+  glitchtip-db:
+    image: postgres:16-alpine
+    container_name: beaver-sync-glitchtip-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: glitchtip
+      POSTGRES_USER: glitchtip
+      POSTGRES_PASSWORD: ${GLITCHTIP_DB_PASSWORD:-glitchtip}
+    volumes:
+      - glitchtip_db:/var/lib/postgresql/data
+    networks:
+      - beaver-internal
+
+  glitchtip:
+    image: glitchtip/glitchtip:v3.2
+    container_name: beaver-sync-glitchtip
+    restart: unless-stopped
+    depends_on:
+      glitchtip-db:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://glitchtip:${GLITCHTIP_DB_PASSWORD:-glitchtip}@glitchtip-db:5432/glitchtip
+      SECRET_KEY: ${GLITCHTIP_SECRET_KEY:-change-me-glitchtip-secret}
+      PORT: 8000
+      EMAIL_BACKEND: dummy
+      CELERY_TASK_ALWAYS_EAGER: "True"
+      SENTRY_DSN: ""
+    volumes:
+      - glitchtip_data:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - beaver-internal
+
+  # ── API Server ───────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beaver-sync-api
+    restart: unless-stopped
+    depends_on:
+      minio:
+        condition: service_started
+      glitchtip:
+        condition: service_started
+    env_file: .env
+    environment:
+      ENTERPRISE_MODE: "true"
+      LICENSE_SECRET: ${LICENSE_SECRET}
+      DATABASE_PATH: /app/data/beaver.db
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      COOKIE_SECRET: ${COOKIE_SECRET:-change-me-cookie-secret}
+      SESSION_HMAC_KEY: ${SESSION_HMAC_KEY}
+      EMAIL_HMAC_KEY: ${EMAIL_HMAC_KEY}
+      NOTE_HMAC_KEY: ${NOTE_HMAC_KEY}
+      MLKEM_SEED: ${MLKEM_SEED}
+      GLITCHTIP_DSN: http://glitchtip:8000/glitchtip-dsn
+      STORAGE_BACKEND: minio
+      STORAGE_ENDPOINT: http://minio:9000
+      STORAGE_BUCKET_NAME: ${MINIO_BUCKET_NAME:-beaver-sync}
+      STORAGE_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      STORAGE_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      STORAGE_REGION: us-east-1
+      STORAGE_FORCE_PATH_STYLE: "true"
+      WEBAUTHN_RPID: ${WEBAUTHN_RPID:-localhost}
+      WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-http://localhost:3000}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+    ports:
+      - "3000:3000"
+    volumes:
+      - beaver_data:/app/data
+    networks:
+      - beaver-internal
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health", "||", "exit", "1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Hocuspocus WebSocket Relay ───────────────────────────────────
+  hocuspocus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beaver-sync-hocuspocus
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      ENTERPRISE_MODE: "true"
+      HOCUSPOCUS_PORT: "8080"
+      AUTH_BACKEND_URL: http://api:3000
+      SESSION_HMAC_KEY: ${SESSION_HMAC_KEY}
+      MLKEM_SEED: ${MLKEM_SEED}
+      GLITCHTIP_DSN: http://glitchtip:8000/glitchtip-dsn
+    command: ["node", "src/hocuspocus.js"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - beaver-internal

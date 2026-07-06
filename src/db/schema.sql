@@ -1,0 +1,196 @@
+CREATE TABLE IF NOT EXISTS accounts (
+  id                    TEXT PRIMARY KEY,
+  username              TEXT UNIQUE,
+  email_hmac            TEXT NOT NULL UNIQUE,
+  email_encrypted       TEXT,
+  kem_public_key        TEXT,
+  password_hash         TEXT,
+  recovery_key_hash     TEXT,
+  failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+  locked_until          TEXT,
+  kdf_salt              TEXT,
+  wrapped_aek           TEXT,
+  created_at            TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id_hash                 TEXT PRIMARY KEY,
+  account_id              TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  workspace_id            TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+  device_label            TEXT NOT NULL DEFAULT 'Unknown Device',
+  device_fingerprint_hash TEXT,
+  ip_subnet               TEXT,
+  expires_at              TEXT NOT NULL,
+  last_seen_at            TEXT NOT NULL,
+  revoked                 INTEGER NOT NULL DEFAULT 0,
+  created_at              TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS commits (
+  id                 TEXT PRIMARY KEY,
+  account_id         TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id          TEXT NOT NULL,
+  note_id_hash       TEXT,
+  workspace_id       TEXT,
+  payload_encrypted  TEXT,
+  clock              INTEGER NOT NULL,
+  size_bytes         INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+  id                 TEXT PRIMARY KEY,
+  name_encrypted     TEXT NOT NULL,
+  owner_id           TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  storage_used_bytes INTEGER NOT NULL DEFAULT 0 CHECK(storage_used_bytes >= 0),
+  data_residency     TEXT NOT NULL DEFAULT 'auto' CHECK(data_residency IN ('auto', 'eu', 'us', 'asia', 'custom')),
+  created_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id                 TEXT PRIMARY KEY,
+  account_id         TEXT NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+  plan               TEXT NOT NULL CHECK(plan IN ('free', 'basic', 'pro', 'team', 'enterprise')),
+  status             TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'grace_period', 'expired')),
+  provider           TEXT CHECK(provider IN ('stripe', 'apple', 'google')),
+  renews_at          TEXT,
+
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT,
+  apple_original_transaction_id TEXT,
+  google_purchase_token TEXT,
+  storage_quota_bytes  INTEGER NOT NULL DEFAULT 0,
+  storage_used_bytes   INTEGER NOT NULL DEFAULT 0 CHECK(storage_used_bytes >= 0),
+  created_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS devices (
+  id         TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id  TEXT NOT NULL,
+  label      TEXT NOT NULL DEFAULT 'Unknown Device',
+  last_seen  TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(account_id, device_id)
+);
+
+CREATE TABLE IF NOT EXISTS credentials (
+  id            TEXT PRIMARY KEY,
+  account_id    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  credential_id TEXT NOT NULL UNIQUE,
+  public_key    TEXT NOT NULL,
+  sign_count    INTEGER NOT NULL DEFAULT 0,
+  device_label  TEXT NOT NULL DEFAULT 'Unknown Device',
+  created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS quick_connect_codes (
+  code       TEXT PRIMARY KEY,
+  secret     TEXT NOT NULL UNIQUE,
+  authorized INTEGER NOT NULL DEFAULT 0,
+  payload    TEXT,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS compaction_locks (
+  id         TEXT PRIMARY KEY,
+  locked_at  TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collaboration_keys (
+  note_id        TEXT PRIMARY KEY,
+  key_encrypted  TEXT NOT NULL,
+  created_at     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS note_invitations (
+  note_id      TEXT NOT NULL,
+  user_id      TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  invited_by   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  role         TEXT NOT NULL DEFAULT 'editor' CHECK(role IN ('editor', 'viewer')),
+  created_at   TEXT NOT NULL,
+  PRIMARY KEY (note_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+  id         TEXT PRIMARY KEY,
+  email_hmac TEXT NOT NULL,
+  challenge  TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workspace_members (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  role         TEXT NOT NULL CHECK(role IN ('owner', 'editor', 'viewer', 'guest')),
+  created_at   TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, account_id)
+);
+
+CREATE TABLE IF NOT EXISTS workspace_invites (
+  token_hash   TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  role         TEXT NOT NULL CHECK(role IN ('editor', 'viewer', 'guest')),
+  expires_at   TEXT NOT NULL,
+  max_uses     INTEGER NOT NULL DEFAULT 0,
+  used_count   INTEGER NOT NULL DEFAULT 0,
+  created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sso_configs (
+  id                      TEXT PRIMARY KEY,
+  workspace_id            TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  protocol                TEXT NOT NULL CHECK(protocol IN ('saml', 'oidc')),
+  slug                    TEXT NOT NULL UNIQUE,
+  idp_entity_id           TEXT,
+  idp_sso_url             TEXT,
+  idp_cert_encrypted      TEXT,
+  oidc_issuer             TEXT,
+  oidc_client_id          TEXT,
+  oidc_client_secret_encrypted TEXT,
+  sp_cert                 TEXT,
+  sp_private_key_encrypted TEXT,
+  allowed_email_domains   TEXT,
+  created_at              TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sso_oidc_states (
+  state          TEXT PRIMARY KEY,
+  code_verifier  TEXT NOT NULL,
+  nonce          TEXT,
+  slug           TEXT NOT NULL,
+  created_at     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id                TEXT PRIMARY KEY,
+  account_id_hash   TEXT NOT NULL,
+  workspace_id      TEXT,
+  action            TEXT NOT NULL,
+  metadata_encrypted TEXT,
+  ip_subnet         TEXT,
+  created_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_account_id ON sessions(account_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_commits_account_device_clock ON commits(account_id, device_id, clock);
+CREATE INDEX IF NOT EXISTS idx_commits_account_created ON commits(account_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_account_id ON subscriptions(account_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_customer ON subscriptions(stripe_customer_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_sub ON subscriptions(stripe_subscription_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_apple ON subscriptions(apple_original_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_google ON subscriptions(google_purchase_token);
+CREATE INDEX IF NOT EXISTS idx_devices_account_device ON devices(account_id, device_id);
+CREATE INDEX IF NOT EXISTS idx_credentials_account_id ON credentials(account_id);
+CREATE INDEX IF NOT EXISTS idx_quick_connect_codes_expires ON quick_connect_codes(expires_at);
+CREATE INDEX IF NOT EXISTS idx_compaction_locks_expires ON compaction_locks(expires_at);
+CREATE INDEX IF NOT EXISTS idx_sso_configs_slug ON sso_configs(slug);
+CREATE INDEX IF NOT EXISTS idx_sso_configs_workspace ON sso_configs(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_workspace ON audit_logs(workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_account ON audit_logs(account_id_hash, created_at);
+CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_email ON webauthn_challenges(email_hmac);
+CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
