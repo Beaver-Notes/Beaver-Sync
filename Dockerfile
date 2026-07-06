@@ -1,5 +1,10 @@
 # Stage 1: Install dependencies
-FROM node:20-alpine AS deps
+FROM node:24-alpine AS deps
+
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++
 
 WORKDIR /app
 
@@ -8,7 +13,7 @@ COPY package*.json ./
 RUN yarn install --frozen-lockfile --production && yarn cache clean
 
 # Stage 2: Runtime image
-FROM node:20-alpine AS runtime
+FROM node:24-alpine AS runtime
 
 RUN apk add --no-cache wget
 
