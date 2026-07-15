@@ -48,9 +48,9 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 echo "=== Creating Fly apps ==="
-fly apps create beaver-sync-api --org personal 2>/dev/null || true
-fly apps create beaver-sync-hocuspocus --org personal 2>/dev/null || true
-fly apps create beaver-glitchtip --org personal 2>/dev/null || true
+fly apps create beaver-sync-api --org "${FLY_ORG:-personal}" 2>/dev/null || true
+fly apps create beaver-sync-hocuspocus --org "${FLY_ORG:-personal}" 2>/dev/null || true
+fly apps create beaver-glitchtip --org "${FLY_ORG:-personal}" 2>/dev/null || true
 
 echo "=== Creating volumes ==="
 fly volumes create beaver_data --region iad --app beaver-sync-api --size 1 2>/dev/null || true
@@ -63,8 +63,6 @@ fly secrets set \
   EMAIL_HMAC_KEY="$EMAIL_HMAC_KEY" \
   NOTE_HMAC_KEY="$NOTE_HMAC_KEY" \
   MLKEM_SEED="$MLKEM_SEED" \
-  JWT_PRIVATE_KEY_PATH="$JWT_PRIVATE_KEY_PATH" \
-  JWT_PUBLIC_KEY_PATH="$JWT_PUBLIC_KEY_PATH" \
   WEBAUTHN_RPID="$WEBAUTHN_RPID" \
   WEBAUTHN_ORIGIN="$WEBAUTHN_ORIGIN" \
   APP_URL="$APP_URL" \
@@ -96,8 +94,8 @@ fly deploy "$SCRIPT_DIR/api/" --app beaver-sync-api --strategy immediate
 echo "=== Initializing JWT keys on volume ==="
 fly ssh console --app beaver-sync-api -C "
   mkdir -p /app/keys &&
-  echo '$JWT_PRIVATE_KEY_B64' | base64 -d > /app/keys/jwt.pem &&
-  echo '$JWT_PUBLIC_KEY_B64' | base64 -d > /app/keys/jwt.pub &&
+  printf '%s' '$JWT_PRIVATE_KEY_B64' | base64 -d > /app/keys/jwt.pem &&
+  printf '%s' '$JWT_PUBLIC_KEY_B64' | base64 -d > /app/keys/jwt.pub &&
   chmod 600 /app/keys/jwt.pem &&
   chmod 644 /app/keys/jwt.pub &&
   echo 'JWT keys written'
