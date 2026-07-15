@@ -55,6 +55,42 @@ docker compose -f docker-compose.enterprise.yml up -d
 
 All features (SSO, audit logs, admin, workspaces, real-time collab) work offline with `ENTERPRISE_MODE=true`. Optional license key validation via `LICENSE_SECRET`.
 
+## Fly.io Deployment
+
+### Prerequisites
+1. [Fly.io](https://fly.io) account + `flyctl` CLI installed
+2. Cloudflare R2 bucket created with API token
+3. DNS records pointing to Fly for your custom domain
+
+### Deploy
+```bash
+# 1. Configure secrets
+cp fly/.env.secrets.example fly/.env.secrets
+# Edit fly/.env.secrets with real values
+
+# 2. Run deploy script
+bash fly/deploy.sh
+```
+
+### Update
+```bash
+# Deploy individual services
+fly deploy fly/api/
+fly deploy fly/hocuspocus/
+fly deploy fly/glitchtip/
+```
+
+### Rollback
+```bash
+fly releases rollback -a <app-name>
+```
+
+### Monitor
+```bash
+fly logs -a beaver-sync-api
+fly status --app beaver-sync-api
+```
+
 ## License
 
 Apache 2.0
