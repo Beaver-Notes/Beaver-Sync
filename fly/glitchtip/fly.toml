@@ -14,9 +14,3 @@ primary_region = "iad"
 [mounts]
   source = "glitchtip_data"
   destination = "/data"
-
-[http_service]
-  internal_port = 8000
-  force_https = false
-  auto_stop_machines = false
-  auto_start_machines = true
