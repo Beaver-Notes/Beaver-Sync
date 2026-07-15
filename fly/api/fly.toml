@@ -1,0 +1,40 @@
+app = "beaver-sync-api"
+primary_region = "iad"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+  HOST = "0.0.0.0"
+  DATABASE_PATH = "/data/beaver.db"
+  STORAGE_BACKEND = "r2"
+  R2_BUCKET_NAME = "beaver-sync"
+  R2_REGION = "auto"
+  STORAGE_FORCE_PATH_STYLE = "false"
+  LEGACY_AUTH_ENABLED = "true"
+  ENTERPRISE_MODE = "false"
+  GLITCHTIP_DSN = "http://beaver-glitchtip.internal:8000/0"
+
+[mounts]
+  source = "beaver_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 250
+    soft_limit = 200
+
+[[http_service.checks]]
+  grace_period = "10s"
+  interval = "15s"
+  method = "GET"
+  path = "/health"
+  timeout = "5s"
