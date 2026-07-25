@@ -27,13 +27,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS commits (
-  id                 TEXT PRIMARY KEY,
+  commit_id          TEXT PRIMARY KEY,
   account_id         TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   device_id          TEXT NOT NULL,
   note_id_hash       TEXT,
   workspace_id       TEXT,
   payload_encrypted  TEXT,
   clock              INTEGER NOT NULL,
+  ts                 INTEGER NOT NULL,
   size_bytes         INTEGER NOT NULL DEFAULT 0,
   created_at         TEXT NOT NULL
 );
@@ -96,7 +97,8 @@ CREATE TABLE IF NOT EXISTS quick_connect_codes (
 CREATE TABLE IF NOT EXISTS compaction_locks (
   id         TEXT PRIMARY KEY,
   locked_at  TEXT NOT NULL,
-  expires_at TEXT NOT NULL
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS collaboration_keys (
@@ -112,6 +114,14 @@ CREATE TABLE IF NOT EXISTS note_invitations (
   role         TEXT NOT NULL DEFAULT 'editor' CHECK(role IN ('editor', 'viewer')),
   created_at   TEXT NOT NULL,
   PRIMARY KEY (note_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS email_aliases (
+  alias            TEXT PRIMARY KEY,
+  account_id       TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  email_encrypted  TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  expires_at       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS webauthn_challenges (
@@ -192,5 +202,23 @@ CREATE INDEX IF NOT EXISTS idx_sso_configs_slug ON sso_configs(slug);
 CREATE INDEX IF NOT EXISTS idx_sso_configs_workspace ON sso_configs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_workspace ON audit_logs(workspace_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_account ON audit_logs(account_id_hash, created_at);
+CREATE INDEX IF NOT EXISTS idx_email_aliases_account ON email_aliases(account_id);
 CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_email ON webauthn_challenges(email_hmac);
 CREATE INDEX IF NOT EXISTS idx_webauthn_challenges_expires ON webauthn_challenges(expires_at);
+
+CREATE TABLE IF NOT EXISTS yjs_doc_updates (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  note_id         TEXT NOT NULL,
+  update_data     BLOB NOT NULL,
+  update_encrypted INTEGER NOT NULL DEFAULT 0,
+  device_id       TEXT NOT NULL,
+  clock           INTEGER NOT NULL,
+  ts              INTEGER NOT NULL,
+  created_at      TEXT NOT NULL,
+  UNIQUE(workspace_id, note_id, device_id, clock)
+);
+
+CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_workspace_note ON yjs_doc_updates(workspace_id, note_id, ts);
+CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_device ON yjs_doc_updates(workspace_id, note_id, device_id);
+CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_clock ON yjs_doc_updates(workspace_id, note_id, device_id, clock);

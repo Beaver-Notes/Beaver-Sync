@@ -297,7 +297,23 @@ class MultiQuery {
   }
 }
 
+const ALLOWED_TABLES = new Set([
+  'accounts', 'sessions', 'commits', 'workspaces', 'subscriptions',
+  'devices', 'credentials', 'quick_connect_codes', 'compaction_locks',
+  'collaboration_keys', 'note_invitations', 'email_aliases',
+  'webauthn_challenges', 'workspace_members', 'workspace_invites',
+  'sso_configs', 'sso_oidc_states', 'audit_logs', 'yjs_doc_updates',
+]);
+
+function validateTableName(table) {
+  if (!ALLOWED_TABLES.has(table)) {
+    throw new Error(`Invalid table name: ${table}`);
+  }
+}
+
 function createModel(table, pkField) {
+  validateTableName(table);
+
   const M = {
     _table: table,
     _pkField: pkField || 'id',
@@ -453,12 +469,15 @@ const WorkspaceInvite = createModel('workspace_invites', 'token_hash');
 const AuditLog = createModel('audit_logs');
 const SsoConfig = createModel('sso_configs');
 const SsoOidcState = createModel('sso_oidc_states', 'state');
+const EmailAlias = createModel('email_aliases', 'alias');
 const WebAuthnChallenge = createModel('webauthn_challenges');
+const YjsDocUpdate = createModel('yjs_doc_updates');
 
 module.exports = {
   Account, Session, CommitMeta, Device, Subscription,
   Credential, QuickConnectCode, CompactionLock,
   CollaborationKey, NoteInvitation,
   Workspace, WorkspaceMember, WorkspaceInvite,
-  AuditLog, SsoConfig, SsoOidcState, WebAuthnChallenge,
+  AuditLog, SsoConfig, SsoOidcState, EmailAlias, WebAuthnChallenge,
+  YjsDocUpdate,
 };
