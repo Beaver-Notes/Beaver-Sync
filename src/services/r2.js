@@ -288,6 +288,7 @@ const commitKey = (userId, commitId) => `${userId}/commits/${commitId}.json`;
 const assetKey = (userId, assetKey) => `${userId}/assets/${assetKey}`;
 const snapshotKey = (userId) => `${userId}/snapshot.json`;
 const exportKey = (userId, id) => `${userId}/export-${id}.zip`;
+const yjsKey = (userId, fileName) => `${userId}/yjs/${fileName}`;
 
 module.exports = {
   put,
@@ -302,5 +303,6 @@ module.exports = {
   assetKey,
   snapshotKey,
   exportKey,
+  yjsKey,
   storageConfig,
 };

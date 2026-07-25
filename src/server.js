@@ -36,9 +36,21 @@ requireVar('SESSION_HMAC_KEY', true, 32);
     process.exit(1);
   }
 
+  const DEFAULT_SECRETS = [
+    'change-me-session-hmac-key-min-32-chars',
+    'change-me-email-hmac-key-min-32-chars',
+    'change-me-note-hmac-key-min-32-chars',
+    'change-me-cookie-secret',
+  ];
+
+  for (const name of ['SESSION_HMAC_KEY', 'EMAIL_HMAC_KEY', 'NOTE_HMAC_KEY', 'COOKIE_SECRET']) {
+    if (DEFAULT_SECRETS.includes(process.env[name])) {
+      console.warn(`WARNING: ${name} is using a default value. Generate a real key for production.`);
+    }
+  }
+
   if (legacyAuth) {
-    console.warn('LEGACY_AUTH_ENABLED is set. Password-based login is active.');
-    console.warn('    This flag should be removed after all users have migrated to passkeys.');
+    console.info('Password/email authentication is enabled alongside passkeys.');
   }
 
   if (!process.env.NOTE_HMAC_KEY || process.env.NOTE_HMAC_KEY.length < 32) {
@@ -90,7 +102,7 @@ async function buildApp() {
     origin:
       process.env.NODE_ENV === 'production'
         ? (process.env.ALLOWED_ORIGINS || '').split(',')
-        : true,
+        : /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/,
     credentials: true,
   });
 
@@ -102,7 +114,7 @@ async function buildApp() {
     const isProduction = process.env.NODE_ENV === 'production';
     reply.setCookie('bsession', rawId, {
       httpOnly: true,
-      sameSite: 'lax',
+      sameSite: 'strict',
       secure: isProduction,
       path: '/',
       maxAge: parseInt(process.env.SESSION_MAX_AGE_DAYS ?? '30', 10) * 24 * 60 * 60,
@@ -113,6 +125,7 @@ async function buildApp() {
   await app.register(require('@fastify/rate-limit'), {
     max: parseInt(process.env.API_RATE_LIMIT_PER_MINUTE ?? '120'),
     timeWindow: '1 minute',
+    keyGenerator: (req) => req.userId || req.ip,
     errorResponseBuilder: (_req, context) => ({
       statusCode: context.ban ? 403 : 429,
       error: context.ban ? 'rate_limit_banned' : 'rate_limit_exceeded',
@@ -129,8 +142,10 @@ async function buildApp() {
   await app.register(require('./routes/assets'),      { prefix: '/assets' });
   await app.register(require('./routes/snapshot'),    { prefix: '/snapshot' });
   await app.register(require('./routes/account'),     { prefix: '/account' });
+  await app.register(require('./routes/email'),      { prefix: '' });
   await app.register(require('./routes/collaboration'), { prefix: '/collaboration' });
   await app.register(require('./routes/workspaces'),   { prefix: '/workspaces' });
+  await app.register(require('./routes/yjs-sync'),     { prefix: '/yjs' });
   await app.register(require('./routes/audit'),       { prefix: '/audit' });
   await app.register(require('./routes/admin'),       { prefix: '/admin' });
   await app.register(require('./routes/webhooks'),    { prefix: '/webhooks' });
