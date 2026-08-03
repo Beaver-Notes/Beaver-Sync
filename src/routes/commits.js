@@ -1,11 +1,12 @@
 'use strict';
 
 const { z } = require('zod');
-const { CommitMeta, Device, Workspace, Subscription } = require('../models');
+const { CommitMeta, Device, Workspace, Subscription, Account } = require('../models');
 const r2 = require('../services/r2');
 const mlkem = require('../lib/mlkem');
 const { createNoteHash } = require('../lib/crypto');
 const { audit } = require('../lib/audit');
+const { getDb } = require('../db');
 
 const COMMIT_BODY_LIMIT_BYTES = parseInt(process.env.COMMIT_BODY_LIMIT_BYTES ?? '1048576', 10);
 const MAX_CURSOR_BYTES = parseInt(process.env.COMMIT_CURSOR_QUERY_MAX_BYTES ?? '4096', 10);
@@ -19,10 +20,9 @@ const CommitUploadSchema = z.object({
   clock: z.number().int().min(0),
   ts: z.number().int().min(0),
   payload: z.object({
-    enc: z.literal('aes256gcm-v1'),
-    iv:  z.string().min(16),
-    ct:  z.string().min(1),
-    tag: z.string().length(24),
+    v: z.literal(3),
+    nonce: z.string(),
+    cipher: z.string(),
   }),
 });
 
@@ -233,14 +233,30 @@ async function commitRoutes(app) {
     const beforeTs = parseInt(req.query.before, 10);
     const before = Number.isFinite(beforeTs) ? new Date(beforeTs) : null;
 
-    const filter = { accountId: req.userId, noteIdHash };
-    if (before) filter.createdAt = { $lt: before };
+    const db = getDb();
+    const params = [req.userId, noteIdHash];
+    let sql = `
+      SELECT
+        commits.commit_id AS commitId,
+        commits.device_id AS deviceId,
+        commits.clock,
+        commits.ts,
+        commits.created_at AS createdAt,
+        accounts.username AS authorName,
+        devices.label AS deviceLabel
+      FROM commits
+      LEFT JOIN accounts ON commits.account_id = accounts.id
+      LEFT JOIN devices ON commits.account_id = devices.account_id AND commits.device_id = devices.device_id
+      WHERE commits.account_id = ? AND commits.note_id_hash = ?
+    `;
+    if (before) {
+      sql += ` AND commits.created_at < ?`;
+      params.push(before.toISOString());
+    }
+    sql += ` ORDER BY commits.created_at DESC LIMIT ?`;
+    params.push(limit);
 
-    const commits = await CommitMeta
-      .find(filter, { commitId: 1, deviceId: 1, clock: 1, ts: 1, createdAt: 1 })
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .lean();
+    const commits = db.prepare(sql).all(...params);
 
     return reply.send({ commits, noteId });
   });
