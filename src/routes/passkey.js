@@ -10,6 +10,7 @@ const {
 
 const { Account, Credential, Subscription, WebAuthnChallenge } = require('../models');
 const { createSession, setSessionCookieIfAvailable } = require('../middleware/auth');
+const { createEmailHash } = require('../lib/crypto');
 
 const AUTH_BODY_LIMIT_BYTES = parseInt(process.env.AUTH_BODY_LIMIT_BYTES ?? '16384', 10);
 
@@ -29,23 +30,27 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 const BeginRegisterSchema = z.object({
-  emailHash: z.string().min(1),
+  email: z.string().email('Invalid email address').max(254),
   deviceLabel: z.string().min(1).max(128),
 });
 
 const CompleteRegisterSchema = z.object({
-  emailHash: z.string().min(1),
+  email: z.string().email('Invalid email address').max(254),
   registrationResponse: z.object({}).passthrough(),
 });
 
 const BeginLoginSchema = z.object({
-  emailHash: z.string().min(1),
+  email: z.string().email('Invalid email address').max(254),
 });
 
 const CompleteLoginSchema = z.object({
-  emailHash: z.string().min(1),
+  email: z.string().email('Invalid email address').max(254),
   authenticationResponse: z.object({}).passthrough(),
 });
+
+function normalizeEmail(input) {
+  return String(input || '').trim().toLowerCase();
+}
 
 async function passkeyRoutes(app) {
   const authRateLimit = {
@@ -68,9 +73,11 @@ async function passkeyRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     }
 
-    const { emailHash, deviceLabel } = parsed.data;
-    let account = await Account.findOne({ emailHmac: emailHash });
+    const email = normalizeEmail(parsed.data.email);
+    const emailHash = createEmailHash(email);
+    const deviceLabel = String(parsed.data.deviceLabel).slice(0, 128);
 
+    let account = await Account.findOne({ emailHmac: emailHash });
     if (!account) {
       const kdfSalt = require('crypto').randomBytes(32).toString('hex');
       account = await Account.create({ emailHmac: emailHash, passwordHash: null, kdfSalt });
@@ -80,7 +87,7 @@ async function passkeyRoutes(app) {
       rpName: RP_NAME,
       rpID: RP_ID ?? 'localhost',
       userID: Buffer.from(account.id, 'utf8'),
-      userName: emailHash,
+      userName: email,
       userDisplayName: deviceLabel,
       attestationType: 'none',
       authenticatorSelection: {
@@ -101,7 +108,9 @@ async function passkeyRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     }
 
-    const { emailHash, registrationResponse } = parsed.data;
+    const email = normalizeEmail(parsed.data.email);
+    const emailHash = createEmailHash(email);
+    const { registrationResponse } = parsed.data;
 
     const challengeDoc = await WebAuthnChallenge.findOneAndDelete({ emailHmac: emailHash });
     if (!challengeDoc) {
@@ -133,13 +142,14 @@ async function passkeyRoutes(app) {
     }
 
     const { credential } = verification.registrationInfo;
+    const deviceLabel = String(parsed.data.deviceLabel ?? 'Unknown Device').slice(0, 128);
 
     await Credential.create({
       accountId: account.id,
       credentialId: credential.id,
       publicKey: Buffer.from(credential.publicKey).toString('base64url'),
       signCount: credential.counter ?? 0,
-      deviceLabel: parsed.data.deviceLabel ?? 'Unknown Device',
+      deviceLabel,
     });
 
     const token = await createSession(account.id, req);
@@ -160,7 +170,8 @@ async function passkeyRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     }
 
-    const { emailHash } = parsed.data;
+    const email = normalizeEmail(parsed.data.email);
+    const emailHash = createEmailHash(email);
     const account = await Account.findOne({ emailHmac: emailHash });
 
     if (!account) {
@@ -175,7 +186,7 @@ async function passkeyRoutes(app) {
     }
 
     const credentials = await Credential.find({ accountId: account.id }).lean();
-    const allowCredentials = credentials.map(c => ({
+    const allowCredentials = credentials.map((c) => ({
       id: c.credentialId,
       type: 'public-key',
     }));
@@ -197,7 +208,9 @@ async function passkeyRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     }
 
-    const { emailHash, authenticationResponse } = parsed.data;
+    const email = normalizeEmail(parsed.data.email);
+    const emailHash = createEmailHash(email);
+    const { authenticationResponse } = parsed.data;
 
     const challengeDoc = await WebAuthnChallenge.findOneAndDelete({ emailHmac: emailHash });
     if (!challengeDoc) {

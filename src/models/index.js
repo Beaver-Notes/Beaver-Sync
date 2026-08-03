@@ -303,6 +303,7 @@ const ALLOWED_TABLES = new Set([
   'collaboration_keys', 'note_invitations', 'email_aliases',
   'webauthn_challenges', 'workspace_members', 'workspace_invites',
   'sso_configs', 'sso_oidc_states', 'audit_logs', 'yjs_doc_updates',
+  'vault_key_params', 'note_invite_links',
 ]);
 
 function validateTableName(table) {
@@ -472,6 +473,8 @@ const SsoOidcState = createModel('sso_oidc_states', 'state');
 const EmailAlias = createModel('email_aliases', 'alias');
 const WebAuthnChallenge = createModel('webauthn_challenges');
 const YjsDocUpdate = createModel('yjs_doc_updates');
+const VaultKeyParams = createModel('vault_key_params');
+const NoteInviteLink = createModel('note_invite_links');
 
 module.exports = {
   Account, Session, CommitMeta, Device, Subscription,
@@ -479,5 +482,5 @@ module.exports = {
   CollaborationKey, NoteInvitation,
   Workspace, WorkspaceMember, WorkspaceInvite,
   AuditLog, SsoConfig, SsoOidcState, EmailAlias, WebAuthnChallenge,
-  YjsDocUpdate,
+  YjsDocUpdate, VaultKeyParams, NoteInviteLink,
 };

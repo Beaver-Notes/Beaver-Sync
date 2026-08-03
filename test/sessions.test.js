@@ -26,6 +26,7 @@ const originalMethods = {
     findOne: models.Session.findOne,
     create: models.Session.create,
     updateOne: models.Session.updateOne,
+    updateMany: models.Session.updateMany,
     find: models.Session.find,
   },
   Account: {
@@ -38,6 +39,7 @@ function resetStubs() {
   models.Session.findOne = async () => null;
   models.Session.create = async (data) => ({ id: 'sess-id', ...data });
   models.Session.updateOne = async () => ({ modifiedCount: 1 });
+  models.Session.updateMany = async () => ({ modifiedCount: 0 });
   models.Session.find = () => ({ sort: () => ({ lean: () => ([]) }) });
   models.Account.findOne = async () => null;
   models.Account.findById = () => ({ lean: () => null });
@@ -288,4 +290,111 @@ test('POST /auth/logout invalidates the session', async (t) => {
   });
 
   assert.equal(afterLogout.statusCode, 401);
+});
+
+test('POST /auth/sessions/revoke-all revokes every session except the current one', async (t) => {
+  const app = await makeApp();
+  t.after(() => app.close());
+
+  const rawId = crypto.randomBytes(32).toString('base64url');
+  const sessionIdHash = hashSessionId(rawId);
+
+  models.Session.findOne = async ({ idHash: h }) => {
+    if (h === sessionIdHash) {
+      return {
+        idHash: h,
+        accountId: 'user-a',
+        revoked: false,
+        expiresAt: new Date(Date.now() + 3600_000),
+        createdAt: new Date(),
+        save: async () => {},
+      };
+    }
+    return null;
+  };
+
+  let updateFilter = null;
+  let updateData = null;
+  models.Session.updateMany = async (filter, update) => {
+    updateFilter = filter;
+    updateData = update;
+    return { modifiedCount: 4 };
+  };
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/auth/sessions/revoke-all',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${rawId}`,
+    },
+    payload: JSON.stringify({ keepCurrent: true }),
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.revoked, 4);
+  assert.equal(body.keepCurrent, true);
+  assert.equal(updateFilter.accountId, 'user-a');
+  assert.equal(updateFilter.revoked, false);
+  assert.deepEqual(updateFilter.idHash, { $ne: sessionIdHash });
+  assert.equal(updateData.$set.revoked, true);
+});
+
+test('POST /auth/sessions/revoke-all without keepCurrent revokes every session', async (t) => {
+  const app = await makeApp();
+  t.after(() => app.close());
+
+  const rawId = crypto.randomBytes(32).toString('base64url');
+
+  models.Session.findOne = async ({ idHash: h }) => {
+    if (h === hashSessionId(rawId)) {
+      return {
+        idHash: h,
+        accountId: 'user-a',
+        revoked: false,
+        expiresAt: new Date(Date.now() + 3600_000),
+        createdAt: new Date(),
+        save: async () => {},
+      };
+    }
+    return null;
+  };
+
+  let updateFilter = null;
+  models.Session.updateMany = async (filter) => {
+    updateFilter = filter;
+    return { modifiedCount: 5 };
+  };
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/auth/sessions/revoke-all',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${rawId}`,
+    },
+    payload: JSON.stringify({ keepCurrent: false }),
+  });
+
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.revoked, 5);
+  assert.equal(body.keepCurrent, false);
+  assert.equal(updateFilter.accountId, 'user-a');
+  assert.equal(updateFilter.idHash, undefined);
+});
+
+test('POST /auth/sessions/revoke-all rejects unauthenticated requests', async (t) => {
+  const app = await makeApp();
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/auth/sessions/revoke-all',
+    headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({}),
+  });
+
+  assert.equal(response.statusCode, 401);
 });

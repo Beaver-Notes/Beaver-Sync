@@ -60,14 +60,16 @@ async function snapshotRoutes(app) {
     let acquired = null;
 
     try {
-      acquired = await CompactionLock.findOneAndUpdate(
-        { _id: userId, expiresAt: { $lt: new Date() } },
-        { $set: { lockedAt: new Date(), expiresAt: new Date(Date.now() + COMPACT_LOCK_TTL_MS) } },
-        { upsert: true, new: true }
-      ).catch((err) => {
-        if (!err || (err.message && err.message.includes('UNIQUE constraint'))) return null;
-        throw err;
-      });
+      try {
+        acquired = CompactionLock.findOneAndUpdate(
+          { _id: userId, expiresAt: { $lt: new Date() } },
+          { $set: { lockedAt: new Date(), expiresAt: new Date(Date.now() + COMPACT_LOCK_TTL_MS) } },
+          { upsert: true, new: true }
+        );
+      } catch (err) {
+        if (!err || (err.message && err.message.includes('UNIQUE constraint'))) acquired = null;
+        else throw err;
+      }
 
       if (!acquired) {
         return reply.status(409).send({

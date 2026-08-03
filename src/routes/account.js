@@ -8,6 +8,8 @@ const { getDb } = require('../db');
 const mlkem = require('../lib/mlkem');
 const r2 = require('../services/r2');
 const { hashAccountId } = require('../lib/crypto');
+const { isEnterpriseMode } = require('../lib/license');
+const { getQuotaBytes } = require('../lib/plans');
 
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{3,32}$/;
 
@@ -39,6 +41,15 @@ async function accountRoutes(app) {
 
     if (!account) {
       return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
+    }
+
+    if (isEnterpriseMode()) {
+      if (!subscription) {
+        subscription = { plan: 'enterprise', status: 'active', renewsAt: null, storageUsedBytes: 0, storageQuotaBytes: getQuotaBytes('enterprise') };
+      } else {
+        subscription.plan = 'enterprise';
+        subscription.storageQuotaBytes = getQuotaBytes('enterprise');
+      }
     }
 
     const usedBytes  = subscription?.storageUsedBytes  ?? 0;

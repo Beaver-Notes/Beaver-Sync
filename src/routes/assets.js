@@ -25,6 +25,27 @@ async function assetRoutes(app) {
     preHandler: [app.authenticate, app.requireActiveSync, app.requirePaidWrite, app.checkStorageQuota],
   };
 
+  app.get('/', {
+    ...protect,
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.ASSET_LIST_RATE_LIMIT_PER_MINUTE ?? '30', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const allKeys = await r2.listKeys(`${req.userId}/assets/`);
+    const prefix = `${req.userId}/assets/`;
+    const assetKeys = allKeys
+      .filter((k) => k.startsWith(prefix))
+      .map((k) => k.slice(prefix.length));
+
+    return reply.send({
+      keys: assetKeys,
+      count: assetKeys.length,
+    });
+  });
+
   app.put('/:key', {
     ...protectWrite,
     bodyLimit: MAX_ASSET_SIZE_BYTES,

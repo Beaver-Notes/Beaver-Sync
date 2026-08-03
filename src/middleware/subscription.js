@@ -76,15 +76,6 @@ async function subscriptionPlugin(app) {
       }
 
       if (sub.plan === 'enterprise') {
-        const projectedUsage = ws.storageUsedBytes + incomingBytes;
-        if (projectedUsage > ws.storageUsedBytes + incomingBytes) {
-          return reply.status(507).send({
-            error: 'storage_quota_exceeded',
-            message: 'Enterprise workspace storage quota exceeded.',
-            storageUsedBytes: ws.storageUsedBytes,
-            storageQuotaBytes: ws.storageUsedBytes,
-          });
-        }
         req.workspaceId = workspaceId;
         return;
       }

@@ -108,12 +108,13 @@ async function workspaceRoutes(app) {
       return reply.status(err.statusCode).send({ error: err.code, message: err.message });
     }
 
-    const { username, email, role } = req.body ?? {};
+    const { username, email, role, ...body } = req.body ?? {};
     if ((!username || typeof username !== 'string') && (!email || typeof email !== 'string')) {
       return reply.status(400).send({ error: 'validation_error', message: 'Provide username or email of the user to invite.' });
     }
 
     const inviteRole = role === 'viewer' ? 'viewer' : role === 'guest' ? 'guest' : 'editor';
+    const requireApproval = body.requireApproval ? 1 : 0;
 
     let target = null;
     if (username) {
@@ -146,6 +147,7 @@ async function workspaceRoutes(app) {
       tokenHash,
       workspaceId,
       role: inviteRole,
+      requireApproval,
       expiresAt,
       maxUses: 0,
       usedCount: 0,
@@ -160,6 +162,7 @@ async function workspaceRoutes(app) {
       token: rawToken,
       expiresAt,
       role: inviteRole,
+      requireApproval: !!requireApproval,
     });
   });
 

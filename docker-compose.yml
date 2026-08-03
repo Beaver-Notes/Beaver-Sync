@@ -56,7 +56,7 @@ services:
     env_file: .env
     environment:
       DATABASE_PATH: /app/data/beaver.db
-      NODE_ENV: ${NODE_ENV:-development}
+      NODE_ENV: production
       STORAGE_BACKEND: ${STORAGE_BACKEND:-minio}
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://minio:9000}
       STORAGE_BUCKET_NAME: ${STORAGE_BUCKET_NAME:-beaver-sync}
@@ -73,7 +73,7 @@ services:
     networks:
       - beaver-internal
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health", "||", "exit", "1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3

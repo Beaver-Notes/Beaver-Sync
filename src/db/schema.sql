@@ -116,6 +116,21 @@ CREATE TABLE IF NOT EXISTS note_invitations (
   PRIMARY KEY (note_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS note_invite_links (
+  id               TEXT PRIMARY KEY,
+  note_id          TEXT NOT NULL,
+  created_by       TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  token_hash       TEXT NOT NULL UNIQUE,
+  role             TEXT NOT NULL CHECK(role IN ('editor', 'viewer')),
+  require_approval INTEGER NOT NULL DEFAULT 0,
+  expires_at       TEXT,
+  revoked          INTEGER NOT NULL DEFAULT 0,
+  created_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_invite_links_note ON note_invite_links(note_id);
+CREATE INDEX IF NOT EXISTS idx_note_invite_links_token ON note_invite_links(token_hash);
+
 CREATE TABLE IF NOT EXISTS email_aliases (
   alias            TEXT PRIMARY KEY,
   account_id       TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -141,13 +156,14 @@ CREATE TABLE IF NOT EXISTS workspace_members (
 );
 
 CREATE TABLE IF NOT EXISTS workspace_invites (
-  token_hash   TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  role         TEXT NOT NULL CHECK(role IN ('editor', 'viewer', 'guest')),
-  expires_at   TEXT NOT NULL,
-  max_uses     INTEGER NOT NULL DEFAULT 0,
-  used_count   INTEGER NOT NULL DEFAULT 0,
-  created_at   TEXT NOT NULL
+  token_hash       TEXT PRIMARY KEY,
+  workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  role             TEXT NOT NULL CHECK(role IN ('editor', 'viewer', 'guest')),
+  require_approval INTEGER NOT NULL DEFAULT 0,
+  expires_at       TEXT NOT NULL,
+  max_uses         INTEGER NOT NULL DEFAULT 0,
+  used_count       INTEGER NOT NULL DEFAULT 0,
+  created_at       TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sso_configs (
@@ -222,3 +238,15 @@ CREATE TABLE IF NOT EXISTS yjs_doc_updates (
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_workspace_note ON yjs_doc_updates(workspace_id, note_id, ts);
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_device ON yjs_doc_updates(workspace_id, note_id, device_id);
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_clock ON yjs_doc_updates(workspace_id, note_id, device_id, clock);
+
+CREATE TABLE IF NOT EXISTS vault_key_params (
+  id                 TEXT PRIMARY KEY,
+  workspace_id       TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  owner_id           TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  passphrase_hash    TEXT NOT NULL,
+  key_params_blob    TEXT NOT NULL,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_key_params_workspace ON vault_key_params(workspace_id);

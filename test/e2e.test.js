@@ -20,6 +20,7 @@ process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
 const { QuickConnectCode, Account, WebAuthnChallenge, Credential } = require('../src/models');
+const { createEmailHash } = require('../src/lib/crypto');
 
 // Mock @simplewebauthn/server so passkey routes work without a browser
 let credCounter = 0;
@@ -367,13 +368,14 @@ test('passkey: register begin stores challenge in SQLite', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
 
-  const emailHash = crypto.randomBytes(16).toString('hex');
+  const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
+  const emailHash = createEmailHash(email);
 
   const res = await app.inject({
     method: 'POST',
     url: '/auth/passkey/register/begin',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash, deviceLabel: 'MacBook' },
+    payload: { email, deviceLabel: 'MacBook' },
   });
 
   assert.equal(res.statusCode, 200);
@@ -390,13 +392,14 @@ test('passkey: register complete creates credential and returns session', async 
   const app = await buildApp();
   t.after(() => app.close());
 
-  const emailHash = crypto.randomBytes(16).toString('hex');
+  const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
+  const emailHash = createEmailHash(email);
 
   const begin = await app.inject({
     method: 'POST',
     url: '/auth/passkey/register/begin',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash, deviceLabel: 'iPhone' },
+    payload: { email, deviceLabel: 'iPhone' },
   });
   assert.equal(begin.statusCode, 200);
 
@@ -404,7 +407,7 @@ test('passkey: register complete creates credential and returns session', async 
     method: 'POST',
     url: '/auth/passkey/register/complete',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash, registrationResponse: { id: 'test' } },
+    payload: { email, registrationResponse: { id: 'test' } },
   });
 
   assert.equal(res.statusCode, 201);
@@ -426,13 +429,13 @@ test('passkey: register complete with missing challenge returns 400', async (t) 
   const app = await buildApp();
   t.after(() => app.close());
 
-  const emailHash = crypto.randomBytes(16).toString('hex');
+  const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
 
   const res = await app.inject({
     method: 'POST',
     url: '/auth/passkey/register/complete',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash, registrationResponse: { id: 'test' } },
+    payload: { email, registrationResponse: { id: 'test' } },
   });
 
   assert.equal(res.statusCode, 400);
@@ -443,13 +446,13 @@ test('passkey: login begin returns options for existing credentials', async (t) 
   const app = await buildApp();
   t.after(() => app.close());
 
-  const emailHash = crypto.randomBytes(16).toString('hex');
+  const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
 
   const begin = await app.inject({
     method: 'POST',
     url: '/auth/passkey/register/begin',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash, deviceLabel: 'Desktop' },
+    payload: { email, deviceLabel: 'Desktop' },
   });
   assert.equal(begin.statusCode, 200);
 
@@ -457,7 +460,7 @@ test('passkey: login begin returns options for existing credentials', async (t) 
     method: 'POST',
     url: '/auth/passkey/register/complete',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash, registrationResponse: {} },
+    payload: { email, registrationResponse: {} },
   });
   assert.equal(complete.statusCode, 201);
 
@@ -465,7 +468,7 @@ test('passkey: login begin returns options for existing credentials', async (t) 
     method: 'POST',
     url: '/auth/passkey/login/begin',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash },
+    payload: { email },
   });
 
   assert.equal(res.statusCode, 200);
@@ -480,13 +483,14 @@ test('passkey: login complete verifies and issues session', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
 
-  const emailHash = crypto.randomBytes(16).toString('hex');
+  const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
+  const emailHash = createEmailHash(email);
 
   const regBegin = await app.inject({
     method: 'POST',
     url: '/auth/passkey/register/begin',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash, deviceLabel: 'Desktop' },
+    payload: { email, deviceLabel: 'Desktop' },
   });
   assert.equal(regBegin.statusCode, 200);
 
@@ -494,10 +498,9 @@ test('passkey: login complete verifies and issues session', async (t) => {
     method: 'POST',
     url: '/auth/passkey/register/complete',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash, registrationResponse: {} },
+    payload: { email, registrationResponse: {} },
   });
   assert.equal(regComplete.statusCode, 201);
-  const userId = regComplete.json().user.id;
 
   const user = await Account.findOne({ emailHmac: emailHash });
   const creds = await Credential.find({ accountId: user.id });
@@ -507,7 +510,7 @@ test('passkey: login complete verifies and issues session', async (t) => {
     method: 'POST',
     url: '/auth/passkey/login/begin',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash },
+    payload: { email },
   });
   assert.equal(begin.statusCode, 200);
 
@@ -515,7 +518,7 @@ test('passkey: login complete verifies and issues session', async (t) => {
     method: 'POST',
     url: '/auth/passkey/login/complete',
     headers: { 'content-type': 'application/json' },
-    payload: { emailHash, authenticationResponse: { id: credentialId } },
+    payload: { email, authenticationResponse: { id: credentialId } },
   });
 
   assert.equal(res.statusCode, 200);

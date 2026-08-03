@@ -8,11 +8,14 @@ const { createEmailHash } = require('../lib/crypto');
 const mlkem = require('../lib/mlkem');
 const { sendWelcomeEmail } = require('../lib/email');
 const { audit } = require('../lib/audit');
+const { isEnterpriseMode } = require('../lib/license');
+const { getQuotaBytes } = require('../lib/plans');
 
 const BCRYPT_ROUNDS = 12;
 const MAX_FAILED_ATTEMPTS = 10;
 const LOCKOUT_MINUTES = 15;
 const AUTH_BODY_LIMIT_BYTES = parseInt(process.env.AUTH_BODY_LIMIT_BYTES ?? '16384', 10);
+const DUMMY_BCRYPT_HASH = '$2b$12$' + 'a'.repeat(53);
 
 const RegisterSchema = z.object({
   email:    z.string().email('Invalid email address').max(254),
@@ -79,13 +82,15 @@ async function authRoutes(app) {
 
     const account = await Account.create({ emailHmac: emailHash, emailEncrypted, passwordHash, kdfSalt });
 
-    const { Subscription } = require('../models');
-    await Subscription.create({ accountId: account.id, plan: 'free', status: 'active', storageQuotaBytes: 0, createdAt: new Date() });
+    const plan = isEnterpriseMode() ? 'enterprise' : 'free';
+    const storageQuotaBytes = isEnterpriseMode() ? getQuotaBytes('enterprise') : 0;
+    await Subscription.create({ accountId: account.id, plan, status: 'active', storageQuotaBytes, createdAt: new Date() });
 
     const token = await createSession(account.id, req);
 
     app.log.info({ userId: account.id }, 'New account registered');
     sendWelcomeEmail(app, account.id);
+    req.userId = account.id;
     audit(req, 'register', {});
 
     setSessionCookieIfAvailable(app, reply, token);
@@ -127,7 +132,7 @@ async function authRoutes(app) {
     };
 
     if (!account) {
-      await bcrypt.compare(password, '$2b$12$invalidhashpaddingtomakeittakesametime');
+      await bcrypt.compare(password, DUMMY_BCRYPT_HASH);
       app.recordSecurityEvent(req, 'login_failure', { reason: 'unknown_account', emailDomain: email.split('@')[1] ?? null });
       return reply.status(401).send(genericError);
     }
@@ -168,12 +173,22 @@ async function authRoutes(app) {
     );
 
     const token = await createSession(account.id, req);
+    req.userId = account.id;
     audit(req, 'login', { method: 'password' });
 
-    const subscription = await Subscription.findOne(
+    let subscription = await Subscription.findOne(
       { accountId: account.id },
       { plan: 1, status: 1, renewsAt: 1, storageUsedBytes: 1, storageQuotaBytes: 1 }
     ).lean();
+
+    if (isEnterpriseMode()) {
+      if (!subscription) {
+        subscription = { plan: 'enterprise', status: 'active', renewsAt: null, storageUsedBytes: 0, storageQuotaBytes: getQuotaBytes('enterprise') };
+      } else {
+        subscription.plan = 'enterprise';
+        subscription.storageQuotaBytes = getQuotaBytes('enterprise');
+      }
+    }
 
     setSessionCookieIfAvailable(app, reply, token);
     return reply.send({
@@ -198,6 +213,17 @@ async function authRoutes(app) {
       },
     },
   }, async (req, reply) => {
+    const internalSecret = process.env.INTERNAL_API_SECRET;
+    if (internalSecret) {
+      const providedSecret = req.headers['x-internal-secret'];
+      if (!providedSecret || providedSecret !== internalSecret) {
+        return reply.status(403).send({
+          error: 'forbidden',
+          message: 'Internal API access denied.',
+        });
+      }
+    }
+
     const { token, workspaceId } = req.body ?? {};
     if (!token || typeof token !== 'string' || token.length < 32) {
       return reply.status(400).send({
@@ -318,6 +344,49 @@ async function authRoutes(app) {
 
     app.recordSecurityEvent(req, 'session_revoked', { targetSession: sessionIdHash });
     return reply.send({ revoked: true });
+  });
+
+  app.post('/sessions/revoke-all', {
+    preHandler: [app.authenticate],
+    config: {
+      security: {
+        allowedContentTypes: ['application/json'],
+      },
+      rateLimit: {
+        max: parseInt(process.env.SESSION_REVOKE_ALL_RATE_LIMIT_PER_MINUTE ?? '3', 10),
+        timeWindow: '1 minute',
+      },
+    },
+    bodyLimit: parseInt(process.env.SESSION_REVOKE_ALL_BODY_LIMIT_BYTES ?? '8192', 10),
+  }, async (req, reply) => {
+    const { keepCurrent = true, currentSessionId = null } = req.body || {};
+    let keepIdHash = null;
+
+    if (keepCurrent) {
+      const authHeader = req.headers['authorization'];
+      const rawId = authHeader && authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7)
+        : req.cookies?.bsession || null;
+
+      if (rawId) {
+        const { hashSessionId } = require('../lib/crypto');
+        keepIdHash = hashSessionId(rawId);
+      } else if (currentSessionId) {
+        keepIdHash = currentSessionId;
+      }
+    }
+
+    const filter = { accountId: req.userId, revoked: false };
+    if (keepIdHash) {
+      filter.idHash = { $ne: keepIdHash };
+    }
+
+    const result = await Session.updateMany(filter, { $set: { revoked: true } });
+
+    const revoked = Number(result?.modifiedCount ?? result?.changes ?? 0);
+
+    app.recordSecurityEvent(req, 'sessions_revoked_all', { revoked, keepCurrent: !!keepIdHash });
+    return reply.send({ revoked, keepCurrent: !!keepIdHash });
   });
 }
 

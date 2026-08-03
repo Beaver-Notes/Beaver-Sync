@@ -2,10 +2,18 @@
 
 const crypto = require('crypto');
 const { z } = require('zod');
-const { Account, CollaborationKey, NoteInvitation } = require('../models');
+const { Account, CollaborationKey, NoteInvitation, NoteInviteLink } = require('../models');
 const mlkem = require('../lib/mlkem');
 
 const BODY_LIMIT = parseInt(process.env.COLLAB_BODY_LIMIT_BYTES ?? '4096', 10);
+
+function generateToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
 
 const NoteIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9-]+$/);
 
@@ -186,6 +194,114 @@ async function collaborationRoutes(app) {
     app.log.info({ noteId, removedUser: targetUserId, byUser: req.userId }, 'Invitation removed');
 
     return reply.send({ deleted: true, noteId, userId: targetUserId });
+  });
+
+  // Generate invite link for a note
+  app.post('/links/:noteId', { preHandler: [app.authenticate] }, async (req, reply) => {
+    const { noteId } = req.params;
+    const { role = 'editor', requireApproval = false, expiresIn } = req.body;
+
+    if (!['editor', 'viewer'].includes(role)) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Role must be editor or viewer.' });
+    }
+
+    // Verify user is owner/editor of the note
+    const membership = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
+    if (!membership || membership.role !== 'editor') {
+      return reply.status(403).send({ error: 'forbidden', message: 'Only editors can create invite links.' });
+    }
+
+    const rawToken = generateToken();
+    const tokenHash = hashToken(rawToken);
+
+    let expiresAt = null;
+    if (expiresIn) {
+      const ms = parseInt(expiresIn, 10);
+      if (Number.isFinite(ms) && ms > 0) {
+        expiresAt = new Date(Date.now() + ms).toISOString();
+      }
+    }
+
+    const link = await NoteInviteLink.create({
+      noteId,
+      createdBy: req.userId,
+      tokenHash,
+      role,
+      requireApproval: requireApproval ? 1 : 0,
+      expiresAt,
+    });
+
+    return reply.status(201).send({
+      id: link.id,
+      token: rawToken,
+      role,
+      requireApproval: requireApproval,
+      expiresAt,
+      createdAt: link.createdAt,
+    });
+  });
+
+  // List invite links for a note
+  app.get('/links/:noteId', { preHandler: [app.authenticate] }, async (req, reply) => {
+    const { noteId } = req.params;
+
+    const links = await NoteInviteLink.find({
+      noteId,
+      createdBy: req.userId,
+      revoked: 0,
+    }).sort({ createdAt: -1 }).lean();
+
+    return reply.send({ links });
+  });
+
+  // Revoke an invite link
+  app.delete('/links/:noteId/:linkId', { preHandler: [app.authenticate] }, async (req, reply) => {
+    const { noteId, linkId } = req.params;
+
+    const link = await NoteInviteLink.findOne({ id: linkId, noteId, createdBy: req.userId }).lean();
+    if (!link) {
+      return reply.status(404).send({ error: 'not_found', message: 'Link not found.' });
+    }
+
+    await NoteInviteLink.updateOne({ id: linkId }, { $set: { revoked: 1 } });
+
+    return reply.send({ success: true });
+  });
+
+  // Join a note via invite link
+  app.post('/join/:token', { preHandler: [app.authenticate] }, async (req, reply) => {
+    const { token } = req.params;
+    const tokenHash = hashToken(token);
+
+    const link = await NoteInviteLink.findOne({ tokenHash, revoked: 0 }).lean();
+    if (!link) {
+      return reply.status(404).send({ error: 'not_found', message: 'Invalid or revoked invite link.' });
+    }
+
+    // Check expiry
+    if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
+      return reply.status(410).send({ error: 'expired', message: 'This invite link has expired.' });
+    }
+
+    // Check if already a member
+    const existing = await NoteInvitation.findOne({ noteId: link.noteId, userId: req.userId }).lean();
+    if (existing) {
+      return reply.send({ success: true, message: 'Already a member.', role: existing.role });
+    }
+
+    // Add as collaborator
+    await NoteInvitation.create({
+      noteId: link.noteId,
+      userId: req.userId,
+      invitedBy: link.createdBy,
+      role: link.role,
+    });
+
+    return reply.status(201).send({
+      success: true,
+      noteId: link.noteId,
+      role: link.role,
+    });
   });
 }
 

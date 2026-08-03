@@ -53,6 +53,10 @@ require.cache[swaPath] = {
 
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
+const { createEmailHash } = require('../src/lib/crypto');
+
+const TEST_EMAIL = 'hash1@example.com';
+const TEST_EMAIL_HASH = createEmailHash(TEST_EMAIL);
 
 const originalMethods = {
   Account: {
@@ -130,13 +134,13 @@ test('passkey registration begin returns options and stores challenge', async (t
     method: 'POST',
     url: '/auth/passkey/register/begin',
     headers: { 'content-type': 'application/json' },
-    payload: JSON.stringify({ emailHash: 'hash1', deviceLabel: 'MacBook' }),
+    payload: JSON.stringify({ email: TEST_EMAIL, deviceLabel: 'MacBook' }),
   });
 
   assert.equal(response.statusCode, 200);
   const body = response.json();
   assert.equal(body.challenge, 'test-challenge-1');
-  assert.equal(challengeStored.emailHmac, 'hash1');
+  assert.equal(challengeStored.emailHmac, TEST_EMAIL_HASH);
   assert.ok(challengeStored.expiresAt > new Date());
 });
 
@@ -145,7 +149,7 @@ test('passkey registration complete verifies and creates credential', async (t) 
   t.after(() => app.close());
 
   models.WebAuthnChallenge.findOneAndDelete = async () => ({ challenge: 'test-challenge-1' });
-  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: 'hash1', kdfSalt: 'salt1' });
+  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: TEST_EMAIL_HASH, kdfSalt: 'salt1' });
   let credentialCreated = null;
   models.Credential.create = async (data) => { credentialCreated = data; return { id: 'c1' }; };
 
@@ -153,13 +157,13 @@ test('passkey registration complete verifies and creates credential', async (t) 
     method: 'POST',
     url: '/auth/passkey/register/complete',
     headers: { 'content-type': 'application/json' },
-    payload: JSON.stringify({ emailHash: 'hash1', registrationResponse: {} }),
+    payload: JSON.stringify({ email: TEST_EMAIL, registrationResponse: {} }),
   });
 
   assert.equal(response.statusCode, 201);
   const body = response.json();
   assert.ok(body.sessionToken);
-  assert.equal(body.user.emailHash, 'hash1');
+  assert.equal(body.user.emailHash, TEST_EMAIL_HASH);
   assert.equal(credentialCreated.accountId, '507f1f77bcf86cd799439011');
   assert.equal(credentialCreated.credentialId, 'cred-1');
 });
@@ -169,7 +173,7 @@ test('passkey login begin returns options for existing credentials', async (t) =
   t.after(() => app.close());
 
   swaImpl.generateAuthenticationOptions = async ({ allowCredentials }) => ({ challenge: 'test-challenge-2', allowCredentials });
-  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: 'hash1' });
+  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: TEST_EMAIL_HASH });
   models.Credential.find = () => chain([{ credentialId: 'cred-1' }]);
   let challengeStored = null;
   models.WebAuthnChallenge.create = async (data) => { challengeStored = data; return { id: 'c2' }; };
@@ -178,13 +182,13 @@ test('passkey login begin returns options for existing credentials', async (t) =
     method: 'POST',
     url: '/auth/passkey/login/begin',
     headers: { 'content-type': 'application/json' },
-    payload: JSON.stringify({ emailHash: 'hash1' }),
+    payload: JSON.stringify({ email: TEST_EMAIL }),
   });
 
   assert.equal(response.statusCode, 200);
   const body = response.json();
   assert.equal(body.challenge, 'test-challenge-2');
-  assert.equal(challengeStored.emailHmac, 'hash1');
+  assert.equal(challengeStored.emailHmac, TEST_EMAIL_HASH);
 });
 
 test('passkey login complete verifies and issues session', async (t) => {
@@ -197,7 +201,7 @@ test('passkey login complete verifies and issues session', async (t) => {
   });
 
   models.WebAuthnChallenge.findOneAndDelete = async () => ({ challenge: 'test-challenge-2' });
-  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: 'hash1' });
+  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: TEST_EMAIL_HASH });
 
   let signCountUpdated = null;
   models.Credential.findOne = async () => ({
@@ -213,13 +217,13 @@ test('passkey login complete verifies and issues session', async (t) => {
     method: 'POST',
     url: '/auth/passkey/login/complete',
     headers: { 'content-type': 'application/json' },
-    payload: JSON.stringify({ emailHash: 'hash1', authenticationResponse: { id: 'cred-1' } }),
+    payload: JSON.stringify({ email: TEST_EMAIL, authenticationResponse: { id: 'cred-1' } }),
   });
 
   assert.equal(response.statusCode, 200);
   const body = response.json();
   assert.ok(body.sessionToken);
-  assert.equal(body.user.emailHash, 'hash1');
+  assert.equal(body.user.emailHash, TEST_EMAIL_HASH);
   assert.equal(signCountUpdated, 1);
 });
 
@@ -233,7 +237,7 @@ test('passkey login rejects replay attack with non-increasing counter', async (t
   });
 
   models.WebAuthnChallenge.findOneAndDelete = async () => ({ challenge: 'test-challenge-2' });
-  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: 'hash1' });
+  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: TEST_EMAIL_HASH });
   models.Credential.findOne = async () => ({
     id: 'cred-1',
     accountId: '507f1f77bcf86cd799439011',
@@ -247,7 +251,7 @@ test('passkey login rejects replay attack with non-increasing counter', async (t
     method: 'POST',
     url: '/auth/passkey/login/complete',
     headers: { 'content-type': 'application/json' },
-    payload: JSON.stringify({ emailHash: 'hash1', authenticationResponse: { id: 'cred-1' } }),
+    payload: JSON.stringify({ email: TEST_EMAIL, authenticationResponse: { id: 'cred-1' } }),
   });
 
   assert.equal(response.statusCode, 401);
@@ -265,10 +269,26 @@ test('passkey registration rejects expired challenge', async (t) => {
     method: 'POST',
     url: '/auth/passkey/register/complete',
     headers: { 'content-type': 'application/json' },
-    payload: JSON.stringify({ emailHash: 'hash1', registrationResponse: {} }),
+    payload: JSON.stringify({ email: TEST_EMAIL, registrationResponse: {} }),
   });
 
   assert.equal(response.statusCode, 400);
   const body = response.json();
   assert.equal(body.error, 'challenge_expired');
+});
+
+test('passkey endpoints reject invalid email format', async (t) => {
+  const app = await makeApp();
+  t.after(() => app.close());
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/auth/passkey/login/begin',
+    headers: { 'content-type': 'application/json' },
+    payload: JSON.stringify({ email: 'not-an-email' }),
+  });
+
+  assert.equal(response.statusCode, 400);
+  const body = response.json();
+  assert.equal(body.error, 'validation_error');
 });
