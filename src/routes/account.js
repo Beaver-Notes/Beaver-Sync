@@ -252,6 +252,24 @@ async function accountRoutes(app) {
     const db = getDb();
     const deleteTx = db.transaction(() => {
       db.prepare(`DELETE FROM audit_logs WHERE account_id_hash = ?`).run(accountIdHash);
+
+      // Remove org memberships
+      db.prepare(`DELETE FROM org_members WHERE account_id = ?`).run(req.userId);
+
+      // Remove org subscriptions for orgs owned by this account
+      db.prepare(`DELETE FROM org_subscriptions WHERE org_id IN (
+        SELECT id FROM organizations WHERE owner_id = ?
+      )`).run(req.userId);
+
+      // Remove workspaces for orgs owned by this account
+      db.prepare(`DELETE FROM workspaces WHERE org_id IN (
+        SELECT id FROM organizations WHERE owner_id = ?
+      )`).run(req.userId);
+
+      // Remove organizations owned by this account
+      db.prepare(`DELETE FROM organizations WHERE owner_id = ?`).run(req.userId);
+
+      // Remove the account itself
       db.prepare(`DELETE FROM accounts WHERE id = ?`).run(req.userId);
     });
     deleteTx();
