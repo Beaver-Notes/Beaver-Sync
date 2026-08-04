@@ -22,6 +22,44 @@ function runMigrations() {
   if (!columnExists('sso_configs', 'allowed_email_domains')) {
     db.exec('ALTER TABLE sso_configs ADD COLUMN allowed_email_domains TEXT');
   }
+
+  // Run file-based migrations from src/db/migrations/
+  runFileMigrations();
+}
+
+function runFileMigrations() {
+  const migrationsDir = path.join(__dirname, 'migrations');
+  if (!fs.existsSync(migrationsDir)) return;
+
+  // Ensure migrations tracking table exists
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+
+  const applied = new Set(
+    db.prepare('SELECT filename FROM _migrations').all().map(r => r.filename)
+  );
+
+  const files = fs.readdirSync(migrationsDir)
+    .filter(f => f.endsWith('.sql'))
+    .sort();
+
+  for (const file of files) {
+    if (applied.has(file)) continue;
+
+    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+    try {
+      db.exec(sql);
+      db.prepare('INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)').run(file, new Date().toISOString());
+      console.log(`[db] Applied migration: ${file}`);
+    } catch (err) {
+      // Ignore "duplicate column" errors from idempotent migrations
+      if (err.message && err.message.includes('duplicate column')) {
+        db.prepare('INSERT INTO _migrations (filename, applied_at) VALUES (?, ?)').run(file, new Date().toISOString());
+        console.log(`[db] Skipped migration (columns already exist): ${file}`);
+      } else {
+        throw err;
+      }
+    }
+  }
 }
 
 function getDb() {
