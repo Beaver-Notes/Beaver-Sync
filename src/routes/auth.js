@@ -2,7 +2,7 @@
 
 const bcrypt = require('bcrypt');
 const { z }  = require('zod');
-const { Account, Subscription, Session } = require('../models');
+const { Account, Subscription, Session, Workspace, WorkspaceMember, Organization, OrgMember, OrgSubscription } = require('../models');
 const { createSession, validateSession, setSessionCookieIfAvailable } = require('../middleware/auth');
 const { createEmailHash } = require('../lib/crypto');
 const mlkem = require('../lib/mlkem');
@@ -86,6 +86,19 @@ async function authRoutes(app) {
     const storageQuotaBytes = isEnterpriseMode() ? getQuotaBytes('enterprise') : 0;
     await Subscription.create({ accountId: account.id, plan, status: 'active', storageQuotaBytes, createdAt: new Date() });
 
+    // Create personal org
+    const orgId = require('crypto').randomUUID();
+    const orgName = account.username || email.split('@')[0];
+    const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
+    await Organization.create({ id: orgId, nameEncrypted: orgName, slug, createdAt: new Date() });
+    await OrgMember.create({ orgId, accountId: account.id, role: 'owner', createdAt: new Date() });
+    await OrgSubscription.create({ id: require('crypto').randomUUID(), orgId, plan, status: 'active', seats: 1, storageQuotaBytes, createdAt: new Date() });
+
+    // Create default workspace in personal org
+    const defaultWorkspace = await Workspace.create({ nameEncrypted: 'Default', ownerId: account.id, orgId, createdAt: new Date() });
+    await WorkspaceMember.create({ workspaceId: defaultWorkspace.id, accountId: account.id, role: 'owner', createdAt: new Date() });
+
     const token = await createSession(account.id, req);
 
     app.log.info({ userId: account.id }, 'New account registered');
@@ -100,6 +113,16 @@ async function authRoutes(app) {
         id:    account.id,
         emailHash: account.emailHmac,
         kdfSalt: account.kdfSalt,
+      },
+      organization: {
+        id: orgId,
+        name: orgName,
+        role: 'owner',
+      },
+      workspace: {
+        id: defaultWorkspace.id,
+        name: 'Default',
+        role: 'owner',
       },
     });
   });
