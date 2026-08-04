@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const archiver = require('archiver');
 
-const { Account, Subscription, Device } = require('../models');
+const { Account, Subscription, Device, Organization, OrgMember, OrgSubscription, Workspace } = require('../models');
 const { getDb } = require('../db');
 const mlkem = require('../lib/mlkem');
 const r2 = require('../services/r2');
@@ -33,14 +33,50 @@ async function accountRoutes(app) {
       },
     },
   }, async (req, reply) => {
-    const [account, subscription, devices] = await Promise.all([
+    const [account, subscription, devices, memberships] = await Promise.all([
       Account.findById(req.userId, { username: 1, emailHmac: 1, emailEncrypted: 1, createdAt: 1 }).lean(),
       Subscription.findOne({ accountId: req.userId }).lean(),
       Device.find({ accountId: req.userId }).sort({ lastSeen: -1 }).lean(),
+      OrgMember.find({ account_id: req.userId }).lean(),
     ]);
 
     if (!account) {
       return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
+    }
+
+    // Get orgs with subscriptions and workspaces
+    const orgIds = memberships.map(m => m.org_id);
+    let organizations = [];
+    if (orgIds.length > 0) {
+      const [orgs, orgSubs, allWorkspaces] = await Promise.all([
+        Organization.find({ _id: { $in: orgIds } }).lean(),
+        OrgSubscription.find({ org_id: { $in: orgIds } }).lean(),
+        Workspace.find({ org_id: { $in: orgIds } }).lean(),
+      ]);
+
+      organizations = orgs.map(org => {
+        const membership = memberships.find(m => m.org_id === org.id);
+        const orgSub = orgSubs.find(s => s.org_id === org.id);
+        const workspaces = allWorkspaces.filter(ws => ws.org_id === org.id);
+
+        return {
+          id: org.id,
+          name: org.name_encrypted,
+          slug: org.slug,
+          role: membership.role,
+          subscription: orgSub ? {
+            plan: orgSub.plan,
+            status: orgSub.status,
+            seats: orgSub.seats,
+          } : null,
+          workspaces: workspaces.map(ws => ({
+            id: ws.id,
+            name: ws.name_encrypted,
+            emoji: ws.emoji,
+            color: ws.color,
+          })),
+        };
+      });
     }
 
     if (isEnterpriseMode()) {
@@ -73,6 +109,7 @@ async function accountRoutes(app) {
         email,
         createdAt: account.createdAt,
       },
+      organizations,
       subscription: subscription
         ? {
             plan:         subscription.plan,
