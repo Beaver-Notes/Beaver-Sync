@@ -62,7 +62,7 @@ async function organizationRoutes(app) {
   });
 
   // Get organization details
-  app.get('/:id', protect, { preHandler: [requireOrgMember] }, async (req, reply) => {
+  app.get('/:id', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
     const org = await Organization.findById(req.orgId).lean();
     if (!org) return reply.status(404).send({ error: 'not_found' });
 
@@ -89,7 +89,7 @@ async function organizationRoutes(app) {
   });
 
   // Update organization
-  app.patch('/:id', protect, { preHandler: [requireOrgAdmin] }, async (req, reply) => {
+  app.patch('/:id', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
     const { name } = req.body || {};
     if (name) {
       await Organization.updateOne({ _id: req.orgId }, { $set: { name_encrypted: name.trim() } });
@@ -98,7 +98,7 @@ async function organizationRoutes(app) {
   });
 
   // Delete organization
-  app.delete('/:id', protect, { preHandler: [requireOrgOwner] }, async (req, reply) => {
+  app.delete('/:id', { preHandler: [app.authenticate, requireOrgOwner] }, async (req, reply) => {
     const workspaces = await Workspace.find({ org_id: req.orgId }).lean();
     if (workspaces.length > 0) {
       return reply.status(400).send({
@@ -115,7 +115,7 @@ async function organizationRoutes(app) {
   });
 
   // List members
-  app.get('/:id/members', protect, { preHandler: [requireOrgMember] }, async (req, reply) => {
+  app.get('/:id/members', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
     const members = await OrgMember.find({ org_id: req.orgId }).lean();
     return reply.send(members.map(m => ({
       accountId: m.account_id,
@@ -125,7 +125,7 @@ async function organizationRoutes(app) {
   });
 
   // Add member
-  app.post('/:id/members', protect, { preHandler: [requireOrgAdmin] }, async (req, reply) => {
+  app.post('/:id/members', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
     const { accountId, role = 'member' } = req.body || {};
     if (!accountId) {
       return reply.status(400).send({ error: 'account_id_required' });
@@ -141,7 +141,7 @@ async function organizationRoutes(app) {
   });
 
   // Update member role
-  app.patch('/:id/members/:uid', protect, { preHandler: [requireOrgOwner] }, async (req, reply) => {
+  app.patch('/:id/members/:uid', { preHandler: [app.authenticate, requireOrgOwner] }, async (req, reply) => {
     const { role } = req.body || {};
     if (!['admin', 'member'].includes(role)) {
       return reply.status(400).send({ error: 'invalid_role' });
@@ -155,7 +155,7 @@ async function organizationRoutes(app) {
   });
 
   // Remove member
-  app.delete('/:id/members/:uid', protect, { preHandler: [requireOrgAdmin] }, async (req, reply) => {
+  app.delete('/:id/members/:uid', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
     if (req.params.uid === req.userId) {
       return reply.status(400).send({ error: 'cannot_remove_self' });
     }
@@ -165,7 +165,7 @@ async function organizationRoutes(app) {
   });
 
   // Leave organization
-  app.post('/:id/leave', protect, { preHandler: [requireOrgMember] }, async (req, reply) => {
+  app.post('/:id/leave', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
     if (req.orgRole === 'owner') {
       return reply.status(400).send({ error: 'owner_cannot_leave' });
     }
@@ -175,7 +175,7 @@ async function organizationRoutes(app) {
   });
 
   // Get subscription
-  app.get('/:id/subscription', protect, { preHandler: [requireOrgMember] }, async (req, reply) => {
+  app.get('/:id/subscription', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
     const sub = await OrgSubscription.findOne({ org_id: req.orgId }).lean();
     if (!sub) return reply.status(404).send({ error: 'not_found' });
     return reply.send({
@@ -188,7 +188,7 @@ async function organizationRoutes(app) {
   });
 
   // Update subscription
-  app.patch('/:id/subscription', protect, { preHandler: [requireOrgOwner] }, async (req, reply) => {
+  app.patch('/:id/subscription', { preHandler: [app.authenticate, requireOrgOwner] }, async (req, reply) => {
     const { plan, seats } = req.body || {};
     const update = {};
     if (plan) update.plan = plan;
