@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session } = require('../models');
+const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember } = require('../models');
 const mlkem = require('../lib/mlkem');
 const { audit } = require('../lib/audit');
 
@@ -48,13 +48,23 @@ async function workspaceRoutes(app) {
     ...rateLimit,
     ...protect,
   }, async (req, reply) => {
-    const { name } = req.body ?? {};
+    const { name, orgId } = req.body ?? {};
     if (!name || typeof name !== 'string' || !WS_NAME_REGEX.test(name)) {
       return reply.status(400).send({ error: 'validation_error', message: 'Workspace name is required (max 256 chars).' });
     }
 
+    if (!orgId) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Organization ID is required.' });
+    }
+
+    // Verify user is member of the org
+    const membership = await OrgMember.findOne({ org_id: orgId, account_id: req.userId }).lean();
+    if (!membership) {
+      return reply.status(403).send({ error: 'not_org_member' });
+    }
+
     const nameEncrypted = await mlkem.encryptMetadata(name);
-    const workspace = await Workspace.create({ nameEncrypted, ownerId: req.userId, createdAt: new Date() });
+    const workspace = await Workspace.create({ nameEncrypted, ownerId: req.userId, orgId, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: workspace.id, accountId: req.userId, role: 'owner', createdAt: new Date() });
 
     app.log.info({ workspaceId: workspace.id, userId: req.userId }, 'Workspace created');
@@ -75,7 +85,7 @@ async function workspaceRoutes(app) {
     for (const m of memberships) roleMap[m.workspaceId] = m.role;
 
     const wsDocs = await Workspace
-      .find({ _id: { $in: workspaceIds } }, { nameEncrypted: 1, ownerId: 1, storageUsedBytes: 1, createdAt: 1 })
+      .find({ _id: { $in: workspaceIds } }, { nameEncrypted: 1, ownerId: 1, orgId: 1, emoji: 1, color: 1, storageUsedBytes: 1, createdAt: 1 })
       .lean();
 
     const workspaces = [];
@@ -86,6 +96,9 @@ async function workspaceRoutes(app) {
       workspaces.push({
         id: ws.id,
         name,
+        orgId: ws.org_id,
+        emoji: ws.emoji,
+        color: ws.color,
         role: roleMap[ws.id],
         ownerId: ws.ownerId,
         storageUsedBytes: ws.storageUsedBytes,
@@ -94,6 +107,33 @@ async function workspaceRoutes(app) {
     }
 
     return reply.send({ workspaces });
+  });
+
+  app.delete('/:id', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const workspaceId = req.params.id;
+
+    const workspace = await Workspace.findById(workspaceId).lean();
+    if (!workspace) {
+      return reply.status(404).send({ error: 'not_found' });
+    }
+
+    // Check user is owner
+    const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId, role: 'owner' }).lean();
+    if (!membership) {
+      return reply.status(403).send({ error: 'not_workspace_owner' });
+    }
+
+    await WorkspaceMember.deleteMany({ workspace_id: workspaceId });
+    await WorkspaceInvite.deleteMany({ workspace_id: workspaceId });
+    await Workspace.deleteOne({ _id: workspaceId });
+
+    app.log.info({ workspaceId, userId: req.userId }, 'Workspace deleted');
+    audit(req, 'workspace_deleted', { workspaceId });
+
+    return reply.send({ deleted: true });
   });
 
   app.post('/:id/members', {
