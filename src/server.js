@@ -145,6 +145,7 @@ async function buildApp() {
   await app.register(require('./routes/email'),      { prefix: '' });
   await app.register(require('./routes/collaboration'), { prefix: '/collaboration' });
   await app.register(require('./routes/workspaces'),   { prefix: '/workspaces' });
+  await app.register(require('./routes/organizations'), { prefix: '/organizations' });
   await app.register(require('./routes/vault'),         { prefix: '/vault' });
   await app.register(require('./routes/yjs-sync'),     { prefix: '/yjs' });
   await app.register(require('./routes/audit'),       { prefix: '/audit' });
