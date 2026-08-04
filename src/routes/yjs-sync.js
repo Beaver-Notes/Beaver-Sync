@@ -1,17 +1,18 @@
 'use strict';
 
 const { z } = require('zod');
-const r2 = require('../services/r2');
-const { Device, Workspace, Subscription } = require('../models');
+const persistence = require('../persistence/yjs');
+const { Device, Workspace, OrgSubscription } = require('../models');
 const { audit } = require('../lib/audit');
 
-const YJS_KEY_PATTERN = /^[a-zA-Z0-9._~=-]{1,512}$/;
 const MAX_UPDATES_PER_PUSH = 200;
 const MAX_UPDATES_PER_PULL = 500;
 const MAX_BODY_BYTES = parseInt(process.env.YJS_SYNC_BODY_LIMIT_BYTES ?? '10485760', 10);
 const DEVICE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 
 const PushSchema = z.object({
+  workspaceId: z.string().min(1),
+  noteId: z.string().min(1),
   updates: z.array(z.object({
     key: z.string().max(512),
     data: z.string().max(10485760),
@@ -19,6 +20,8 @@ const PushSchema = z.object({
 });
 
 const PullSchema = z.object({
+  workspaceId: z.string().min(1),
+  noteId: z.string().min(1),
   after: z.record(z.string(), z.object({
     ts: z.number().int().min(0),
     seq: z.number().int().min(0),
@@ -26,6 +29,8 @@ const PullSchema = z.object({
 });
 
 const DeleteSchema = z.object({
+  workspaceId: z.string().min(1),
+  noteId: z.string().min(1),
   keys: z.array(z.string().max(512)).min(1).max(500),
 });
 
@@ -41,7 +46,7 @@ async function yjsSyncRoutes(app) {
     preHandler: [app.authenticate, app.requireActiveSync, app.requirePaidWrite, app.checkStorageQuota],
   };
 
-  // ── POST /yjs/push — Upload encrypted Yjs updates ─────────────────────
+  // POST /yjs/push — Store Yjs updates in SQLite
   app.post('/push', {
     ...protectWrite,
     bodyLimit: MAX_BODY_BYTES,
@@ -72,47 +77,39 @@ async function yjsSyncRoutes(app) {
       });
     }
 
-    const { updates } = parsed.data;
+    const { workspaceId, noteId, updates } = parsed.data;
+
+    // Verify workspace access
+    const workspace = await Workspace.findById(workspaceId).lean();
+    if (!workspace) {
+      return reply.status(404).send({ error: 'workspace_not_found' });
+    }
+
+    // Store each update in SQLite
     let stored = 0;
-    let skipped = 0;
     let sizeBytes = 0;
 
     for (const { key, data } of updates) {
-      if (!YJS_KEY_PATTERN.test(key)) {
-        skipped++;
-        continue;
-      }
-
-      const r2Key = r2.yjsKey(req.userId, key);
       const buffer = Buffer.from(data, 'base64');
+      const keyParts = key.split('.');
+      const ts = parseInt(keyParts[keyParts.length - 2]) || Date.now();
+      const seq = parseInt(keyParts[keyParts.length - 1]) || 0;
 
-      try {
-        await r2.put(r2Key, buffer, 'application/octet-stream', { ifNoneMatch: '*' });
-        stored++;
-        sizeBytes += buffer.byteLength;
-      } catch (err) {
-        if (err.$metadata?.httpStatusCode === 412) {
-          skipped++;
-        } else {
-          throw err;
-        }
-      }
+      await persistence.storeUpdate(workspaceId, noteId, buffer, deviceId, seq, false);
+      stored++;
+      sizeBytes += buffer.byteLength;
     }
 
-    if (sizeBytes > 0) {
-      if (req.workspaceId) {
-        await Workspace.updateOne(
-          { _id: req.workspaceId },
-          { $inc: { storageUsedBytes: sizeBytes } }
-        );
-      } else {
-        await Subscription.updateOne(
-          { accountId: req.userId },
-          { $inc: { storageUsedBytes: sizeBytes } }
-        );
-      }
+    // Update storage quota
+    const subscription = await OrgSubscription.findOne({ org_id: workspace.org_id }).lean();
+    if (subscription && sizeBytes > 0) {
+      await OrgSubscription.updateOne(
+        { org_id: workspace.org_id },
+        { $inc: { storage_used_bytes: sizeBytes } }
+      );
     }
 
+    // Track device
     const deviceLabel = String(req.headers['x-device-label'] ?? 'Unknown Device').slice(0, 128);
     await Device.findOneAndUpdate(
       { accountId: req.userId, deviceId },
@@ -120,12 +117,12 @@ async function yjsSyncRoutes(app) {
       { upsert: true, new: true }
     );
 
-    audit(req, 'yjs_push', { stored, skipped, deviceId });
+    audit(req, 'yjs_push', { stored, deviceId, workspaceId, noteId });
 
-    return reply.status(201).send({ stored, skipped, sizeBytes });
+    return reply.status(201).send({ stored, sizeBytes });
   });
 
-  // ── POST /yjs/pull — Fetch updates since cursor ────────────────────────
+  // POST /yjs/pull — Fetch updates from SQLite
   app.post('/pull', {
     ...protect,
     bodyLimit: 4096,
@@ -148,49 +145,35 @@ async function yjsSyncRoutes(app) {
       });
     }
 
-    const { after: cursors } = parsed.data;
-    const prefix = `${req.userId}/yjs/`;
+    const { workspaceId, noteId, after: cursors } = parsed.data;
 
-    let allKeys;
-    try {
-      allKeys = await r2.listKeys(prefix);
-    } catch {
-      return reply.send({ updates: [] });
-    }
+    // Find minimum timestamp across all cursors
+    const minTs = Object.values(cursors).reduce((min, cursor) =>
+      Math.min(min, cursor.ts), Infinity);
+    const effectiveMinTs = minTs === Infinity ? 0 : minTs;
 
-    const updates = [];
-    for (const fullKey of allKeys) {
-      if (updates.length >= MAX_UPDATES_PER_PULL) break;
+    // Get updates from SQLite
+    const updates = await persistence.loadUpdatesSince(workspaceId, noteId, effectiveMinTs);
 
-      const fileName = fullKey.slice(prefix.length);
-      if (!fileName) continue;
+    // Filter out updates already seen by each device
+    const filtered = updates.filter(update => {
+      const cursor = cursors[update.deviceId];
+      if (!cursor) return true;
+      if (update.ts > cursor.ts) return true;
+      if (update.ts === cursor.ts && update.clock > cursor.seq) return true;
+      return false;
+    }).slice(0, MAX_UPDATES_PER_PULL);
 
-      const parsed = parseYjsFileName(fileName);
-      if (!parsed) continue;
+    // Format response
+    const result = filtered.map(update => ({
+      key: `${update.deviceId}.${noteId}.${update.ts}.${update.clock}`,
+      data: update.data.toString('base64'),
+    }));
 
-      const { device, ts, seq } = parsed;
-      const seen = cursors[device];
-      if (seen) {
-        if (ts < seen.ts) continue;
-        if (ts === seen.ts && seq <= seen.seq) continue;
-      }
-
-      try {
-        const blob = await r2.get(fullKey);
-        if (!blob) continue;
-        updates.push({
-          key: fileName,
-          data: blob.toString('base64'),
-        });
-      } catch {
-        continue;
-      }
-    }
-
-    return reply.send({ updates });
+    return reply.send({ updates: result });
   });
 
-  // ── DELETE /yjs/updates — Delete compacted updates ─────────────────────
+  // DELETE /yjs/updates — Delete updates for a note
   app.delete('/updates', {
     ...protect,
     bodyLimit: 4096,
@@ -213,62 +196,12 @@ async function yjsSyncRoutes(app) {
       });
     }
 
-    const { keys } = parsed.data;
-    const r2Keys = keys
-      .filter((k) => YJS_KEY_PATTERN.test(k))
-      .map((k) => r2.yjsKey(req.userId, k));
+    const { workspaceId, noteId } = parsed.data;
 
-    if (r2Keys.length > 0) {
-      await r2.delMany(r2Keys);
-    }
+    await persistence.deleteUpdatesForNote(workspaceId, noteId);
 
-    return reply.send({ deleted: r2Keys.length });
+    return reply.send({ deleted: true });
   });
-}
-
-/**
- * Parse a Yjs sync filename back into { docId, isSnapshot, device, ts, seq }.
- * Mirrors the client-side parseSyncFilename() in sync-yjs.js.
- */
-function parseYjsFileName(fileName) {
-  const EXT = '.yjs.json';
-  if (!fileName.endsWith(EXT)) return null;
-
-  const base = fileName.slice(0, -EXT.length);
-  const parts = base.split('~~');
-  if (parts.length < 3) return null;
-
-  const last = parts[parts.length - 1];
-  const secondLast = parts.length >= 2 ? parts[parts.length - 2] : null;
-  const tsCandidate = Number(last);
-  if (!Number.isFinite(tsCandidate)) return null;
-
-  let seq;
-  let ts = tsCandidate;
-  parts.pop();
-
-  if (secondLast != null) {
-    const seqCandidate = Number(secondLast);
-    if (Number.isInteger(seqCandidate) && seqCandidate >= 0 && seqCandidate <= 999) {
-      seq = seqCandidate;
-      parts.pop();
-    }
-  }
-
-  if (parts.length === 0) return null;
-  const device = parts[parts.length - 1];
-  parts.pop();
-
-  let isSnapshot = false;
-  if (parts.length > 0 && parts[parts.length - 1] === 'snapshot') {
-    isSnapshot = true;
-    parts.pop();
-  }
-
-  const docId = parts.join('~~');
-  if (!docId) return null;
-
-  return { docId, isSnapshot, device, ts, seq: seq ?? 0 };
 }
 
 module.exports = yjsSyncRoutes;
