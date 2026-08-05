@@ -3,10 +3,8 @@
 const { render, getLogoDataUri } = require('./renderer');
 const { sendWithAlias } = require('../lib/email');
 
-const DASHBOARD_URL = 'https://app.beavernotes.com';
-
 function buildData(overrides = {}) {
-  return { logoUrl: getLogoDataUri(), dashboardUrl: DASHBOARD_URL, ...overrides };
+  return { logoUrl: getLogoDataUri(), ...overrides };
 }
 
 async function sendWelcomeEmail(app, userId, data = {}) {
