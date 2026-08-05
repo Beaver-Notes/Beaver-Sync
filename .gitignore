@@ -5,3 +5,6 @@ node_modules/
 .test-data/
 mlkem-seed.hex
 fly/.env.secrets
+
+# Email preview output
+.email-preview/
