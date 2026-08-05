@@ -296,17 +296,7 @@ async function sendViaSendmail(to, { subject, html, text }) {
   });
 }
 
-async function sendWelcomeEmail(app, userId) {
-  return sendWithAlias(
-    app,
-    userId,
-    "Welcome to Beaver Sync",
-    `<p>Your account is ready.</p><p>You can now sync your notes across all your devices.</p>`,
-  );
-}
-
 module.exports = {
-  sendWelcomeEmail,
   createEmailAlias,
   resolveAlias,
   deleteAlias,

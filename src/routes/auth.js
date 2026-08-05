@@ -6,7 +6,7 @@ const { Account, Subscription, Session, Workspace, WorkspaceMember, Organization
 const { createSession, validateSession, setSessionCookieIfAvailable } = require('../middleware/auth');
 const { createEmailHash } = require('../lib/crypto');
 const mlkem = require('../lib/mlkem');
-const { sendWelcomeEmail } = require('../lib/email');
+const { sendWelcomeEmail } = require('../email');
 const { audit } = require('../lib/audit');
 const { isEnterpriseMode } = require('../lib/license');
 const { getQuotaBytes } = require('../lib/plans');

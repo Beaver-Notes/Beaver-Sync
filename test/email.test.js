@@ -21,6 +21,7 @@ process.env.NOTIFY_DOMAIN = 'notify.test.example.com';
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const email = require('../src/lib/email');
+const emailTemplates = require('../src/email');
 const { extractAlias } = require('../src/routes/email');
 const mlkem = require('../src/lib/mlkem');
 
@@ -161,7 +162,7 @@ test('sendWelcomeEmail gracefully skips when no API key', async (t) => {
   t.after(() => app.close());
 
   const { id } = await registerAccount('welcome@example.com');
-  await email.sendWelcomeEmail(app, id);
+  await emailTemplates.sendWelcomeEmail(app, id);
   assert.ok(true, 'should not throw');
 });
 
