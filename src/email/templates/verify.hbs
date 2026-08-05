@@ -1,0 +1,20 @@
+<!-- src/email/templates/verify.hbs -->
+{{#> base}}
+  {{#*inline "header-block"}}
+    <img src="{{logoUrl}}" alt="Beaver Sync" width="64" height="64" style="border-radius: 14px;">
+    <h1>Verify your email</h1>
+  {{/inline}}
+
+  {{#*inline "footer-block"}}
+    Beaver Sync &middot; <a href="https://beavernotes.com">beavernotes.com</a>
+  {{/inline}}
+
+  <p class="subtitle">One quick step and you're all set.</p>
+  <p>Click the button below to verify <strong>{{email}}</strong>:</p>
+  <p style="margin: 28px 0 0;">
+    <a href="{{verifyUrl}}" class="btn-primary">Verify email</a>
+  </p>
+  <div class="callout">
+    This link expires in {{expiresIn}}. If you didn't create a Beaver Sync account, you can safely ignore this email.
+  </div>
+{{/base}}

@@ -1,0 +1,34 @@
+<!-- src/email/templates/subscription-receipt.hbs -->
+{{#> base}}
+  {{#*inline "header-block"}}
+    <img src="{{logoUrl}}" alt="Beaver Sync" width="64" height="64" style="border-radius: 14px;">
+    <h1>Subscription updated</h1>
+  {{/inline}}
+
+  {{#*inline "footer-block"}}
+    Beaver Sync &middot; <a href="https://beavernotes.com">beavernotes.com</a>
+  {{/inline}}
+
+  <p>Thanks for upgrading, {{#if username}}{{username}}{{else}}there{{/if}}! Your subscription has been updated.</p>
+  <hr class="divider">
+  <table width="100%" cellpadding="0" cellspacing="0" style="font-size: 14px; color: #44403c;">
+    <tr>
+      <td style="padding: 8px 0; color: #78716c;">Plan</td>
+      <td style="padding: 8px 0; text-align: right; font-weight: 600;">{{plan}}</td>
+    </tr>
+    {{#if amount}}
+    <tr>
+      <td style="padding: 8px 0; color: #78716c;">Amount</td>
+      <td style="padding: 8px 0; text-align: right; font-weight: 600;">{{amount}}</td>
+    </tr>
+    {{/if}}
+    <tr>
+      <td style="padding: 8px 0; color: #78716c;">Billing period</td>
+      <td style="padding: 8px 0; text-align: right; font-weight: 600;">{{period}}</td>
+    </tr>
+  </table>
+  <hr class="divider">
+  <p style="margin: 28px 0 0;">
+    <a href="{{dashboardUrl}}" class="btn-primary">Manage subscription</a>
+  </p>
+{{/base}}

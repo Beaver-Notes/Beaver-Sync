@@ -1,7 +1,19 @@
 <!-- src/email/templates/welcome.hbs -->
 {{#> base}}
-  {{#*inline "header-block"}}<div>{{logoUrl}}</div>{{/inline}}
-  {{#*inline "footer-block"}}<div>footer</div>{{/inline}}
-  <h1>Welcome{{#if username}}, {{username}}{{/if}}</h1>
-  <a href="{{dashboardUrl}}">Open Beaver Sync</a>
+  {{#*inline "header-block"}}
+    <img src="{{logoUrl}}" alt="Beaver Sync" width="64" height="64" style="border-radius: 14px;">
+    <h1>You're in! 🦫</h1>
+  {{/inline}}
+
+  {{#*inline "footer-block"}}
+    Beaver Sync &middot; <a href="https://beavernotes.com">beavernotes.com</a>
+    <div class="beaver-tag">Notes, synced with a grin.</div>
+  {{/inline}}
+
+  <h2>Welcome aboard{{#if username}}, {{username}}{{/if}}!</h2>
+  <p>Your Beaver Sync account is ready. Your notes can now follow you everywhere — across devices, across rooms, across time zones.</p>
+  <p>Start by opening Beaver Sync and creating your first note. The sync just works.</p>
+  <p style="margin: 28px 0 0;">
+    <a href="{{dashboardUrl}}" class="btn-primary">Open Beaver Sync</a>
+  </p>
 {{/base}}

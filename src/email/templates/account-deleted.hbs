@@ -1,0 +1,18 @@
+<!-- src/email/templates/account-deleted.hbs -->
+{{#> base}}
+  {{#*inline "header-block"}}
+    <img src="{{logoUrl}}" alt="Beaver Sync" width="64" height="64" style="border-radius: 14px;">
+    <h1>Account deleted</h1>
+  {{/inline}}
+
+  {{#*inline "footer-block"}}
+    Beaver Sync &middot; <a href="https://beavernotes.com">beavernotes.com</a>
+    <div class="beaver-tag">We'll miss you.</div>
+  {{/inline}}
+
+  <p>Your Beaver Sync account has been permanently deleted. All data on the server has been removed.</p>
+  <p>Your local notes on this device were not affected.</p>
+  <div class="callout">
+    If this was a mistake, reach out to support within 30 days and we'll do our best to help.
+  </div>
+{{/base}}

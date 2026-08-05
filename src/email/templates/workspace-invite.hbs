@@ -1,0 +1,20 @@
+<!-- src/email/templates/workspace-invite.hbs -->
+{{#> base}}
+  {{#*inline "header-block"}}
+    <img src="{{logoUrl}}" alt="Beaver Sync" width="64" height="64" style="border-radius: 14px;">
+    <h1>You've been invited!</h1>
+  {{/inline}}
+
+  {{#*inline "footer-block"}}
+    Beaver Sync &middot; <a href="https://beavernotes.com">beavernotes.com</a>
+  {{/inline}}
+
+  <p><strong>{{inviterName}}</strong> invited you to join the workspace <strong>{{workspaceName}}</strong> on Beaver Sync.</p>
+  <p>Collaborate on notes in real-time, stay in sync, and build something great together.</p>
+  <p style="margin: 28px 0 0;">
+    <a href="{{inviteUrl}}" class="btn-primary">Join workspace</a>
+  </p>
+  <div class="callout">
+    This invitation expires in {{expiresIn}}. You'll need a Beaver Sync account to join.
+  </div>
+{{/base}}

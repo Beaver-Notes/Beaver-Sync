@@ -1,0 +1,22 @@
+<!-- src/email/templates/note-invite.hbs -->
+{{#> base}}
+  {{#*inline "header-block"}}
+    <img src="{{logoUrl}}" alt="Beaver Sync" width="64" height="64" style="border-radius: 14px;">
+    <h1>Note invitation</h1>
+  {{/inline}}
+
+  {{#*inline "footer-block"}}
+    Beaver Sync &middot; <a href="https://beavernotes.com">beavernotes.com</a>
+  {{/inline}}
+
+  <p><strong>{{inviterName}}</strong> wants to collaborate on a note with you:</p>
+  <div class="callout" style="font-weight: 600; color: #1c1917;">
+    📝 {{noteTitle}}
+  </div>
+  <p style="margin: 28px 0 0;">
+    <a href="{{inviteUrl}}" class="btn-primary">Open note</a>
+  </p>
+  <div class="callout">
+    This invitation expires in {{expiresIn}}.
+  </div>
+{{/base}}
