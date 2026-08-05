@@ -1,0 +1,7 @@
+<!-- src/email/templates/welcome.hbs -->
+{{#> base}}
+  {{#*inline "header-block"}}<div>{{logoUrl}}</div>{{/inline}}
+  {{#*inline "footer-block"}}<div>footer</div>{{/inline}}
+  <h1>Welcome{{#if username}}, {{username}}{{/if}}</h1>
+  <a href="{{dashboardUrl}}">Open Beaver Sync</a>
+{{/base}}
