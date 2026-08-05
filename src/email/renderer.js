@@ -8,7 +8,6 @@ const TEMPLATES_DIR = path.join(__dirname, 'templates');
 const LOGO_PATH = path.join(__dirname, 'assets', 'logo.png');
 
 const compiledCache = new Map();
-let baseTemplate = null;
 let baseRegistered = false;
 
 function getLogoDataUri() {
@@ -22,13 +21,6 @@ function ensureBaseRegistered() {
   const compiled = Handlebars.compile(src);
   Handlebars.registerPartial('base', compiled);
   baseRegistered = true;
-}
-
-function getBaseTemplate() {
-  if (baseTemplate) return baseTemplate;
-  const src = fs.readFileSync(path.join(TEMPLATES_DIR, 'base.hbs'), 'utf8');
-  baseTemplate = Handlebars.compile(src);
-  return baseTemplate;
 }
 
 function render(templateName, data) {

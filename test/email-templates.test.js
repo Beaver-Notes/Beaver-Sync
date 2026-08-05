@@ -30,14 +30,7 @@ test('getLogoDataUri returns data URI string', () => {
 
 // --- Sender API tests ---
 
-let capturedCalls = [];
-const mockSendWithAlias = async (app, accountId, subject, html) => {
-  capturedCalls.push({ accountId, subject, html });
-};
-
-test.beforeEach(() => { capturedCalls = []; });
-
-test('sendWelcomeEmail sends welcome email with correct subject', async () => {
+test('welcome template renders with correct content', async () => {
   const { render, getLogoDataUri } = require('../src/email/renderer');
   const html = render('welcome', {
     dashboardUrl: 'https://app.beavernotes.com',
