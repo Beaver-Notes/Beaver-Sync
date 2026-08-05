@@ -9,10 +9,19 @@ const LOGO_PATH = path.join(__dirname, 'assets', 'logo.png');
 
 const compiledCache = new Map();
 let baseTemplate = null;
+let baseRegistered = false;
 
 function getLogoDataUri() {
   const buf = fs.readFileSync(LOGO_PATH);
   return `data:image/png;base64,${buf.toString('base64')}`;
+}
+
+function ensureBaseRegistered() {
+  if (baseRegistered) return;
+  const src = fs.readFileSync(path.join(TEMPLATES_DIR, 'base.hbs'), 'utf8');
+  const compiled = Handlebars.compile(src);
+  Handlebars.registerPartial('base', compiled);
+  baseRegistered = true;
 }
 
 function getBaseTemplate() {
@@ -23,6 +32,7 @@ function getBaseTemplate() {
 }
 
 function render(templateName, data) {
+  ensureBaseRegistered();
   try {
     const templatePath = path.join(TEMPLATES_DIR, `${templateName}.hbs`);
     if (!fs.existsSync(templatePath)) return null;
