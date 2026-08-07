@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   account_id              TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   workspace_id            TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
   device_label            TEXT NOT NULL DEFAULT 'Unknown Device',
+  device_id               TEXT,
   device_fingerprint_hash TEXT,
   ip_subnet               TEXT,
   expires_at              TEXT NOT NULL,
@@ -231,19 +232,43 @@ CREATE TABLE IF NOT EXISTS yjs_doc_updates (
   device_id       TEXT NOT NULL,
   clock           INTEGER NOT NULL,
   ts              INTEGER NOT NULL,
-  created_at      TEXT NOT NULL,
-  UNIQUE(workspace_id, note_id, device_id, clock)
+  created_at      TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_workspace_note ON yjs_doc_updates(workspace_id, note_id, ts);
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_device ON yjs_doc_updates(workspace_id, note_id, device_id);
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_clock ON yjs_doc_updates(workspace_id, note_id, device_id, clock);
 
+CREATE TABLE IF NOT EXISTS sync_workspace_state (
+  workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK(status IN ('empty', 'initializing', 'initialized', 'recovering')),
+  generation INTEGER NOT NULL DEFAULT 0,
+  initialization_token TEXT,
+  initialization_expires_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_document_state (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  note_id TEXT NOT NULL,
+  snapshot_generation INTEGER NOT NULL DEFAULT 0,
+  snapshot_key TEXT,
+  checkpoint_ts INTEGER NOT NULL DEFAULT 0,
+  checkpoint_sequence INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, note_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_yjs_updates_pull
+  ON yjs_doc_updates(workspace_id, note_id, ts, clock);
+
 CREATE TABLE IF NOT EXISTS vault_key_params (
   id                 TEXT PRIMARY KEY,
   workspace_id       TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   owner_id           TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  -- Despite the legacy column name, this stores only bcrypt(clientProof), never plaintext.
   passphrase_hash    TEXT NOT NULL,
+  proof_version      INTEGER NOT NULL DEFAULT 0,
   key_params_blob    TEXT NOT NULL,
   created_at         TEXT NOT NULL,
   updated_at         TEXT NOT NULL

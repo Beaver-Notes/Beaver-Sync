@@ -2,53 +2,44 @@
 
 const { z } = require('zod');
 const persistence = require('../persistence/yjs');
-const { Device, Workspace, Subscription } = require('../models');
+const { Device, WorkspaceMember } = require('../models');
 const { audit } = require('../lib/audit');
 
 const MAX_UPDATES_PER_PUSH = 200;
 const MAX_UPDATES_PER_PULL = 500;
-const MAX_BODY_BYTES = parseInt(process.env.YJS_SYNC_BODY_LIMIT_BYTES ?? '10485760', 10);
+const MAX_BODY_BYTES = Math.min(parseInt(process.env.YJS_SYNC_BODY_LIMIT_BYTES ?? '10485760', 10), 10485760);
 const DEVICE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+const SYNC_KEY_PATTERN = /^([a-zA-Z0-9_-]{1,256})~~([a-zA-Z0-9_-]{1,128})~~([0-9]+)~~([0-9]+)\.yjs\.json$/;
 
-const PushSchema = z.object({
-  workspaceId: z.string().min(1),
-  noteId: z.string().min(1),
-  updates: z.array(z.object({
-    key: z.string().max(512),
-    data: z.string().max(10485760),
-  })).min(1).max(MAX_UPDATES_PER_PUSH),
-});
+const UpdateSchema = z.object({
+  key: z.string().min(1).max(512),
+  data: z.string().min(1).max(MAX_BODY_BYTES),
+  deviceId: z.string().regex(DEVICE_ID_PATTERN),
+  sequence: z.number().int().nonnegative().safe(),
+  ts: z.number().int().nonnegative().safe(),
+}).strict();
 
 const BatchPushSchema = z.object({
-  workspaceId: z.string().min(1),
+  workspaceId: z.string().min(1).max(256),
   notes: z.array(z.object({
-    noteId: z.string().min(1),
-    updates: z.array(z.object({
-      key: z.string().max(512),
-      data: z.string().max(10485760),
-    })).min(1).max(MAX_UPDATES_PER_PUSH),
-  })).min(1).max(50),
-});
+    noteId: z.string().min(1).max(256),
+    updates: z.array(UpdateSchema).min(1).max(MAX_UPDATES_PER_PUSH),
+  }).strict()).min(1).max(50),
+}).strict();
 
-const PullSchema = z.object({
-  workspaceId: z.string().min(1),
-  noteId: z.string().min(1),
-  after: z.record(z.string(), z.object({
-    ts: z.number().int().min(0),
-    seq: z.number().int().min(0),
-  })).optional().default({}),
-});
+const CheckpointSchema = z.union([z.record(z.string().regex(DEVICE_ID_PATTERN), z.object({
+  ts: z.number().int().nonnegative(),
+  sequence: z.number().int().nonnegative(),
+})), z.null()]).transform((value) => value || {});
 
 const BatchPullSchema = z.object({
-  workspaceId: z.string().min(1),
+  workspaceId: z.string().min(1).max(256),
   notes: z.array(z.object({
-    noteId: z.string().min(1),
-    after: z.record(z.string(), z.object({
-      ts: z.number().int().min(0),
-      seq: z.number().int().min(0),
-    })).optional().default({}),
-  })).min(1).max(50),
-});
+    noteId: z.string().min(1).max(256),
+    checkpoint: CheckpointSchema,
+    limit: z.number().int().min(1).max(MAX_UPDATES_PER_PULL),
+  }).strict()).min(1).max(50),
+}).strict();
 
 const DeleteSchema = z.object({
   workspaceId: z.string().min(1),
@@ -56,324 +47,155 @@ const DeleteSchema = z.object({
   keys: z.array(z.string().max(512)).min(1).max(500),
 });
 
-/**
- * Parse the frontend sync filename format: {docId}~~{deviceId}~~{ts}~~{seq}.yjs.json
- * Returns { docId, device, ts, seq } or null.
- */
-function parseSyncFilename(key) {
-  const cleaned = key.replace(/\.yjs\.json$/, '');
-  const parts = cleaned.split('~~');
-  if (parts.length < 4) return null;
+function validationError(reply, parsed) {
+  return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
+}
+
+function getDeviceId(req, reply) {
+  const deviceId = req.headers['x-device-id'];
+  if (!deviceId || typeof deviceId !== 'string' || !DEVICE_ID_PATTERN.test(deviceId)) {
+    reply.status(400).send({ error: 'missing_device_id', message: 'A valid X-Device-Id header is required.' });
+    return null;
+  }
+  return deviceId;
+}
+
+async function requireWorkspaceRole(req, reply, workspaceId, write) {
+  const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
+  if (!membership) {
+    reply.status(403).send({ error: 'not_workspace_member' });
+    return null;
+  }
+  if (write && !['owner', 'editor'].includes(membership.role)) {
+    reply.status(403).send({ error: 'workspace_write_forbidden' });
+    return null;
+  }
+  return membership;
+}
+
+function validateUpdateKey(noteId, update, headerDeviceId) {
+  const match = SYNC_KEY_PATTERN.exec(update.key);
+  if (!match || match[1] !== noteId || match[2] !== update.deviceId || match[2] !== headerDeviceId || Number(match[3]) !== update.ts || Number(match[4]) !== update.sequence) {
+    return false;
+  }
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(update.data)) return false;
+  if (Buffer.from(update.data, 'base64').toString('base64') !== update.data) return false;
+  return Buffer.byteLength(update.data, 'base64') <= MAX_BODY_BYTES;
+}
+
+function formatUpdate(noteId, update) {
   return {
-    docId: parts[0],
-    device: parts[1],
-    ts: parseInt(parts[2], 10) || 0,
-    seq: parseInt(parts[3], 10) || 0,
+    key: `${noteId}~~${update.deviceId}~~${update.ts}~~${update.sequence}.yjs.json`,
+    data: update.data.toString('base64'),
   };
+}
+
+function summarizeStoredBatch(result) {
+  return { stored: result.accepted, sizeBytes: result.acceptedBytes };
 }
 
 async function yjsSyncRoutes(app) {
   await app.register(require('../middleware/auth'));
   await app.register(require('../middleware/subscription'));
 
-  const protect = {
-    preHandler: [app.authenticate],
-  };
-
-  const protectWrite = {
-    preHandler: [app.authenticate, app.requireActiveSync, app.requirePaidWrite, app.checkStorageQuota],
-  };
-
-  // POST /yjs/push — Store Yjs updates in SQLite
-  app.post('/push', {
-    ...protectWrite,
+  const protect = { preHandler: [app.authenticate] };
+  const protectWrite = { preHandler: [app.authenticate, app.requireActiveSync, app.requirePaidWrite, app.checkDeviceLimit] };
+  const jsonConfig = (rate) => ({
     bodyLimit: MAX_BODY_BYTES,
     config: {
-      security: {
-        allowedContentTypes: ['application/json'],
-        maxContentLength: MAX_BODY_BYTES,
-      },
-      rateLimit: {
-        max: parseInt(process.env.YJS_SYNC_WRITE_RATE_LIMIT ?? '60', 10),
-        timeWindow: '1 minute',
-      },
+      security: { allowedContentTypes: ['application/json'], maxContentLength: MAX_BODY_BYTES },
+      rateLimit: { max: rate, timeWindow: '1 minute' },
     },
-  }, async (req, reply) => {
-    const parsed = PushSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.status(400).send({
-        error: 'validation_error',
-        message: parsed.error.errors[0].message,
-      });
-    }
-
-    const deviceId = req.headers['x-device-id'];
-    if (!deviceId || !DEVICE_ID_PATTERN.test(deviceId)) {
-      return reply.status(400).send({
-        error: 'missing_device_id',
-        message: 'A valid X-Device-Id header is required.',
-      });
-    }
-
-    const { workspaceId, noteId, updates } = parsed.data;
-
-    // Verify workspace access
-    const workspace = await Workspace.findById(workspaceId).lean();
-    if (!workspace) {
-      return reply.status(404).send({ error: 'workspace_not_found' });
-    }
-
-    // Store each update in SQLite (batch insert in single transaction)
-    let stored = 0;
-    let sizeBytes = 0;
-
-    const batchData = [];
-    for (const { key, data } of updates) {
-      const buffer = Buffer.from(data, 'base64');
-      const parsedKey = parseSyncFilename(key);
-      const seq = parsedKey?.seq || 0;
-      batchData.push({
-        data: buffer,
-        encrypted: false,
-        deviceId,
-        clock: seq,
-        ts: parsedKey?.ts ?? Date.now(),
-      });
-      sizeBytes += buffer.byteLength;
-    }
-    await persistence.storeUpdatesBatch(workspaceId, noteId, batchData);
-    stored = batchData.length;
-
-    // Update per-account storage quota (req.subscription set by middleware)
-    if (req.subscription && sizeBytes > 0) {
-      await Subscription.updateOne(
-        { accountId: req.userId },
-        { $inc: { storageUsedBytes: sizeBytes } },
-      );
-    }
-
-    // Track device
-    const deviceLabel = String(req.headers['x-device-label'] ?? 'Unknown Device').slice(0, 128);
-    await Device.findOneAndUpdate(
-      { accountId: req.userId, deviceId },
-      { label: deviceLabel, lastSeen: new Date() },
-      { upsert: true, new: true },
-    );
-
-    audit(req, 'yjs_push', { stored, deviceId, workspaceId, noteId });
-
-    return reply.status(201).send({ stored, sizeBytes });
   });
 
-  // POST /yjs/push-batch — Store Yjs updates for multiple notes in one request
-  app.post('/push-batch', {
-    ...protectWrite,
-    bodyLimit: MAX_BODY_BYTES,
-    config: {
-      security: {
-        allowedContentTypes: ['application/json'],
-        maxContentLength: MAX_BODY_BYTES,
-      },
-      rateLimit: {
-        max: parseInt(process.env.YJS_SYNC_WRITE_RATE_LIMIT ?? '60', 10),
-        timeWindow: '1 minute',
-      },
-    },
-  }, async (req, reply) => {
+  app.post('/push-batch', { ...protectWrite, ...jsonConfig(parseInt(process.env.YJS_SYNC_WRITE_RATE_LIMIT ?? '60', 10)) }, async (req, reply) => {
     const parsed = BatchPushSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.status(400).send({
-        error: 'validation_error',
-        message: parsed.error.errors[0].message,
-      });
+    if (!parsed.success) return validationError(reply, parsed);
+    const deviceId = getDeviceId(req, reply);
+    if (!deviceId) return;
+    if (req.sessionDeviceId && req.sessionDeviceId !== deviceId) {
+      return reply.status(403).send({ error: 'device_session_mismatch' });
     }
-
-    const deviceId = req.headers['x-device-id'];
-    if (!deviceId || !DEVICE_ID_PATTERN.test(deviceId)) {
-      return reply.status(400).send({
-        error: 'missing_device_id',
-        message: 'A valid X-Device-Id header is required.',
-      });
-    }
-
     const { workspaceId, notes } = parsed.data;
-
-    const workspace = await Workspace.findById(workspaceId).lean();
-    if (!workspace) {
-      return reply.status(404).send({ error: 'workspace_not_found' });
-    }
-
-    let totalStored = 0;
-    let totalSizeBytes = 0;
+    if (!await requireWorkspaceRole(req, reply, workspaceId, true)) return;
+    req.workspaceId = workspaceId;
 
     for (const { noteId, updates } of notes) {
-      const batchData = [];
-      for (const { key, data } of updates) {
-        const buffer = Buffer.from(data, 'base64');
-        const parsedKey = parseSyncFilename(key);
-        const seq = parsedKey?.seq || 0;
-        batchData.push({
-          data: buffer,
-          encrypted: false,
-          deviceId,
-          clock: seq,
-          ts: parsedKey?.ts ?? Date.now(),
-        });
+      if (updates.some((update) => update.deviceId !== deviceId)) return reply.status(400).send({ error: 'device_id_mismatch' });
+      if (updates.some((update) => !validateUpdateKey(noteId, update, deviceId))) {
+        return reply.status(400).send({ error: 'malformed_update_key' });
       }
-      await persistence.storeUpdatesBatch(workspaceId, noteId, batchData);
-      totalStored += batchData.length;
-      totalSizeBytes += batchData.reduce((sum, u) => sum + u.data.byteLength, 0);
     }
 
-    if (req.subscription && totalSizeBytes > 0) {
-      await Subscription.updateOne(
-        { accountId: req.userId },
-        { $inc: { storageUsedBytes: totalSizeBytes } },
-      );
+    const storedNotes = notes.map(({ noteId, updates }) => ({
+      noteId,
+      updates: updates.map((update) => ({
+        data: Buffer.from(update.data, 'base64'),
+        // REST clients send encrypted envelopes. Hocuspocus must never try to
+        // interpret these bytes as plaintext Yjs updates.
+        encrypted: true,
+        deviceId: update.deviceId,
+        sequence: update.sequence,
+        ts: update.ts,
+      })),
+    }));
+    req.body = parsed.data;
+    let result;
+    try {
+      result = await persistence.storeNotesBatch(workspaceId, storedNotes, {
+        accountId: req.userId,
+        workspaceId: req.workspaceId || null,
+        subscription: req.subscription,
+      });
+    } catch (error) {
+      if (error.code === 'storage_quota_exceeded') {
+        return reply.status(507).send({ error: error.code, message: error.message });
+      }
+      throw error;
     }
+    const { accepted, duplicate, acceptedBytes: sizeBytes, checkpoint } = result;
 
     const deviceLabel = String(req.headers['x-device-label'] ?? 'Unknown Device').slice(0, 128);
-    await Device.findOneAndUpdate(
-      { accountId: req.userId, deviceId },
-      { label: deviceLabel, lastSeen: new Date() },
-      { upsert: true, new: true },
-    );
-
-    audit(req, 'yjs_push_batch', { stored: totalStored, deviceId, workspaceId, noteCount: notes.length });
-
-    return reply.status(201).send({ stored: totalStored, sizeBytes: totalSizeBytes });
+    await Device.findOneAndUpdate({ accountId: req.userId, deviceId }, { label: deviceLabel, lastSeen: new Date() }, { upsert: true, new: true });
+    audit(req, 'yjs_push_batch', { accepted, duplicate, deviceId, workspaceId, noteCount: notes.length });
+    const response = { accepted, duplicate, sizeBytes, checkpoint };
+    if (notes.length > 1) response.checkpoints = result.checkpoints;
+    return reply.status(201).send(response);
   });
 
-  // POST /yjs/pull — Fetch updates from SQLite
-  app.post('/pull', {
-    ...protect,
-    bodyLimit: 4096,
-    config: {
-      security: {
-        allowedContentTypes: ['application/json'],
-        maxContentLength: 4096,
-      },
-      rateLimit: {
-        max: parseInt(process.env.YJS_SYNC_READ_RATE_LIMIT ?? '120', 10),
-        timeWindow: '1 minute',
-      },
-    },
-  }, async (req, reply) => {
-    const parsed = PullSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      return reply.status(400).send({
-        error: 'validation_error',
-        message: parsed.error.errors[0].message,
-      });
-    }
-
-    const { workspaceId, noteId, after: cursors } = parsed.data;
-
-    // Find minimum timestamp across all cursors
-    const minTs = Object.values(cursors).reduce((min, cursor) =>
-      Math.min(min, cursor.ts), Infinity);
-    const effectiveMinTs = minTs === Infinity ? 0 : minTs;
-
-    // Get updates from SQLite
-    const updates = await persistence.loadUpdatesSince(workspaceId, noteId, effectiveMinTs);
-
-    // Filter out updates already seen by each device
-    const filtered = updates.filter(update => {
-      const cursor = cursors[update.deviceId];
-      if (!cursor) return true;
-      if (update.ts > cursor.ts) return true;
-      if (update.ts === cursor.ts && update.clock > cursor.seq) return true;
-      return false;
-    }).slice(0, MAX_UPDATES_PER_PULL);
-
-    // Format response — key must match parseSyncFilename format on the frontend
-    const result = filtered.map(update => ({
-      key: `${noteId}~~${update.deviceId}~~${update.ts}~~${update.clock}.yjs.json`,
-      data: update.data.toString('base64'),
-    }));
-
-    return reply.send({ updates: result });
-  });
-
-  // POST /yjs/pull-batch — Fetch updates for multiple notes in one request
-  app.post('/pull-batch', {
-    ...protect,
-    bodyLimit: MAX_BODY_BYTES,
-    config: {
-      security: {
-        allowedContentTypes: ['application/json'],
-        maxContentLength: MAX_BODY_BYTES,
-      },
-      rateLimit: {
-        max: parseInt(process.env.YJS_SYNC_READ_RATE_LIMIT ?? '120', 10),
-        timeWindow: '1 minute',
-      },
-    },
-  }, async (req, reply) => {
+  app.post('/pull-batch', { ...protect, ...jsonConfig(parseInt(process.env.YJS_SYNC_READ_RATE_LIMIT ?? '120', 10)) }, async (req, reply) => {
     const parsed = BatchPullSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      return reply.status(400).send({
-        error: 'validation_error',
-        message: parsed.error.errors[0].message,
-      });
-    }
-
+    if (!parsed.success) return validationError(reply, parsed);
     const { workspaceId, notes } = parsed.data;
+    if (!await requireWorkspaceRole(req, reply, workspaceId, false)) return;
+
     const result = {};
-
-    for (const { noteId, after: cursors } of notes) {
-      const minTs = Object.values(cursors).reduce((min, cursor) =>
-        Math.min(min, cursor.ts), Infinity);
-      const effectiveMinTs = minTs === Infinity ? 0 : minTs;
-
-      const updates = await persistence.loadUpdatesSince(workspaceId, noteId, effectiveMinTs);
-
-      const filtered = updates.filter(update => {
-        const cursor = cursors[update.deviceId];
-        if (!cursor) return true;
-        if (update.ts > cursor.ts) return true;
-        if (update.ts === cursor.ts && update.clock > cursor.seq) return true;
-        return false;
-      }).slice(0, MAX_UPDATES_PER_PULL);
-
-      result[noteId] = filtered.map(update => ({
-        key: `${noteId}~~${update.deviceId}~~${update.ts}~~${update.clock}.yjs.json`,
-        data: update.data.toString('base64'),
-      }));
+    for (const { noteId, checkpoint, limit } of notes) {
+      const page = await persistence.loadUpdatesAfter(workspaceId, noteId, checkpoint, Math.min(limit, MAX_UPDATES_PER_PULL));
+      result[noteId] = {
+        updates: page.updates.map((update) => formatUpdate(noteId, update)),
+        nextCheckpoint: page.nextCheckpoint,
+        hasMore: page.hasMore,
+      };
     }
-
     return reply.send({ notes: result });
   });
 
-  // DELETE /yjs/updates — Delete updates for a note
-  app.delete('/updates', {
-    ...protect,
-    bodyLimit: 4096,
-    config: {
-      security: {
-        allowedContentTypes: ['application/json'],
-        maxContentLength: 4096,
-      },
-      rateLimit: {
-        max: parseInt(process.env.YJS_SYNC_DELETE_RATE_LIMIT ?? '120', 10),
-        timeWindow: '1 minute',
-      },
-    },
-  }, async (req, reply) => {
+  app.get('/note-ids', { ...protect }, async (req, reply) => {
+    const workspaceId = req.query.workspaceId;
+    if (!workspaceId) return reply.status(400).send({ error: 'missing_workspace' });
+    if (!await requireWorkspaceRole(req, reply, workspaceId, false)) return;
+    return reply.send({ noteIds: await persistence.listNoteIds(workspaceId) });
+  });
+
+  app.delete('/updates', { ...protect, bodyLimit: 4096 }, async (req, reply) => {
     const parsed = DeleteSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      return reply.status(400).send({
-        error: 'validation_error',
-        message: parsed.error.errors[0].message,
-      });
-    }
-
-    const { workspaceId, noteId } = parsed.data;
-
-    await persistence.deleteUpdatesForNote(workspaceId, noteId);
-
+    if (!parsed.success) return validationError(reply, parsed);
+    if (!await requireWorkspaceRole(req, reply, parsed.data.workspaceId, true)) return;
+    await persistence.deleteUpdatesForNote(parsed.data.workspaceId, parsed.data.noteId);
     return reply.send({ deleted: true });
   });
 }
 
 module.exports = yjsSyncRoutes;
+module.exports.summarizeStoredBatch = summarizeStoredBatch;

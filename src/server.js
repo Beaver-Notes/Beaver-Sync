@@ -151,6 +151,7 @@ async function buildApp() {
   await app.register(require('./routes/organizations'), { prefix: '/organizations' });
   await app.register(require('./routes/vault'),         { prefix: '/vault' });
   await app.register(require('./routes/yjs-sync'),     { prefix: '/yjs' });
+  await app.register(require('./routes/sync-state'),   { prefix: '/sync' });
   await app.register(require('./routes/audit'),       { prefix: '/audit' });
   await app.register(require('./routes/admin'),       { prefix: '/admin' });
   await app.register(require('./routes/webhooks'),    { prefix: '/webhooks' });

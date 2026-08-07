@@ -49,6 +49,7 @@ async function createSession(userId, req, workspaceId = null) {
     accountId: userId,
     workspaceId: workspaceId ?? null,
     deviceLabel: String(req?.headers?.['x-device-label'] ?? 'Unknown Device').slice(0, 128),
+    deviceId: req?.headers?.['x-device-id'] || null,
     ipSubnet: getIpSubnet(req),
     expiresAt,
     lastSeenAt: now,
@@ -75,7 +76,7 @@ async function validateSession(rawId) {
   session.expiresAt = newExpiresAt > maxExpiresAt ? maxExpiresAt : newExpiresAt;
   await session.save();
 
-  return { userId: session.accountId };
+  return { userId: session.accountId, deviceId: session.deviceId || null };
 }
 
 function signToken(userId) {
@@ -124,6 +125,7 @@ async function authPlugin(app) {
     const sessionResult = await validateSession(rawId);
     if (sessionResult) {
       req.userId = sessionResult.userId;
+      req.sessionDeviceId = sessionResult.deviceId;
       req.authResult = 'authenticated';
       return;
     }
@@ -132,6 +134,7 @@ async function authPlugin(app) {
       try {
         const payload = verifyToken(rawId);
         req.userId = payload.sub;
+        req.sessionDeviceId = null;
         req.authResult = 'authenticated';
         return;
       } catch (err) {

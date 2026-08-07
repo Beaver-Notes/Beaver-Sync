@@ -3,9 +3,9 @@
 const { getDb } = require('../db');
 const persistence = require('../persistence/yjs');
 
-let r2 = null;
+let snapshots = null;
 try {
-  r2 = require('../services/r2');
+  snapshots = require('./sync-snapshots');
 } catch {
   // R2 not configured
 }
@@ -20,7 +20,7 @@ const FLUSH_AGE_MS = parseInt(process.env.YJS_FLUSH_AGE_MS ?? '300000', 10); // 
  * via the Hocuspocus onStoreDocument hook.
  */
 async function flushUnsyncedDocuments() {
-  if (!r2) return { flushed: 0 };
+  if (!snapshots) return { flushed: 0 };
 
   const db = getDb();
 
@@ -43,32 +43,10 @@ async function flushUnsyncedDocuments() {
       const updates = await persistence.loadAllUpdates(workspace_id, note_id);
       if (updates.length === 0) continue;
 
-      // Merge updates into full document state
-      const { Doc } = require('yjs');
-      const doc = new Doc();
-      for (const update of updates) {
-        try {
-          const data = update.encrypted
-            ? Buffer.from(update.data)
-            : update.data instanceof Uint8Array
-              ? update.data
-              : new Uint8Array(update.data);
-          doc.applyUpdate(data);
-        } catch {
-          // skip corrupt updates
-        }
-      }
-
-      const state = doc.toBinary();
-      const key = `yjs/${workspace_id}/${note_id}.yjs`;
-      await r2.put(key, Buffer.from(state), 'application/octet-stream');
-
-      // Clear after successful write
-      await persistence.deleteUpdatesForNote(workspace_id, note_id);
-      doc.destroy();
+      await snapshots.recoverDocument(workspace_id, note_id);
 
       flushed++;
-      console.log(`[recovery] Flushed ${workspace_id}/${note_id} (${updates.length} updates, ${state.byteLength} bytes)`);
+      console.log(`[recovery] Flushed ${workspace_id}/${note_id} (${updates.length} updates)`);
     } catch (err) {
       console.warn(`[recovery] Failed to flush ${workspace_id}/${note_id}:`, err.message);
     }

@@ -116,7 +116,7 @@ test('concurrent compaction requests: first succeeds, second returns 409', async
   t.after(() => app.close());
 
   let locked = false;
-  models.CompactionLock.findOneAndUpdate = async () => {
+  models.CompactionLock.findOneAndUpdate = () => {
     if (locked) return null;
     locked = true;
     return { id: '507f1f77bcf86cd799439011', lockedAt: new Date(), expiresAt: new Date(Date.now() + 300_000) };

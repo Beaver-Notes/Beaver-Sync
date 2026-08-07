@@ -1,22 +1,28 @@
 'use strict';
 
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const { z } = require('zod');
 const { VaultKeyParams, WorkspaceMember } = require('../models');
+const { getDb } = require('../db');
 const { audit } = require('../lib/audit');
 
 const BCRYPT_ROUNDS = 12;
+const PROOF_VERSION = 1;
+const CHALLENGE_TTL_MS = 60 * 1000;
 
 const BODY_LIMIT = parseInt(process.env.VAULT_BODY_LIMIT_BYTES ?? '65536', 10);
 
 const PublishSchema = z.object({
-  passphrase: z.string().min(1).max(1024),
   keyParams: z.string().min(1),
-});
+  passphraseProof: z.string().min(1).max(1024),
+  challenge: z.string().min(1).max(256),
+}).strict();
 
 const VerifySchema = z.object({
-  passphrase: z.string().min(1).max(1024),
-});
+  passphraseProof: z.string().min(1).max(1024),
+  challenge: z.string().min(1).max(256),
+}).strict();
 
 const rateLimit = {
   config: {
@@ -61,10 +67,49 @@ async function requireMember(app, userId, workspaceId) {
   return membership;
 }
 
+function hashChallenge(challenge) {
+  return crypto.createHash('sha256').update(challenge, 'utf8').digest('hex');
+}
+
+function consumeChallenge({ workspaceId, accountId, challenge }) {
+  const db = getDb();
+  const now = new Date().toISOString();
+  return db.transaction(() => {
+    const row = db.prepare(
+      'SELECT id, expires_at FROM vault_proof_challenges WHERE workspace_id = ? AND account_id = ? AND challenge_hash = ? LIMIT 1'
+    ).get(workspaceId, accountId, hashChallenge(challenge));
+    if (!row || row.expires_at <= now) {
+      if (row) db.prepare('DELETE FROM vault_proof_challenges WHERE id = ?').run(row.id);
+      return false;
+    }
+    return db.prepare('DELETE FROM vault_proof_challenges WHERE id = ?').run(row.id).changes === 1;
+  })();
+}
+
 async function vaultRoutes(app) {
   await app.register(require('../middleware/auth'));
 
   const protect = { preHandler: [app.authenticate] };
+
+  app.post('/:id/challenge', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const workspaceId = req.params.id;
+    try {
+      await requireMember(app, req.userId, workspaceId);
+    } catch (err) {
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+    }
+
+    const challenge = crypto.randomBytes(32).toString('base64url');
+    const createdAt = new Date();
+    const expiresAt = new Date(createdAt.getTime() + CHALLENGE_TTL_MS).toISOString();
+    getDb().prepare(
+      'INSERT INTO vault_proof_challenges (id, workspace_id, account_id, challenge_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(crypto.randomUUID(), workspaceId, req.userId, hashChallenge(challenge), expiresAt, createdAt.toISOString());
+    return reply.send({ challenge, expiresAt });
+  });
 
   // ── PUT /vault/:id/key-params — Owner publishes vault key params ──────
   app.put('/:id/key-params', {
@@ -87,9 +132,12 @@ async function vaultRoutes(app) {
       });
     }
 
-    const { passphrase, keyParams } = parsed.data;
+    const { passphraseProof, keyParams, challenge } = parsed.data;
+    if (!consumeChallenge({ workspaceId, accountId: req.userId, challenge })) {
+      return reply.status(401).send({ error: 'invalid_challenge', message: 'The vault proof challenge is invalid or expired.' });
+    }
 
-    const passphraseHash = await bcrypt.hash(passphrase, BCRYPT_ROUNDS);
+    const passphraseHash = await bcrypt.hash(passphraseProof, BCRYPT_ROUNDS);
     const now = new Date().toISOString();
 
     const existing = await VaultKeyParams.findOne({ workspaceId }).lean();
@@ -101,6 +149,7 @@ async function vaultRoutes(app) {
           $set: {
             passphraseHash,
             keyParamsBlob: keyParams,
+            proofVersion: PROOF_VERSION,
             updatedAt: now,
           },
         }
@@ -111,6 +160,7 @@ async function vaultRoutes(app) {
         ownerId: req.userId,
         passphraseHash,
         keyParamsBlob: keyParams,
+        proofVersion: PROOF_VERSION,
         createdAt: now,
         updatedAt: now,
       });
@@ -180,7 +230,18 @@ async function vaultRoutes(app) {
       });
     }
 
-    const valid = await bcrypt.compare(parsed.data.passphrase, record.passphraseHash);
+    if (!consumeChallenge({ workspaceId, accountId: req.userId, challenge: parsed.data.challenge })) {
+      return reply.status(401).send({ error: 'invalid_challenge', message: 'The vault proof challenge is invalid or expired.' });
+    }
+
+    if (record.proofVersion !== PROOF_VERSION) {
+      return reply.status(409).send({
+        error: 'vault_republish_required',
+        message: 'The vault owner must republish its key parameters before this vault can be joined.',
+      });
+    }
+
+    const valid = await bcrypt.compare(parsed.data.passphraseProof, record.passphraseHash);
     if (!valid) {
       return reply.status(401).send({
         error: 'invalid_passphrase',

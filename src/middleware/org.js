@@ -1,6 +1,7 @@
 'use strict';
 
 const { OrgMember } = require('../models');
+const { WorkspaceMember } = require('../models');
 
 async function requireOrgMember(req, reply) {
   const orgId = req.params.id;
@@ -40,4 +41,34 @@ async function requireOrgOwner(req, reply) {
   }
 }
 
-module.exports = { requireOrgMember, requireOrgAdmin, requireOrgOwner };
+async function requireWorkspaceMember(req, reply, workspaceId) {
+  const membership = await WorkspaceMember.findOne({
+    workspaceId,
+    accountId: req.userId,
+  }).lean();
+
+  if (!membership) {
+    return reply.status(403).send({ error: 'not_workspace_member' });
+  }
+
+  return membership;
+}
+
+async function requireWorkspaceOwner(req, reply, workspaceId) {
+  const membership = await requireWorkspaceMember(req, reply, workspaceId);
+  if (reply.sent) return null;
+
+  if (membership.role !== 'owner') {
+    return reply.status(403).send({ error: 'not_workspace_owner' });
+  }
+
+  return membership;
+}
+
+module.exports = {
+  requireOrgMember,
+  requireOrgAdmin,
+  requireOrgOwner,
+  requireWorkspaceMember,
+  requireWorkspaceOwner,
+};

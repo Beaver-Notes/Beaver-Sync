@@ -10,6 +10,7 @@
     "generate-keys": "bash scripts/generate-keys.sh",
     "lint": "eslint src/",
     "test": "node --test --test-concurrency=1",
+    "test:integration": "node --test --test-concurrency=1 test/remote-bootstrap.integration.test.js",
     "prepare": "husky"
   },
   "dependencies": {

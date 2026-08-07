@@ -48,17 +48,15 @@ async function subscriptionPlugin(app) {
     }
   });
 
-  app.decorate('checkStorageQuota', async function (req, reply) {
+  app.decorate('checkStorageQuota', async function (req, reply, ...args) {
     if (isEnterpriseMode()) return;
 
     const sub = req.subscription;
     if (!sub) return;
 
-    const incomingBytes =
-      req.body?.sizeBytes ??
-      parseInt(req.headers['content-length'] ?? '0', 10);
+    const incomingBytes = args[0] ?? req.body?.sizeBytes ?? parseInt(req.headers['content-length'] ?? '0', 10);
 
-    const workspaceId = req.headers['x-workspace-id'];
+    const workspaceId = req.body?.workspaceId;
     if (workspaceId && typeof workspaceId === 'string' && (sub.plan === 'team' || sub.plan === 'enterprise')) {
       const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
       if (!membership) {

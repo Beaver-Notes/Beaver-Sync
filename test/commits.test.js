@@ -158,10 +158,9 @@ test('valid aes256gcm-v1 envelope is accepted', async (t) => {
       clock: 1,
       ts: 1700000000000,
       payload: {
-        enc: 'aes256gcm-v1',
-        iv: 'aaaaaaaaaaaaaaaa',
-        ct: 'encrypteddata',
-        tag: 'bbbbbbbbbbbbbbbbbbbbbbbb',
+        v: 3,
+        nonce: 'aaaaaaaaaaaaaaaa',
+        cipher: 'encrypteddata',
       },
     }),
   });
@@ -169,11 +168,11 @@ test('valid aes256gcm-v1 envelope is accepted', async (t) => {
   assert.equal(response.statusCode, 201);
   const unwrapped = await mlkem.unwrapBlob(Buffer.from(storedPayload, 'utf8'));
   const stored = JSON.parse(unwrapped.toString('utf8'));
-  assert.equal(stored.enc, 'aes256gcm-v1');
-  assert.equal(stored.tag, 'bbbbbbbbbbbbbbbbbbbbbbbb');
+  assert.equal(stored.v, 3);
+  assert.equal(stored.cipher, 'encrypteddata');
 });
 
-test('envelope missing tag is rejected with 400', async (t) => {
+test('envelope missing cipher is rejected with 400', async (t) => {
   const app = await makeApp();
   t.after(() => app.close());
 
@@ -193,9 +192,8 @@ test('envelope missing tag is rejected with 400', async (t) => {
       clock: 1,
       ts: 1700000000000,
       payload: {
-        enc: 'aes256gcm-v1',
-        iv: 'aaaaaaaaaaaa',
-        ct: 'encrypteddata',
+        v: 3,
+        nonce: 'aaaaaaaaaaaa',
       },
     }),
   });
