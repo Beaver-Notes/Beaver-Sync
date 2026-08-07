@@ -388,6 +388,41 @@ async function assetRoutes(app) {
     return reply.send({ urls, expiresInSeconds: PRESIGN_TTL });
   });
 
+  app.post('/presign-get-batch', {
+    ...protect,
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.ASSET_READ_RATE_LIMIT_PER_MINUTE ?? '120', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const { keys } = req.body || {};
+    if (!Array.isArray(keys) || keys.length === 0) {
+      return reply.status(400).send({ error: 'invalid_body', message: 'Body must contain a keys array.' });
+    }
+    if (keys.length > 200) {
+      return reply.status(400).send({ error: 'too_many_keys', message: 'Max 200 keys per request.' });
+    }
+
+    const PRESIGN_TTL = 3600;
+    const urls = [];
+    for (const assetKey of keys) {
+      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
+      const key = r2.assetKey(req.userId, assetKey);
+      try {
+        const stat = await r2.stat(key);
+        if (!stat) continue;
+        const url = await r2.presignGet(key, PRESIGN_TTL);
+        urls.push({ assetKey, url, sizeBytes: stat.sizeBytes });
+      } catch (err) {
+        console.warn('[assets] presign-get failed:', assetKey, err.message);
+      }
+    }
+
+    return reply.send({ urls, expiresInSeconds: PRESIGN_TTL });
+  });
+
   app.post('/confirm-seed', {
     ...protect,
     config: {
