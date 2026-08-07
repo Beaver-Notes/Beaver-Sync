@@ -2,6 +2,8 @@
 
 const r2 = require('../services/r2');
 const { Subscription, Workspace } = require('../models');
+const { verifyAssetSignature } = require('../lib/asset-sign');
+const { storageConfig } = require('../services/r2');
 
 const MAX_ASSET_SIZE_BYTES = parseInt(
   process.env.MAX_ASSET_SIZE_BYTES ?? String(100 * 1024 * 1024),
@@ -108,6 +110,107 @@ async function assetRoutes(app) {
     const uploaded = results.filter((r) => r.status === 'uploaded').length;
     const skipped = results.filter((r) => r.status === 'already_exists').length;
     return reply.send({ results, uploaded, skipped, total: assets.length });
+  });
+
+  // ── Unauthenticated HMAC-signed endpoints (for MinIO parity) ─────────
+  // These bypass session auth — the HMAC token IS the authorization.
+  // Used when STORAGE_BACKEND=minio (internal Docker hostnames are unresolvable
+  // from clients, so presigned URLs must route through the API server).
+
+  app.get('/download', {
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.ASSET_BATCH_DOWNLOAD_RATE_LIMIT_PER_MINUTE ?? '600', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const { key, userId, expires, sig } = req.query || {};
+    if (!key || !userId || !expires || !sig) {
+      return reply.status(400).send({ error: 'missing_params', message: 'Missing key, userId, expires, or sig.' });
+    }
+
+    const expiresNum = parseInt(expires, 10);
+    if (!verifyAssetSignature(key, userId, expiresNum, sig)) {
+      return reply.status(403).send({ error: 'invalid_signature', message: 'Invalid or expired download token.' });
+    }
+
+    if (!ASSET_KEY_PATTERN.test(key)) {
+      return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
+    }
+
+    const r2Key = r2.assetKey(userId, key);
+
+    let stat;
+    try {
+      stat = await r2.stat(r2Key);
+    } catch (err) {
+      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+        return reply.status(503).send({ error: 'storage_unavailable', message: 'Asset storage is not available.' });
+      }
+      throw err;
+    }
+    if (!stat) {
+      return reply.status(404).send({ error: 'not_found', message: 'Asset not found.' });
+    }
+
+    const stream = await r2.getStream(r2Key);
+    if (!stream) {
+      return reply.status(404).send({ error: 'not_found', message: 'Asset not found.' });
+    }
+
+    return reply
+      .type('application/octet-stream')
+      .header('Content-Length', stat.sizeBytes)
+      .header('Cache-Control', 'no-store')
+      .send(stream);
+  });
+
+  app.put('/upload', {
+    bodyLimit: MAX_ASSET_SIZE_BYTES,
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.ASSET_WRITE_RATE_LIMIT_PER_MINUTE ?? '30', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const { key, userId, expires, sig } = req.query || {};
+    if (!key || !userId || !expires || !sig) {
+      return reply.status(400).send({ error: 'missing_params', message: 'Missing key, userId, expires, or sig.' });
+    }
+
+    const expiresNum = parseInt(expires, 10);
+    if (!verifyAssetSignature(key, userId, expiresNum, sig)) {
+      return reply.status(403).send({ error: 'invalid_signature', message: 'Invalid or expired upload token.' });
+    }
+
+    if (!ASSET_KEY_PATTERN.test(key)) {
+      return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
+    }
+
+    const contentLength = parseInt(req.headers['content-length'] ?? '0', 10);
+    if (contentLength > MAX_ASSET_SIZE_BYTES) {
+      return reply.status(413).send({ error: 'payload_too_large', message: 'Asset too large.' });
+    }
+
+    const body = req.body;
+    if (!body || body.length === 0) {
+      return reply.status(400).send({ error: 'empty_body', message: 'Asset body cannot be empty.' });
+    }
+
+    const r2Key = r2.assetKey(userId, key);
+
+    try {
+      await r2.put(r2Key, body, 'application/octet-stream');
+    } catch (err) {
+      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+        return reply.status(503).send({ error: 'storage_unavailable', message: 'Asset storage is not available.' });
+      }
+      throw err;
+    }
+
+    return reply.status(201).send({ assetKey: key, sizeBytes: body.length });
   });
 
   app.get('/', {
@@ -372,16 +475,29 @@ async function assetRoutes(app) {
       return reply.status(400).send({ error: 'too_many_keys', message: 'Max 200 keys per presign request.' });
     }
 
+    const useProxy = storageConfig.provider === 'minio';
     const PRESIGN_TTL = 3600;
     const urls = [];
-    for (const assetKey of keys) {
-      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
-      const key = r2.assetKey(req.userId, assetKey);
-      try {
-        const url = await r2.presignPut(key, 'application/octet-stream', PRESIGN_TTL);
+
+    if (useProxy) {
+      // MinIO: generate server-proxied HMAC-signed upload URLs
+      const { signAssetUpload } = require('../lib/asset-sign');
+      for (const assetKey of keys) {
+        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
+        const { url } = signAssetUpload(assetKey, req.userId, PRESIGN_TTL);
         urls.push({ assetKey, url });
-      } catch (err) {
-        console.warn('[assets] presign failed:', assetKey, err.message);
+      }
+    } else {
+      // R2/S3: generate native presigned PUT URLs
+      for (const assetKey of keys) {
+        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
+        try {
+          const key = r2.assetKey(req.userId, assetKey);
+          const url = await r2.presignPut(key, 'application/octet-stream', PRESIGN_TTL);
+          urls.push({ assetKey, url });
+        } catch (err) {
+          console.warn('[assets] presign failed:', assetKey, err.message);
+        }
       }
     }
 
@@ -405,18 +521,38 @@ async function assetRoutes(app) {
       return reply.status(400).send({ error: 'too_many_keys', message: 'Max 200 keys per request.' });
     }
 
+    const useProxy = storageConfig.provider === 'minio';
     const PRESIGN_TTL = 3600;
     const urls = [];
-    for (const assetKey of keys) {
-      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
-      const key = r2.assetKey(req.userId, assetKey);
-      try {
-        const stat = await r2.stat(key);
-        if (!stat) continue;
-        const url = await r2.presignGet(key, PRESIGN_TTL);
-        urls.push({ assetKey, url, sizeBytes: stat.sizeBytes });
-      } catch (err) {
-        console.warn('[assets] presign-get failed:', assetKey, err.message);
+
+    if (useProxy) {
+      // MinIO: generate server-proxied HMAC-signed URLs
+      const { signAssetDownload } = require('../lib/asset-sign');
+      for (const assetKey of keys) {
+        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
+        const key = r2.assetKey(req.userId, assetKey);
+        try {
+          const stat = await r2.stat(key);
+          if (!stat) continue;
+          const { url } = signAssetDownload(assetKey, req.userId, PRESIGN_TTL);
+          urls.push({ assetKey, url, sizeBytes: stat.sizeBytes });
+        } catch (err) {
+          console.warn('[assets] presign-get-proxy failed:', assetKey, err.message);
+        }
+      }
+    } else {
+      // R2/S3: generate native presigned URLs (externally resolvable)
+      for (const assetKey of keys) {
+        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
+        const key = r2.assetKey(req.userId, assetKey);
+        try {
+          const stat = await r2.stat(key);
+          if (!stat) continue;
+          const url = await r2.presignGet(key, PRESIGN_TTL);
+          urls.push({ assetKey, url, sizeBytes: stat.sizeBytes });
+        } catch (err) {
+          console.warn('[assets] presign-get failed:', assetKey, err.message);
+        }
       }
     }
 
