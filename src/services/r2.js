@@ -26,6 +26,8 @@ const {
   DeleteObjectsCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
+  CreateBucketCommand,
+  HeadBucketCommand,
 } = require("@aws-sdk/client-s3");
 
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
@@ -126,6 +128,31 @@ const r2 = new S3Client({
 
 const BUCKET = storageConfig.bucket;
 
+/**
+ * Ensure the storage bucket exists, creating it if necessary.
+ * Called once at startup to prevent 502 errors from missing buckets.
+ */
+async function ensureBucket() {
+  try {
+    await r2.send(new HeadBucketCommand({ Bucket: BUCKET }));
+  } catch (err) {
+    if (err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) {
+      try {
+        await r2.send(new CreateBucketCommand({ Bucket: BUCKET }));
+        console.log(`[r2] Created bucket: ${BUCKET}`);
+      } catch (createErr) {
+        if (createErr.name === 'BucketAlreadyOwnedByYou' || createErr.$metadata?.httpStatusCode === 409) {
+          console.log(`[r2] Bucket already exists: ${BUCKET}`);
+        } else {
+          console.error(`[r2] Failed to create bucket ${BUCKET}:`, createErr.message);
+        }
+      }
+    } else {
+      console.error(`[r2] Failed to check bucket ${BUCKET}:`, err.message);
+    }
+  }
+}
+
 // Low-level helpers
 /**
  * Upload data to object storage.
@@ -172,6 +199,27 @@ async function get(key) {
       chunks.push(chunk);
     }
     return Buffer.concat(chunks);
+  } catch (err) {
+    if (err.name === "NoSuchKey" || err.$metadata?.httpStatusCode === 404) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Download data from object storage as a readable stream.
+ * Returns null if the object doesn't exist (404).
+ */
+async function getStream(key) {
+  try {
+    const res = await r2.send(
+      new GetObjectCommand({
+        Bucket: BUCKET,
+        Key: key,
+      }),
+    );
+    return res.Body;
   } catch (err) {
     if (err.name === "NoSuchKey" || err.$metadata?.httpStatusCode === 404) {
       return null;
@@ -293,6 +341,7 @@ const yjsKey = (userId, fileName) => `${userId}/yjs/${fileName}`;
 module.exports = {
   put,
   get,
+  getStream,
   del,
   delMany,
   listKeys,
@@ -305,4 +354,5 @@ module.exports = {
   exportKey,
   yjsKey,
   storageConfig,
+  ensureBucket,
 };

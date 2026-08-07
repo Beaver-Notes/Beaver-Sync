@@ -77,7 +77,7 @@ async function buildApp() {
     },
     bodyLimit: parseInt(process.env.API_BODY_LIMIT_BYTES ?? '1048576', 10),
     trustProxy: true,
-    requestTimeout: parseInt(process.env.REQUEST_TIMEOUT_MS ?? '15000', 10),
+    requestTimeout: parseInt(process.env.REQUEST_TIMEOUT_MS ?? '30000', 10),
     connectionTimeout: parseInt(process.env.CONNECTION_TIMEOUT_MS ?? '10000', 10),
     keepAliveTimeout: parseInt(process.env.KEEP_ALIVE_TIMEOUT_MS ?? '5000', 10),
   });
@@ -132,6 +132,13 @@ async function buildApp() {
       message: 'Too many requests. Please slow down.',
     }),
   });
+
+  await app.register(require('@fastify/compress'), {
+    global: true,
+    threshold: 1024,
+    encodings: ['gzip'],
+  });
+
   await app.register(require('./middleware/security'));
 
   await app.register(require('./routes/auth'),        { prefix: '/auth' });
@@ -218,6 +225,13 @@ async function start() {
 
   getDb();
   app.log.info('SQLite database connected');
+
+  try {
+    const { ensureBucket } = require('./services/r2');
+    await ensureBucket();
+  } catch (err) {
+    app.log.warn('Storage bucket check failed (non-fatal):', err.message);
+  }
 
   const port = parseInt(process.env.PORT ?? '3000');
   const host = process.env.HOST ?? '0.0.0.0';

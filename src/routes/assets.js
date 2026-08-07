@@ -11,7 +11,7 @@ const ASSET_URL_TTL_SECONDS = Math.min(
   parseInt(process.env.ASSET_URL_TTL_SECONDS ?? '300', 10),
   900
 );
-const ASSET_KEY_PATTERN = /^[a-zA-Z0-9._-]{1,256}$/;
+const ASSET_KEY_PATTERN = /^[a-zA-Z0-9._ -]{1,256}$/;
 
 async function assetRoutes(app) {
   await app.register(require('../middleware/auth'));
@@ -25,6 +25,91 @@ async function assetRoutes(app) {
     preHandler: [app.authenticate, app.requireActiveSync, app.requirePaidWrite, app.checkStorageQuota],
   };
 
+  const BATCH_MAX_ITEMS = 20;
+  const BATCH_MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+  app.post('/batch', {
+    ...protectWrite,
+    bodyLimit: BATCH_MAX_BODY_BYTES,
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.ASSET_WRITE_RATE_LIMIT_PER_MINUTE ?? '30', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const { assets } = req.body || {};
+    if (!Array.isArray(assets) || assets.length === 0) {
+      return reply.status(400).send({ error: 'invalid_body', message: 'Body must contain an assets array.' });
+    }
+    if (assets.length > BATCH_MAX_ITEMS) {
+      return reply.status(400).send({ error: 'too_many_items', message: `Max ${BATCH_MAX_ITEMS} assets per batch.` });
+    }
+
+    const results = [];
+    for (const item of assets) {
+      const assetKey = item.key;
+      const dataB64 = item.data;
+      if (!assetKey || !dataB64 || !ASSET_KEY_PATTERN.test(assetKey)) {
+        results.push({ key: assetKey || '?', status: 'error', error: 'invalid_key' });
+        continue;
+      }
+
+      const body = Buffer.from(dataB64, 'base64');
+      if (body.length === 0) {
+        results.push({ key: assetKey, status: 'error', error: 'empty_body' });
+        continue;
+      }
+      if (body.length > MAX_ASSET_SIZE_BYTES) {
+        results.push({ key: assetKey, status: 'skipped', error: 'too_large' });
+        continue;
+      }
+
+      const r2Key = r2.assetKey(req.userId, assetKey);
+      try {
+        const existing = await r2.stat(r2Key);
+        if (existing) {
+          results.push({ key: assetKey, status: 'already_exists', sizeBytes: existing.sizeBytes });
+          continue;
+        }
+      } catch (err) {
+        if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+          results.push({ key: assetKey, status: 'error', error: 'storage_unavailable' });
+          continue;
+        }
+        throw err;
+      }
+
+      try {
+        await r2.put(r2Key, body, 'application/octet-stream', { ifNoneMatch: true });
+      } catch (err) {
+        if (err && (err.name === 'PreconditionFailed' || err.$metadata?.httpStatusCode === 412)) {
+          results.push({ key: assetKey, status: 'already_exists', sizeBytes: body.length });
+          continue;
+        }
+        results.push({ key: assetKey, status: 'error', error: err.message });
+        continue;
+      }
+
+      if (req.workspaceId) {
+        await Workspace.updateOne(
+          { _id: req.workspaceId },
+          { $inc: { storageUsedBytes: body.length } }
+        );
+      } else {
+        await Subscription.updateOne(
+          { accountId: req.userId },
+          { $inc: { storageUsedBytes: body.length } }
+        );
+      }
+      results.push({ key: assetKey, status: 'uploaded', sizeBytes: body.length });
+    }
+
+    const uploaded = results.filter((r) => r.status === 'uploaded').length;
+    const skipped = results.filter((r) => r.status === 'already_exists').length;
+    return reply.send({ results, uploaded, skipped, total: assets.length });
+  });
+
   app.get('/', {
     ...protect,
     config: {
@@ -34,7 +119,18 @@ async function assetRoutes(app) {
       },
     },
   }, async (req, reply) => {
-    const allKeys = await r2.listKeys(`${req.userId}/assets/`);
+    let allKeys;
+    try {
+      allKeys = await r2.listKeys(`${req.userId}/assets/`);
+    } catch (err) {
+      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+        return reply.status(503).send({
+          error: 'storage_unavailable',
+          message: 'Asset storage is not available. Please try again later.',
+        });
+      }
+      throw err;
+    }
     const prefix = `${req.userId}/assets/`;
     const assetKeys = allKeys
       .filter((k) => k.startsWith(prefix))
@@ -80,7 +176,18 @@ async function assetRoutes(app) {
 
     const key = r2.assetKey(req.userId, assetKey);
 
-    const existing = await r2.stat(key);
+    let existing;
+    try {
+      existing = await r2.stat(key);
+    } catch (err) {
+      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+        return reply.status(503).send({
+          error: 'storage_unavailable',
+          message: 'Asset storage is not available. Please try again later.',
+        });
+      }
+      throw err;
+    }
     if (existing) {
       return reply.send({ assetKey, status: 'already_exists', sizeBytes: existing.sizeBytes });
     }
@@ -136,7 +243,18 @@ async function assetRoutes(app) {
 
     const key = r2.assetKey(req.userId, assetKey);
 
-    const stat = await r2.stat(key);
+    let stat;
+    try {
+      stat = await r2.stat(key);
+    } catch (err) {
+      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+        return reply.status(503).send({
+          error: 'storage_unavailable',
+          message: 'Asset storage is not available. Please try again later.',
+        });
+      }
+      throw err;
+    }
     if (!stat) {
       app.recordSecurityEvent(req, 'asset_access_denied', { assetKey });
       return reply.status(404).send({ error: 'not_found', message: 'Asset not found.' });
@@ -149,6 +267,48 @@ async function assetRoutes(app) {
       expiresInSeconds: ASSET_URL_TTL_SECONDS,
       expiresAt: new Date(Date.now() + ASSET_URL_TTL_SECONDS * 1000).toISOString(),
     });
+  });
+
+  app.get('/:key/content', {
+    ...protect,
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.ASSET_READ_RATE_LIMIT_PER_MINUTE ?? '120', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const assetKey = req.params.key;
+
+    if (!ASSET_KEY_PATTERN.test(assetKey)) {
+      return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
+    }
+
+    const key = r2.assetKey(req.userId, assetKey);
+
+    let stat;
+    try {
+      stat = await r2.stat(key);
+    } catch (err) {
+      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+        return reply.status(503).send({
+          error: 'storage_unavailable',
+          message: 'Asset storage is not available. Please try again later.',
+        });
+      }
+      throw err;
+    }
+    if (!stat) {
+      app.recordSecurityEvent(req, 'asset_access_denied', { assetKey });
+      return reply.status(404).send({ error: 'not_found', message: 'Asset not found.' });
+    }
+
+    const stream = await r2.getStream(key);
+    if (!stream) {
+      return reply.status(404).send({ error: 'not_found', message: 'Asset not found.' });
+    }
+
+    return reply.type('application/octet-stream').send(stream);
   });
 
   app.delete('/:key', {
@@ -168,7 +328,18 @@ async function assetRoutes(app) {
 
     const key = r2.assetKey(req.userId, assetKey);
 
-    const stat = await r2.stat(key);
+    let stat;
+    try {
+      stat = await r2.stat(key);
+    } catch (err) {
+      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+        return reply.status(503).send({
+          error: 'storage_unavailable',
+          message: 'Asset storage is not available. Please try again later.',
+        });
+      }
+      throw err;
+    }
     if (!stat) {
       app.recordSecurityEvent(req, 'asset_delete_denied', { assetKey });
       return reply.status(404).send({ error: 'not_found', message: 'Asset not found.' });
@@ -182,6 +353,80 @@ async function assetRoutes(app) {
     );
 
     return reply.send({ deleted: true, assetKey });
+  });
+
+  app.post('/presign-batch', {
+    ...protect,
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.ASSET_WRITE_RATE_LIMIT_PER_MINUTE ?? '30', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const { keys } = req.body || {};
+    if (!Array.isArray(keys) || keys.length === 0) {
+      return reply.status(400).send({ error: 'invalid_body', message: 'Body must contain a keys array.' });
+    }
+    if (keys.length > 200) {
+      return reply.status(400).send({ error: 'too_many_keys', message: 'Max 200 keys per presign request.' });
+    }
+
+    const PRESIGN_TTL = 3600;
+    const urls = [];
+    for (const assetKey of keys) {
+      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
+      const key = r2.assetKey(req.userId, assetKey);
+      try {
+        const url = await r2.presignPut(key, 'application/octet-stream', PRESIGN_TTL);
+        urls.push({ assetKey, url });
+      } catch (err) {
+        console.warn('[assets] presign failed:', assetKey, err.message);
+      }
+    }
+
+    return reply.send({ urls, expiresInSeconds: PRESIGN_TTL });
+  });
+
+  app.post('/confirm-seed', {
+    ...protect,
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.ASSET_WRITE_RATE_LIMIT_PER_MINUTE ?? '30', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const { keys } = req.body || {};
+    if (!Array.isArray(keys)) {
+      return reply.status(400).send({ error: 'invalid_body', message: 'Body must contain a keys array.' });
+    }
+
+    let verified = 0;
+    let totalSizeBytes = 0;
+    for (const assetKey of keys) {
+      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
+      const key = r2.assetKey(req.userId, assetKey);
+      const stat = await r2.stat(key);
+      if (stat) {
+        verified++;
+        totalSizeBytes += stat.sizeBytes;
+      }
+    }
+
+    if (req.workspaceId && totalSizeBytes > 0) {
+      await Workspace.updateOne(
+        { _id: req.workspaceId },
+        { $inc: { storageUsedBytes: totalSizeBytes } }
+      );
+    } else if (totalSizeBytes > 0) {
+      await Subscription.updateOne(
+        { accountId: req.userId },
+        { $inc: { storageUsedBytes: totalSizeBytes } }
+      );
+    }
+
+    return reply.send({ verified, total: keys.length, sizeBytes: totalSizeBytes });
   });
 }
 

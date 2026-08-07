@@ -399,6 +399,12 @@ function createModel(table, pkField) {
             for (const [k, v] of Object.entries(update.$set)) {
               insertData[toSnake(k)] = v instanceof Date ? v.toISOString() : v;
             }
+          } else {
+            // Flat update object (e.g. { label, lastSeen }) — treat as $set
+            for (const [k, v] of Object.entries(update)) {
+              if (k === '$or' || k === '$and' || k === '$inc' || isPlainObject(v)) continue;
+              insertData[toSnake(k)] = v instanceof Date ? v.toISOString() : v;
+            }
           }
           if (update.$inc) {
             for (const [k, v] of Object.entries(update.$inc)) {

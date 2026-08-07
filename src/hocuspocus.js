@@ -1,7 +1,6 @@
 'use strict';
 
 const { Server } = require('@hocuspocus/server');
-const { fetch } = require('undici');
 
 const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.internal:3000';
 const HOCUSPOCUS_PORT = parseInt(process.env.HOCUSPOCUS_PORT ?? '8080', 10);
@@ -17,6 +16,28 @@ const persistence = YJS_PERSISTENCE_ENABLED
 async function startHocuspocus() {
   const { initErrorMonitoring } = require('./lib/error-monitoring');
   initErrorMonitoring(process.env.GLITCHTIP_DSN ?? process.env.HOCUSPOCUS_GLITCHTIP_DSN);
+
+  // Run recovery job on startup — flush stale SQLite updates to R2
+  if (persistence) {
+    try {
+      const { flushUnsyncedDocuments } = require('./lib/yjs-recovery');
+      const result = await flushUnsyncedDocuments();
+      if (result.flushed > 0) {
+        console.log(`[hocuspocus] Recovery: flushed ${result.flushed} documents to R2`);
+      }
+    } catch (err) {
+      console.warn('[hocuspocus] Recovery job failed:', err.message);
+    }
+  }
+
+  let r2 = null;
+  if (persistence) {
+    try {
+      r2 = require('./services/r2');
+    } catch {
+      // R2 not configured — snapshot writes will be skipped
+    }
+  }
 
   const server = new Server({
     port: HOCUSPOCUS_PORT,
@@ -39,6 +60,7 @@ async function startHocuspocus() {
         headers['X-Internal-Secret'] = INTERNAL_API_SECRET;
       }
 
+      // /auth/verify-session validates membership when workspaceId is provided (returns role)
       const response = await fetch(`${AUTH_BACKEND_URL}/auth/verify-session`, {
         method: 'POST',
         headers,
@@ -55,22 +77,6 @@ async function startHocuspocus() {
 
       const { userId, role } = await response.json();
 
-      const membershipResponse = await fetch(
-        `${AUTH_BACKEND_URL}/workspaces/is-member`,
-        {
-          method: 'POST',
-          headers: {
-            ...headers,
-            'X-Workspace-Id': workspaceId,
-            'X-User-Id': userId,
-          },
-        },
-      );
-
-      if (membershipResponse.status === 403) {
-        throw new Error('Not a member of this workspace');
-      }
-
       if (role === 'viewer' || role === 'guest') {
         connection.readOnly = true;
       }
@@ -81,9 +87,26 @@ async function startHocuspocus() {
     async onConfigure({ configuration }) {
       if (!persistence) return;
 
+      // Flush full document state to R2 on session close
       configuration.extensions.push({
-        async onStoreDocument({ document, context }) {
-          // no-op: snapshot writes handled via onStoreDocument hook
+        async onStoreDocument({ document, documentName }) {
+          if (!r2) return;
+
+          const parsed = persistence.parseRoomName(documentName);
+          if (!parsed) return;
+
+          const { workspaceId, noteId } = parsed;
+
+          try {
+            const state = document.toBinary();
+            const key = `yjs/${workspaceId}/${noteId}.yjs`;
+            await r2.put(key, Buffer.from(state), 'application/octet-stream');
+          } catch (err) {
+            console.warn(
+              `[hocuspocus] Failed to flush snapshot to R2 for ${documentName}:`,
+              err.message,
+            );
+          }
         },
       });
     },
@@ -95,6 +118,25 @@ async function startHocuspocus() {
       if (!parsed) return;
 
       const { workspaceId, noteId } = parsed;
+
+      // Check R2 for a full snapshot first
+      if (r2) {
+        try {
+          const key = `yjs/${workspaceId}/${noteId}.yjs`;
+          const snapshot = await r2.get(key);
+          if (snapshot) {
+            document.applyUpdate(new Uint8Array(snapshot));
+            return;
+          }
+        } catch (err) {
+          console.warn(
+            `[hocuspocus] Failed to load snapshot from R2 for ${documentName}:`,
+            err.message,
+          );
+        }
+      }
+
+      // Fall back to SQLite incremental updates
       const updates = await persistence.loadAllUpdates(workspaceId, noteId);
 
       for (const update of updates) {
@@ -114,7 +156,7 @@ async function startHocuspocus() {
       }
     },
 
-    async onChange({ document, documentName, update, connection }) {
+    async onChange({ document: _document, documentName, update, connection }) {
       if (!persistence) return;
 
       const parsed = persistence.parseRoomName(documentName);

@@ -132,8 +132,8 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./keys:/app/keys:ro
       - beaver_data:/app/data
+      - beaver_data:/app/keys
     networks:
       - beaver-internal
     healthcheck:

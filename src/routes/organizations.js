@@ -13,21 +13,21 @@ async function organizationRoutes(app) {
 
   // List user's organizations
   app.get('/', protect, async (req, reply) => {
-    const memberships = await OrgMember.find({ account_id: req.userId }).lean();
-    const orgIds = memberships.map(m => m.org_id);
+    const memberships = await OrgMember.find({ accountId: req.userId }).lean();
+    const orgIds = memberships.map(m => m.orgId);
 
     if (orgIds.length === 0) return reply.send([]);
 
     const orgs = await Organization.find({ _id: { $in: orgIds } }).lean();
 
     const result = orgs.map(org => {
-      const membership = memberships.find(m => m.org_id === org.id);
+      const membership = memberships.find(m => m.orgId === org.id);
       return {
         id: org.id,
-        name: org.name_encrypted,
+        name: org.nameEncrypted,
         slug: org.slug,
         role: membership.role,
-        createdAt: org.created_at,
+        createdAt: org.createdAt,
       };
     });
 
@@ -66,12 +66,12 @@ async function organizationRoutes(app) {
     const org = await Organization.findById(req.orgId).lean();
     if (!org) return reply.status(404).send({ error: 'not_found' });
 
-    const subscription = await OrgSubscription.findOne({ org_id: req.orgId }).lean();
-    const workspaces = await Workspace.find({ org_id: req.orgId }).lean();
+    const subscription = await OrgSubscription.findOne({ orgId: req.orgId }).lean();
+    const workspaces = await Workspace.find({ orgId: req.orgId }).lean();
 
     return reply.send({
       id: org.id,
-      name: org.name_encrypted,
+      name: org.nameEncrypted,
       slug: org.slug,
       role: req.orgRole,
       subscription: subscription ? {
@@ -81,7 +81,7 @@ async function organizationRoutes(app) {
       } : null,
       workspaces: workspaces.map(ws => ({
         id: ws.id,
-        name: ws.name_encrypted,
+        name: ws.nameEncrypted,
         emoji: ws.emoji,
         color: ws.color,
       })),
@@ -99,7 +99,7 @@ async function organizationRoutes(app) {
 
   // Delete organization
   app.delete('/:id', { preHandler: [app.authenticate, requireOrgOwner] }, async (req, reply) => {
-    const workspaces = await Workspace.find({ org_id: req.orgId }).lean();
+    const workspaces = await Workspace.find({ orgId: req.orgId }).lean();
     if (workspaces.length > 0) {
       return reply.status(400).send({
         error: 'org_has_workspaces',
@@ -107,8 +107,8 @@ async function organizationRoutes(app) {
       });
     }
 
-    await OrgMember.deleteMany({ org_id: req.orgId });
-    await OrgSubscription.deleteOne({ org_id: req.orgId });
+    await OrgMember.deleteMany({ orgId: req.orgId });
+    await OrgSubscription.deleteOne({ orgId: req.orgId });
     await Organization.deleteOne({ _id: req.orgId });
 
     return reply.send({ deleted: true });
@@ -116,11 +116,11 @@ async function organizationRoutes(app) {
 
   // List members
   app.get('/:id/members', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
-    const members = await OrgMember.find({ org_id: req.orgId }).lean();
+    const members = await OrgMember.find({ orgId: req.orgId }).lean();
     return reply.send(members.map(m => ({
-      accountId: m.account_id,
+      accountId: m.accountId,
       role: m.role,
-      createdAt: m.created_at,
+      createdAt: m.createdAt,
     })));
   });
 
@@ -131,7 +131,7 @@ async function organizationRoutes(app) {
       return reply.status(400).send({ error: 'account_id_required' });
     }
 
-    const existing = await OrgMember.findOne({ org_id: req.orgId, account_id: accountId }).lean();
+    const existing = await OrgMember.findOne({ orgId: req.orgId, accountId }).lean();
     if (existing) {
       return reply.status(409).send({ error: 'already_member' });
     }
@@ -148,7 +148,7 @@ async function organizationRoutes(app) {
     }
 
     await OrgMember.updateOne(
-      { org_id: req.orgId, account_id: req.params.uid },
+      { orgId: req.orgId, accountId: req.params.uid },
       { $set: { role } }
     );
     return reply.send({ updated: true });
@@ -160,7 +160,7 @@ async function organizationRoutes(app) {
       return reply.status(400).send({ error: 'cannot_remove_self' });
     }
 
-    await OrgMember.deleteOne({ org_id: req.orgId, account_id: req.params.uid });
+    await OrgMember.deleteOne({ orgId: req.orgId, accountId: req.params.uid });
     return reply.send({ removed: true });
   });
 
@@ -170,20 +170,20 @@ async function organizationRoutes(app) {
       return reply.status(400).send({ error: 'owner_cannot_leave' });
     }
 
-    await OrgMember.deleteOne({ org_id: req.orgId, account_id: req.userId });
+    await OrgMember.deleteOne({ orgId: req.orgId, accountId: req.userId });
     return reply.send({ left: true });
   });
 
   // Get subscription
   app.get('/:id/subscription', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
-    const sub = await OrgSubscription.findOne({ org_id: req.orgId }).lean();
+    const sub = await OrgSubscription.findOne({ orgId: req.orgId }).lean();
     if (!sub) return reply.status(404).send({ error: 'not_found' });
     return reply.send({
       plan: sub.plan,
       status: sub.status,
       seats: sub.seats,
-      storageQuotaBytes: sub.storage_quota_bytes,
-      storageUsedBytes: sub.storage_used_bytes,
+      storageQuotaBytes: sub.storageQuotaBytes,
+      storageUsedBytes: sub.storageUsedBytes,
     });
   });
 
@@ -194,7 +194,7 @@ async function organizationRoutes(app) {
     if (plan) update.plan = plan;
     if (seats) update.seats = seats;
 
-    await OrgSubscription.updateOne({ org_id: req.orgId }, { $set: update });
+    await OrgSubscription.updateOne({ orgId: req.orgId }, { $set: update });
     return reply.send({ updated: true });
   });
 }

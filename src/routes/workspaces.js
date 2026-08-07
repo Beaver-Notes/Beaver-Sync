@@ -85,7 +85,7 @@ async function workspaceRoutes(app) {
     for (const m of memberships) roleMap[m.workspaceId] = m.role;
 
     const wsDocs = await Workspace
-      .find({ _id: { $in: workspaceIds } }, { nameEncrypted: 1, ownerId: 1, orgId: 1, emoji: 1, color: 1, storageUsedBytes: 1, createdAt: 1 })
+      .find({ _id: { $in: workspaceIds } }, { _id: 1, nameEncrypted: 1, ownerId: 1, orgId: 1, emoji: 1, color: 1, storageUsedBytes: 1, createdAt: 1 })
       .lean();
 
     const workspaces = [];
@@ -96,7 +96,7 @@ async function workspaceRoutes(app) {
       workspaces.push({
         id: ws.id,
         name,
-        orgId: ws.org_id,
+        orgId: ws.orgId,
         emoji: ws.emoji,
         color: ws.color,
         role: roleMap[ws.id],

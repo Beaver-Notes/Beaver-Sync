@@ -45,23 +45,23 @@ async function accountRoutes(app) {
     }
 
     // Get orgs with subscriptions and workspaces
-    const orgIds = memberships.map(m => m.org_id);
+    const orgIds = memberships.map(m => m.orgId);
     let organizations = [];
     if (orgIds.length > 0) {
       const [orgs, orgSubs, allWorkspaces] = await Promise.all([
         Organization.find({ _id: { $in: orgIds } }).lean(),
-        OrgSubscription.find({ org_id: { $in: orgIds } }).lean(),
-        Workspace.find({ org_id: { $in: orgIds } }).lean(),
+        OrgSubscription.find({ orgId: { $in: orgIds } }).lean(),
+        Workspace.find({ orgId: { $in: orgIds } }).lean(),
       ]);
 
       organizations = orgs.map(org => {
-        const membership = memberships.find(m => m.org_id === org.id);
-        const orgSub = orgSubs.find(s => s.org_id === org.id);
-        const workspaces = allWorkspaces.filter(ws => ws.org_id === org.id);
+        const membership = memberships.find(m => m.orgId === org.id);
+        const orgSub = orgSubs.find(s => s.orgId === org.id);
+        const workspaces = allWorkspaces.filter(ws => ws.orgId === org.id);
 
         return {
           id: org.id,
-          name: org.name_encrypted,
+          name: org.nameEncrypted,
           slug: org.slug,
           role: membership.role,
           subscription: orgSub ? {
@@ -71,7 +71,7 @@ async function accountRoutes(app) {
           } : null,
           workspaces: workspaces.map(ws => ({
             id: ws.id,
-            name: ws.name_encrypted,
+            name: ws.nameEncrypted,
             emoji: ws.emoji,
             color: ws.color,
           })),
@@ -258,16 +258,18 @@ async function accountRoutes(app) {
 
       // Remove org subscriptions for orgs owned by this account
       db.prepare(`DELETE FROM org_subscriptions WHERE org_id IN (
-        SELECT id FROM organizations WHERE owner_id = ?
+        SELECT org_id FROM org_members WHERE account_id = ? AND role = 'owner'
       )`).run(req.userId);
 
       // Remove workspaces for orgs owned by this account
       db.prepare(`DELETE FROM workspaces WHERE org_id IN (
-        SELECT id FROM organizations WHERE owner_id = ?
+        SELECT org_id FROM org_members WHERE account_id = ? AND role = 'owner'
       )`).run(req.userId);
 
       // Remove organizations owned by this account
-      db.prepare(`DELETE FROM organizations WHERE owner_id = ?`).run(req.userId);
+      db.prepare(`DELETE FROM organizations WHERE id IN (
+        SELECT org_id FROM org_members WHERE account_id = ? AND role = 'owner'
+      )`).run(req.userId);
 
       // Remove the account itself
       db.prepare(`DELETE FROM accounts WHERE id = ?`).run(req.userId);
