@@ -67,6 +67,13 @@ async function workspaceRoutes(app) {
     const workspace = await Workspace.create({ nameEncrypted, ownerId: req.userId, orgId, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: workspace.id, accountId: req.userId, role: 'owner', createdAt: new Date() });
 
+    // Initialize sync state for the new workspace so /sync/state doesn't 404
+    const { getDb } = require('../db');
+    const syncDb = getDb();
+    syncDb.prepare(
+      'INSERT OR IGNORE INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES (?, ?, ?, ?)'
+    ).run(workspace.id, 'empty', 0, new Date().toISOString());
+
     app.log.info({ workspaceId: workspace.id, userId: req.userId }, 'Workspace created');
     audit(req, 'workspace_created', { workspaceId: workspace.id });
 

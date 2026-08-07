@@ -99,6 +99,13 @@ async function authRoutes(app) {
     const defaultWorkspace = await Workspace.create({ nameEncrypted: 'Default', ownerId: account.id, orgId, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: defaultWorkspace.id, accountId: account.id, role: 'owner', createdAt: new Date() });
 
+    // Initialize sync state for the new workspace so /sync/state doesn't 404
+    const { getDb } = require('../db');
+    const syncDb = getDb();
+    syncDb.prepare(
+      'INSERT OR IGNORE INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES (?, ?, ?, ?)'
+    ).run(defaultWorkspace.id, 'empty', 0, new Date().toISOString());
+
     const token = await createSession(account.id, req);
 
     app.log.info({ userId: account.id }, 'New account registered');

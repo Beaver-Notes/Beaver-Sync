@@ -52,6 +52,13 @@ async function organizationRoutes(app) {
     const workspace = await Workspace.create({ nameEncrypted: 'Default', ownerId: req.userId, orgId, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: workspace.id, accountId: req.userId, role: 'owner', createdAt: new Date() });
 
+    // Initialize sync state for the new workspace so /sync/state doesn't 404
+    const { getDb } = require('../db');
+    const syncDb = getDb();
+    syncDb.prepare(
+      'INSERT OR IGNORE INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES (?, ?, ?, ?)'
+    ).run(workspace.id, 'empty', 0, new Date().toISOString());
+
     return reply.status(201).send({
       id: orgId,
       name: name.trim(),
