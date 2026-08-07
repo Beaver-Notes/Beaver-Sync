@@ -133,11 +133,7 @@ async function buildApp() {
     }),
   });
 
-  await app.register(require('@fastify/compress'), {
-    global: true,
-    threshold: 1024,
-    encodings: ['gzip'],
-  });
+  // Compression handled by reverse proxy (NPM/Cloudflare)
 
   await app.register(require('./middleware/security'));
 
