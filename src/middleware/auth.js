@@ -9,6 +9,7 @@ const { hashSessionId } = require('../lib/crypto');
 
 const SESSION_TTL_HOURS = parseInt(process.env.SESSION_TTL_HOURS ?? '24', 10);
 const SESSION_MAX_AGE_DAYS = parseInt(process.env.SESSION_MAX_AGE_DAYS ?? '30', 10);
+const IDLE_TIMEOUT_HOURS = parseInt(process.env.IDLE_TIMEOUT_HOURS ?? '24', 10);
 
 let privateKey;
 let publicKey;
@@ -69,6 +70,8 @@ async function validateSession(rawId) {
   if (session.expiresAt < new Date()) return null;
 
   const now = new Date();
+  const idleCutoff = new Date(now.getTime() - IDLE_TIMEOUT_HOURS * 60 * 60 * 1000);
+  if (session.lastSeenAt < idleCutoff) return null;
   const newExpiresAt = new Date(now.getTime() + SESSION_TTL_HOURS * 60 * 60 * 1000);
   const maxExpiresAt = new Date(session.createdAt.getTime() + SESSION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
 

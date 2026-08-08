@@ -126,6 +126,23 @@ test('validateSession returns null for expired session', async (t) => {
   assert.equal(result, null);
 });
 
+test('validateSession returns null for idle session (lastSeenAt older than IDLE_TIMEOUT_HOURS)', async (t) => {
+  const rawId = crypto.randomBytes(32).toString('base64url');
+
+  models.Session.findOne = async () => ({
+    idHash: 'idle-hash',
+    accountId: 'user-a',
+    revoked: false,
+    expiresAt: new Date(Date.now() + 3600_000),
+    lastSeenAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+    createdAt: new Date(),
+    save: async () => {},
+  });
+
+  const result = await require('../src/middleware/auth').validateSession(rawId);
+  assert.equal(result, null);
+});
+
 test('GET /auth/sessions returns only the authenticated users sessions', async (t) => {
   const app = await makeApp();
   t.after(() => app.close());
