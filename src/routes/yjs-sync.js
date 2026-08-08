@@ -75,12 +75,43 @@ async function requireWorkspaceRole(req, reply, workspaceId, write) {
 
 function validateUpdateKey(noteId, update, headerDeviceId) {
   const match = SYNC_KEY_PATTERN.exec(update.key);
-  if (!match || match[1] !== noteId || match[2] !== update.deviceId || match[2] !== headerDeviceId || Number(match[3]) !== update.ts || Number(match[4]) !== update.sequence) {
+  if (!match) {
+    console.error('[validateUpdateKey] key regex failed for key:', update.key);
     return false;
   }
-  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(update.data)) return false;
-  if (Buffer.from(update.data, 'base64').toString('base64') !== update.data) return false;
-  return Buffer.byteLength(update.data, 'base64') <= MAX_BODY_BYTES;
+  if (match[1] !== noteId) {
+    console.error('[validateUpdateKey] noteId mismatch: key has', match[1], 'but body has', noteId);
+    return false;
+  }
+  if (match[2] !== update.deviceId) {
+    console.error('[validateUpdateKey] deviceId mismatch: key has', match[2], 'but update has', update.deviceId);
+    return false;
+  }
+  if (match[2] !== headerDeviceId) {
+    console.error('[validateUpdateKey] header deviceId mismatch: key has', match[2], 'but header has', headerDeviceId);
+    return false;
+  }
+  if (Number(match[3]) !== update.ts) {
+    console.error('[validateUpdateKey] ts mismatch: key has', match[3], 'but update has', update.ts);
+    return false;
+  }
+  if (Number(match[4]) !== update.sequence) {
+    console.error('[validateUpdateKey] seq mismatch: key has', match[4], 'but update has', update.sequence);
+    return false;
+  }
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(update.data)) {
+    console.error('[validateUpdateKey] base64 regex failed for data length:', update.data?.length);
+    return false;
+  }
+  if (Buffer.from(update.data, 'base64').toString('base64') !== update.data) {
+    console.error('[validateUpdateKey] base64 round-trip failed');
+    return false;
+  }
+  if (Buffer.byteLength(update.data, 'base64') > MAX_BODY_BYTES) {
+    console.error('[validateUpdateKey] data too large:', Buffer.byteLength(update.data, 'base64'));
+    return false;
+  }
+  return true;
 }
 
 function formatUpdate(noteId, update) {
