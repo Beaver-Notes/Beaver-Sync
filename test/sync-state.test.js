@@ -318,3 +318,57 @@ test('completion rejects the wrong token and atomically initializes an empty map
   assert.equal(state.json().generation, 1);
   assert.deepEqual(state.json().documents, []);
 });
+
+test('snapshot-urls returns presigned URLs for batch upload', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
+  assert.equal(claim.statusCode, 200);
+  const { token } = claim.json();
+
+  const response = await request(app, 'POST', '/sync/initialize/snapshot-urls', users.owner, {
+    workspaceId: 'sync-workspace',
+    token,
+    noteIds: ['meta', 'note-1', 'note-2'],
+  });
+  assert.equal(response.statusCode, 200);
+  const body = response.json();
+  assert.equal(body.generation, 1);
+  assert.ok(body.urls);
+  assert.ok(body.urls['meta']);
+  assert.ok(body.urls['note-1']);
+  assert.ok(body.urls['note-2']);
+  assert.ok(body.urls['meta'].url.includes('X-Amz'));
+  assert.ok(body.urls['meta'].key.startsWith('yjs/sync-workspace/meta/'));
+});
+
+test('snapshot-urls rejects invalid token', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
+
+  const response = await request(app, 'POST', '/sync/initialize/snapshot-urls', users.owner, {
+    workspaceId: 'sync-workspace',
+    token: 'wrong-token',
+    noteIds: ['meta'],
+  });
+  assert.equal(response.statusCode, 403);
+  assert.equal(response.json().error, 'invalid_initialization_token');
+});
+
+test('snapshot-urls rejects non-owner', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
+  const { token } = claim.json();
+
+  const response = await request(app, 'POST', '/sync/initialize/snapshot-urls', users.member, {
+    workspaceId: 'sync-workspace',
+    token,
+    noteIds: ['meta'],
+  });
+  assert.equal(response.statusCode, 403);
+});

@@ -231,18 +231,77 @@ async function syncStateRoutes(app) {
     try {
       body = Buffer.from(data, 'base64');
       if (!body.length || body.toString('base64') !== data) throw new Error('invalid base64');
-      try {
-        await storage.put(key, body, 'application/octet-stream', { ifNoneMatch: true });
-      } catch (err) {
-        const existing = await storage.stat(key);
-        if (!existing || existing.sizeBytes !== body.length) throw err;
-      }
+      await storage.put(key, body, 'application/octet-stream');
       const error = await verifyObject(storage, key, 'snapshot_verification_failed');
       if (error) return reply.status(400).send({ error });
     } catch {
       return reply.status(400).send({ error: 'snapshot_upload_failed' });
     }
     return reply.send({ key, generation, sizeBytes: body.length });
+  });
+
+  app.post('/initialize/snapshot-urls', protect, async (req, reply) => {
+    const parsed = z.object({
+      workspaceId: z.string().min(1),
+      token: z.string().min(1),
+      noteIds: z.array(z.string().min(1).max(256)).min(1).max(500),
+    }).strict().safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    const { workspaceId, token, noteIds } = parsed.data;
+    const membership = await requireWorkspaceOwner(req, reply, workspaceId);
+    if (reply.sent || !membership) return;
+
+    const db = getDb();
+    const now = new Date().toISOString();
+    const claim = db.prepare(`
+      SELECT initialization_token, initialization_expires_at
+      FROM sync_workspace_state WHERE workspace_id = ? AND status = 'initializing'
+    `).get(workspaceId);
+    if (!claim || claim.initialization_token !== token) {
+      return reply.status(403).send({ error: 'invalid_initialization_token' });
+    }
+    if (!claim.initialization_expires_at || claim.initialization_expires_at <= now) {
+      return reply.status(403).send({ error: 'initialization_token_expired' });
+    }
+
+    const storage = getObjectStorage();
+    if (!storage || typeof storage.presignPut !== 'function') {
+      return reply.status(503).send({ error: 'storage_unavailable' });
+    }
+
+    const generation = 1;
+    const urls = {};
+    for (const noteId of noteIds) {
+      if (!validKeySegment(workspaceId) || !validKeySegment(noteId)) {
+        return reply.status(400).send({ error: 'invalid_snapshot_key', noteId });
+      }
+      const key = snapshotKeyFor(workspaceId, noteId, generation);
+      const url = await storage.presignPut(key, 'application/octet-stream', 600);
+      urls[noteId] = { url, key };
+    }
+    return reply.send({ urls, generation });
+  });
+
+  app.post('/initialize/reset', protect, async (req, reply) => {
+    const parsed = WorkspaceSchema.safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    const { workspaceId } = parsed.data;
+    const membership = await requireWorkspaceOwner(req, reply, workspaceId);
+    if (reply.sent || !membership) return;
+
+    const db = getDb();
+    const now = new Date().toISOString();
+    const result = db.prepare(`
+      UPDATE sync_workspace_state
+      SET status = 'empty', initialization_token = NULL,
+          initialization_expires_at = NULL, updated_at = ?
+      WHERE workspace_id = ? AND status = 'initializing'
+    `).run(now, workspaceId);
+    if (result.changes === 0) {
+      const state = db.prepare('SELECT status FROM sync_workspace_state WHERE workspace_id = ?').get(workspaceId);
+      return reply.status(400).send({ error: 'not_stuck', currentStatus: state?.status ?? 'not_found' });
+    }
+    return reply.send({ ok: true, workspaceId, status: 'empty' });
   });
 }
 

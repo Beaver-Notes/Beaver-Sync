@@ -126,6 +126,23 @@ const r2 = new S3Client({
   },
 });
 
+// Public-facing S3 client for presigned URLs (used by the browser).
+// In Docker, STORAGE_ENDPOINT is "http://minio:9000" (internal) but
+// clients need "http://localhost:9000" (external). STORAGE_PUBLIC_ENDPOINT
+// overrides the endpoint used only in presigned URL generation.
+const publicEndpoint = process.env.STORAGE_PUBLIC_ENDPOINT || storageConfig.endpoint;
+const r2Public = publicEndpoint !== storageConfig.endpoint
+  ? new S3Client({
+      region: storageConfig.region,
+      endpoint: publicEndpoint,
+      forcePathStyle: storageConfig.forcePathStyle,
+      credentials: {
+        accessKeyId: storageConfig.accessKeyId,
+        secretAccessKey: storageConfig.secretAccessKey,
+      },
+    })
+  : r2;
+
 const BUCKET = storageConfig.bucket;
 
 /**
@@ -316,7 +333,7 @@ async function stat(key) {
  */
 async function presignGet(key, expiresInSeconds = 300) {
   const cmd = new GetObjectCommand({ Bucket: BUCKET, Key: key });
-  return getSignedUrl(r2, cmd, { expiresIn: expiresInSeconds });
+  return getSignedUrl(r2Public, cmd, { expiresIn: expiresInSeconds });
 }
 
 /**
@@ -328,7 +345,7 @@ async function presignPut(key, contentType, expiresInSeconds = 300) {
     Key: key,
     ContentType: contentType,
   });
-  return getSignedUrl(r2, cmd, { expiresIn: expiresInSeconds });
+  return getSignedUrl(r2Public, cmd, { expiresIn: expiresInSeconds });
 }
 
 // High-level helpers (keyed by userId)

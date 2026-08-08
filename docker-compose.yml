@@ -59,6 +59,7 @@ services:
       NODE_ENV: production
       STORAGE_BACKEND: ${STORAGE_BACKEND:-minio}
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://minio:9000}
+      STORAGE_PUBLIC_ENDPOINT: ${STORAGE_PUBLIC_ENDPOINT:-http://localhost:9000}
       STORAGE_BUCKET_NAME: ${STORAGE_BUCKET_NAME:-beaver-sync}
       STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID:-minioadmin}
       STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:-minioadmin}
@@ -68,7 +69,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./keys:/app/keys:ro
+      - beaver_data:/app/keys
       - beaver_data:/app/data
     networks:
       - beaver-internal

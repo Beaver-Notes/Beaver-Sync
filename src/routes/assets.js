@@ -112,6 +112,90 @@ async function assetRoutes(app) {
     return reply.send({ results, uploaded, skipped, total: assets.length });
   });
 
+  // ── Seed batch upload (higher limits, no rate limit) ──────────────
+  // Used during initial workspace seed to upload many assets at once.
+  const SEED_BATCH_MAX_ITEMS = 50;
+  const SEED_BATCH_MAX_BODY_BYTES = 100 * 1024 * 1024;
+
+  app.post('/seed-batch', {
+    ...protectWrite,
+    bodyLimit: SEED_BATCH_MAX_BODY_BYTES,
+    config: {
+      rateLimit: false,
+    },
+  }, async (req, reply) => {
+    const { assets } = req.body || {};
+    if (!Array.isArray(assets) || assets.length === 0) {
+      return reply.status(400).send({ error: 'invalid_body', message: 'Body must contain an assets array.' });
+    }
+    if (assets.length > SEED_BATCH_MAX_ITEMS) {
+      return reply.status(400).send({ error: 'too_many_items', message: `Max ${SEED_BATCH_MAX_ITEMS} assets per batch.` });
+    }
+
+    const results = [];
+    for (const item of assets) {
+      const assetKey = item.key;
+      const dataB64 = item.data;
+      if (!assetKey || !dataB64 || !ASSET_KEY_PATTERN.test(assetKey)) {
+        results.push({ key: assetKey || '?', status: 'error', error: 'invalid_key' });
+        continue;
+      }
+
+      const body = Buffer.from(dataB64, 'base64');
+      if (body.length === 0) {
+        results.push({ key: assetKey, status: 'error', error: 'empty_body' });
+        continue;
+      }
+      if (body.length > MAX_ASSET_SIZE_BYTES) {
+        results.push({ key: assetKey, status: 'skipped', error: 'too_large' });
+        continue;
+      }
+
+      const r2Key = r2.assetKey(req.userId, assetKey);
+      try {
+        const existing = await r2.stat(r2Key);
+        if (existing) {
+          results.push({ key: assetKey, status: 'already_exists', sizeBytes: existing.sizeBytes });
+          continue;
+        }
+      } catch (err) {
+        if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+          results.push({ key: assetKey, status: 'error', error: 'storage_unavailable' });
+          continue;
+        }
+        throw err;
+      }
+
+      try {
+        await r2.put(r2Key, body, 'application/octet-stream', { ifNoneMatch: true });
+      } catch (err) {
+        if (err && (err.name === 'PreconditionFailed' || err.$metadata?.httpStatusCode === 412)) {
+          results.push({ key: assetKey, status: 'already_exists', sizeBytes: body.length });
+          continue;
+        }
+        results.push({ key: assetKey, status: 'error', error: err.message });
+        continue;
+      }
+
+      if (req.workspaceId) {
+        await Workspace.updateOne(
+          { _id: req.workspaceId },
+          { $inc: { storageUsedBytes: body.length } }
+        );
+      } else {
+        await Subscription.updateOne(
+          { accountId: req.userId },
+          { $inc: { storageUsedBytes: body.length } }
+        );
+      }
+      results.push({ key: assetKey, status: 'uploaded', sizeBytes: body.length });
+    }
+
+    const uploaded = results.filter((r) => r.status === 'uploaded').length;
+    const skipped = results.filter((r) => r.status === 'already_exists').length;
+    return reply.send({ results, uploaded, skipped, total: assets.length });
+  });
+
   // ── Unauthenticated HMAC-signed endpoints (for MinIO parity) ─────────
   // These bypass session auth — the HMAC token IS the authorization.
   // Used when STORAGE_BACKEND=minio (internal Docker hostnames are unresolvable
