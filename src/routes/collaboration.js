@@ -2,8 +2,8 @@
 
 const crypto = require('crypto');
 const { z } = require('zod');
-const { Account, CollaborationKey, NoteInvitation, NoteInviteLink } = require('../models');
-const mlkem = require('../lib/mlkem');
+const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models');
+const { validatePublicKey } = require('../lib/recipient-wrap');
 
 const BODY_LIMIT = parseInt(process.env.COLLAB_BODY_LIMIT_BYTES ?? '4096', 10);
 
@@ -33,7 +33,7 @@ async function collaborationRoutes(app) {
 
   const protect = { preHandler: [app.authenticate] };
 
-  app.post('/keys/:noteId', {
+  app.post('/keys/:noteId/recipients', {
     ...baseRateLimit,
     ...protect,
   }, async (req, reply) => {
@@ -43,27 +43,38 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    const existing = await CollaborationKey.findOne({ noteId }).lean();
-    if (existing) {
-      // Auto-grant editor access if the user has no invitation yet.
-      // This handles the case where the key was created by another device
-      // and the current user needs editor access to manage sharing.
-      const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
-      if (!existingInvite) {
-        await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
-      }
-      return reply.status(200).send({ noteId, exists: true });
+    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
+    if (!existingInvite) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
     }
 
-    const rawKey = crypto.randomBytes(32);
-    const keyEncrypted = await mlkem.encryptMetadata(rawKey.toString('hex'));
+    const { recipients } = req.body ?? {};
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      return reply.status(400).send({ error: 'validation_error', message: 'recipients array is required.' });
+    }
+    if (recipients.length > 200) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Too many recipients.' });
+    }
 
-    await CollaborationKey.create({ noteId, keyEncrypted, createdAt: new Date() });
-    await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
+    for (const r of recipients) {
+      if (!r || typeof r.userId !== 'string' || typeof r.wrappedKey !== 'string' || !r.wrappedKey) {
+        return reply.status(400).send({ error: 'validation_error', message: 'Each recipient needs userId and wrappedKey.' });
+      }
+      const isCollab = await NoteInvitation.findOne({ noteId, userId: r.userId }).lean();
+      if (!isCollab) {
+        return reply.status(403).send({ error: 'forbidden', message: `User ${r.userId} is not a collaborator.` });
+      }
+    }
 
-    app.log.info({ noteId, userId: req.userId }, 'Collaboration key generated');
+    for (const r of recipients) {
+      await NoteKey.findOneAndUpdate(
+        { noteId, userId: r.userId },
+        { $set: { wrappedKey: r.wrappedKey } },
+        { upsert: true }
+      );
+    }
 
-    return reply.status(201).send({ noteId, key: rawKey.toString('hex'), exists: false });
+    return reply.send({ noteId, stored: recipients.length });
   });
 
   app.get('/keys/:noteId', {
@@ -76,20 +87,45 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    // Auto-grant editor access if the user has no invitation yet.
-    // This handles the case where the key was created by another device.
+    const row = await NoteKey.findOne({ noteId, userId: req.userId }).lean();
+    if (!row) {
+      return reply.status(404).send({ error: 'not_found', message: 'No key envelope for this user on this note.' });
+    }
+    return reply.send({ noteId, wrappedKey: row.wrappedKey });
+  });
+
+  app.post('/keys/:noteId/recipient', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const noteId = req.params.noteId;
+    const parsed = NoteIdSchema.safeParse(noteId);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
+    }
+
+    const { recipientUserId, wrappedKey } = req.body ?? {};
+    if (!recipientUserId || typeof recipientUserId !== 'string' || !wrappedKey || typeof wrappedKey !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'recipientUserId and wrappedKey are required.' });
+    }
+
     const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
     if (!existingInvite) {
-      await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
+      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
     }
 
-    const record = await CollaborationKey.findOne({ noteId }).lean();
-    if (!record) {
-      return reply.status(404).send({ error: 'not_found', message: 'No collaboration key for this note.' });
+    const isCollab = await NoteInvitation.findOne({ noteId, userId: recipientUserId }).lean();
+    if (!isCollab) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Recipient is not a collaborator.' });
     }
 
-    const rawHex = await mlkem.decryptMetadata(record.keyEncrypted);
-    return reply.send({ noteId, key: rawHex });
+    await NoteKey.findOneAndUpdate(
+      { noteId, userId: recipientUserId },
+      { $set: { wrappedKey } },
+      { upsert: true }
+    );
+
+    return reply.send({ noteId, recipientUserId, stored: true });
   });
 
   app.post('/invite/:noteId', {
@@ -131,6 +167,10 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'self_invite', message: 'You cannot invite yourself.' });
     }
 
+    if (!target.kemPublicKey || !validatePublicKey(target.kemPublicKey)) {
+      return reply.status(403).send({ error: 'keypair_required', message: 'The invited user has not set up end-to-end encryption yet.' });
+    }
+
     const existing = await NoteInvitation.findOne({ noteId, userId: target.id }).lean();
     if (existing) {
       return reply.send({ noteId, userId: target.id, role: existing.role, alreadyInvited: true });
@@ -165,13 +205,15 @@ async function collaborationRoutes(app) {
     // Fetch usernames for all invited users
     const userIds = [...new Set(invitations.map((inv) => inv.userId))];
     const accounts = userIds.length > 0
-      ? await Account.find({ id: { $in: userIds } }, { id: 1, username: 1 }).lean()
+      ? await Account.find({ id: { $in: userIds } }, { id: 1, username: 1, kemPublicKey: 1 }).lean()
       : [];
     const usernameMap = new Map(accounts.map((a) => [a.id, a.username]));
+    const keypairMap = new Map(accounts.map((a) => [a.id, !!a.kemPublicKey]));
 
     const enriched = invitations.map((inv) => ({
       ...inv,
       username: usernameMap.get(inv.userId) || null,
+      hasKeypair: keypairMap.get(inv.userId) || false,
     }));
 
     return reply.send({ noteId, invitations: enriched });
@@ -203,6 +245,8 @@ async function collaborationRoutes(app) {
     if (result.deletedCount === 0) {
       return reply.status(404).send({ error: 'not_found', message: 'Invitation not found.' });
     }
+
+    await NoteKey.deleteOne({ noteId, userId: targetUserId });
 
     app.log.info({ noteId, removedUser: targetUserId, byUser: req.userId }, 'Invitation removed');
 
