@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember } = require('../models');
+const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember, OrgKey } = require('../models');
 const { requireOrgMember, requireOrgAdmin, requireOrgOwner } = require('../middleware/org');
 
 async function organizationRoutes(app) {
@@ -19,14 +19,18 @@ async function organizationRoutes(app) {
     if (orgIds.length === 0) return reply.send([]);
 
     const orgs = await Organization.find({ _id: { $in: orgIds } }).lean();
+    const envelopeRows = await OrgKey.find({ userId: req.userId }).lean();
+    const envelopeMap = {};
+    for (const e of envelopeRows) envelopeMap[e.orgId] = e.wrappedKey;
 
     const result = orgs.map(org => {
       const membership = memberships.find(m => m.orgId === org.id);
       return {
         id: org.id,
-        name: org.nameEncrypted,
+        nameEncrypted: org.nameEncrypted,
         slug: org.slug,
         role: membership.role,
+        wrappedKey: envelopeMap[org.id] || null,
         createdAt: org.createdAt,
       };
     });
@@ -36,23 +40,44 @@ async function organizationRoutes(app) {
 
   // Create organization
   app.post('/', protect, async (req, reply) => {
-    const { name } = req.body || {};
-    if (!name || !name.trim()) {
+    const { nameEncrypted, recipients } = req.body || {};
+    if (!nameEncrypted || typeof nameEncrypted !== 'string' || !nameEncrypted.trim()) {
       return reply.status(400).send({ error: 'name_required' });
+    }
+    if (!Array.isArray(recipients) || !recipients.some((r) => r.userId === req.userId)) {
+      return reply.status(400).send({ error: 'validation_error', message: 'recipients must include the owner.' });
     }
 
     const orgId = crypto.randomUUID();
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const slug = nameEncrypted.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 63) || 'org';
 
-    await Organization.create({ id: orgId, nameEncrypted: name.trim(), slug, createdAt: new Date() });
+    await Organization.create({ id: orgId, nameEncrypted: nameEncrypted.trim(), slug, createdAt: new Date() });
     await OrgMember.create({ orgId, accountId: req.userId, role: 'owner', createdAt: new Date() });
     await OrgSubscription.create({ id: crypto.randomUUID(), orgId, plan: 'free', status: 'active', seats: 1, createdAt: new Date() });
 
-    // Create default workspace
-    const workspace = await Workspace.create({ nameEncrypted: 'Default', ownerId: req.userId, orgId, createdAt: new Date() });
-    await WorkspaceMember.create({ workspaceId: workspace.id, accountId: req.userId, role: 'owner', createdAt: new Date() });
+    // Org key envelopes
+    for (const r of recipients) {
+      await OrgKey.findOneAndUpdate(
+        { orgId, userId: r.userId },
+        { $set: { wrappedKey: r.wrappedKey } },
+        { upsert: true }
+      );
+    }
 
-    // Initialize sync state for the new workspace so /sync/state doesn't 404
+    // Create default workspace. `name_encrypted` is NOT NULL, so store '' (client renders "Workspace").
+    const wsRecipients = recipients.filter((r) => r.userId === req.userId);
+    const workspace = await Workspace.create({ nameEncrypted: '', ownerId: req.userId, orgId, createdAt: new Date() });
+    await WorkspaceMember.create({ workspaceId: workspace.id, accountId: req.userId, role: 'owner', createdAt: new Date() });
+    const { WorkspaceKey } = require('../models');
+    for (const r of wsRecipients) {
+      await WorkspaceKey.findOneAndUpdate(
+        { workspaceId: workspace.id, userId: r.userId },
+        { $set: { wrappedKey: r.wrappedKey } },
+        { upsert: true }
+      );
+    }
+
+    // Initialize sync state
     const { getDb } = require('../db');
     const syncDb = getDb();
     syncDb.prepare(
@@ -61,10 +86,10 @@ async function organizationRoutes(app) {
 
     return reply.status(201).send({
       id: orgId,
-      name: name.trim(),
+      nameEncrypted,
       slug,
       role: 'owner',
-      workspace: { id: workspace.id, name: 'Default' },
+      workspace: { id: workspace.id, nameEncrypted: '' },
     });
   });
 
@@ -73,12 +98,14 @@ async function organizationRoutes(app) {
     const org = await Organization.findById(req.orgId).lean();
     if (!org) return reply.status(404).send({ error: 'not_found' });
 
+    const envelope = await OrgKey.findOne({ orgId: req.orgId, userId: req.userId }).lean();
     const subscription = await OrgSubscription.findOne({ orgId: req.orgId }).lean();
     const workspaces = await Workspace.find({ orgId: req.orgId }).lean();
 
     return reply.send({
       id: org.id,
-      name: org.nameEncrypted,
+      nameEncrypted: org.nameEncrypted,
+      wrappedKey: envelope?.wrappedKey || null,
       slug: org.slug,
       role: req.orgRole,
       subscription: subscription ? {
@@ -97,9 +124,12 @@ async function organizationRoutes(app) {
 
   // Update organization
   app.patch('/:id', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
-    const { name } = req.body || {};
-    if (name) {
-      await Organization.updateOne({ _id: req.orgId }, { $set: { name_encrypted: name.trim() } });
+    const { nameEncrypted } = req.body || {};
+    if (nameEncrypted) {
+      if (typeof nameEncrypted !== 'string' || !nameEncrypted.trim()) {
+        return reply.status(400).send({ error: 'name_required' });
+      }
+      await Organization.updateOne({ _id: req.orgId }, { $set: { name_encrypted: nameEncrypted.trim() } });
     }
     return reply.send({ updated: true });
   });
@@ -133,7 +163,7 @@ async function organizationRoutes(app) {
 
   // Add member
   app.post('/:id/members', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
-    const { accountId, role = 'member' } = req.body || {};
+    const { accountId, role = 'member', wrappedKey } = req.body || {};
     if (!accountId) {
       return reply.status(400).send({ error: 'account_id_required' });
     }
@@ -143,7 +173,21 @@ async function organizationRoutes(app) {
       return reply.status(409).send({ error: 'already_member' });
     }
 
+    const { Account } = require('../models');
+    const target = await Account.findById(accountId, { kemPublicKey: 1 }).lean();
+    if (!target || !target.kemPublicKey) {
+      return reply.status(403).send({ error: 'keypair_required', message: 'The new member has not set up end-to-end encryption yet.' });
+    }
+    if (!wrappedKey || typeof wrappedKey !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'wrappedKey is required to add a member.' });
+    }
+
     await OrgMember.create({ orgId: req.orgId, accountId, role, createdAt: new Date() });
+    await OrgKey.findOneAndUpdate(
+      { orgId: req.orgId, userId: accountId },
+      { $set: { wrappedKey } },
+      { upsert: true }
+    );
     return reply.status(201).send({ added: true });
   });
 
@@ -168,6 +212,7 @@ async function organizationRoutes(app) {
     }
 
     await OrgMember.deleteOne({ orgId: req.orgId, accountId: req.params.uid });
+    await OrgKey.deleteOne({ orgId: req.orgId, userId: req.params.uid });
     return reply.send({ removed: true });
   });
 

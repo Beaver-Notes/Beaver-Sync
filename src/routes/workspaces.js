@@ -2,12 +2,9 @@
 
 const crypto = require('crypto');
 const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember } = require('../models');
-const mlkem = require('../lib/mlkem');
 const { audit } = require('../lib/audit');
 
 const BODY_LIMIT = parseInt(process.env.WORKSPACE_BODY_LIMIT_BYTES ?? '8192', 10);
-
-const WS_NAME_REGEX = /^.{1,256}$/;
 
 function hashToken(raw) {
   return crypto.createHmac('sha256', process.env.SESSION_HMAC_KEY).update(raw).digest('hex');
@@ -48,9 +45,12 @@ async function workspaceRoutes(app) {
     ...rateLimit,
     ...protect,
   }, async (req, reply) => {
-    const { name, orgId } = req.body ?? {};
-    if (!name || typeof name !== 'string' || !WS_NAME_REGEX.test(name)) {
-      return reply.status(400).send({ error: 'validation_error', message: 'Workspace name is required (max 256 chars).' });
+    const { nameEncrypted, recipients, orgId } = req.body ?? {};
+    if (!nameEncrypted || typeof nameEncrypted !== 'string' || nameEncrypted.length > 8192) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Encrypted workspace name is required.' });
+    }
+    if (!Array.isArray(recipients) || recipients.length === 0 || !recipients.some((r) => r.userId === req.userId)) {
+      return reply.status(400).send({ error: 'validation_error', message: 'recipients must include the owner.' });
     }
 
     if (!orgId) {
@@ -63,9 +63,17 @@ async function workspaceRoutes(app) {
       return reply.status(403).send({ error: 'not_org_member' });
     }
 
-    const nameEncrypted = await mlkem.encryptMetadata(name);
     const workspace = await Workspace.create({ nameEncrypted, ownerId: req.userId, orgId, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: workspace.id, accountId: req.userId, role: 'owner', createdAt: new Date() });
+
+    const { WorkspaceKey } = require('../models');
+    for (const r of recipients) {
+      await WorkspaceKey.findOneAndUpdate(
+        { workspaceId: workspace.id, userId: r.userId },
+        { $set: { wrappedKey: r.wrappedKey } },
+        { upsert: true }
+      );
+    }
 
     // Initialize sync state for the new workspace so /sync/state doesn't 404
     const { getDb } = require('../db');
@@ -77,7 +85,7 @@ async function workspaceRoutes(app) {
     app.log.info({ workspaceId: workspace.id, userId: req.userId }, 'Workspace created');
     audit(req, 'workspace_created', { workspaceId: workspace.id });
 
-    return reply.status(201).send({ id: workspace.id, name, role: 'owner', createdAt: workspace.createdAt });
+    return reply.status(201).send({ id: workspace.id, nameEncrypted, role: 'owner', createdAt: workspace.createdAt });
   });
 
   app.get('/', {
@@ -95,14 +103,19 @@ async function workspaceRoutes(app) {
       .find({ _id: { $in: workspaceIds } }, { _id: 1, nameEncrypted: 1, ownerId: 1, orgId: 1, emoji: 1, color: 1, storageUsedBytes: 1, createdAt: 1 })
       .lean();
 
+    const { WorkspaceKey } = require('../models');
+    const envelopeRows = await WorkspaceKey.find({ userId: req.userId }).lean();
+    const envelopeMap = {};
+    for (const e of envelopeRows) envelopeMap[e.workspaceId] = e.wrappedKey;
+
     const workspaces = [];
     for (const ws of wsDocs) {
       if (!ws) continue;
-      let name;
-      try { name = await mlkem.decryptMetadata(ws.nameEncrypted); } catch { name = null; }
+      const wrappedKey = envelopeMap[ws.id] || null;
       workspaces.push({
         id: ws.id,
-        name,
+        nameEncrypted: ws.nameEncrypted,
+        wrappedKey,
         orgId: ws.orgId,
         emoji: ws.emoji,
         color: ws.color,
@@ -234,6 +247,9 @@ async function workspaceRoutes(app) {
     if (result.deletedCount === 0) {
       return reply.status(404).send({ error: 'not_found', message: 'Member not found in this workspace.' });
     }
+
+    const { WorkspaceKey } = require('../models');
+    await WorkspaceKey.deleteOne({ workspaceId, userId: targetUserId });
 
     try {
       await Session.updateMany(
