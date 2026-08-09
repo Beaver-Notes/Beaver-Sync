@@ -1,5 +1,7 @@
 'use strict';
 
+process.env.YJS_PLAINTEXT_RECOVERY = 'true';
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Y = require('yjs');
