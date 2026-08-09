@@ -40,7 +40,7 @@ async function organizationRoutes(app) {
 
   // Create organization
   app.post('/', protect, async (req, reply) => {
-    const { nameEncrypted, recipients } = req.body || {};
+    const { nameEncrypted, recipients, slug: clientSlug } = req.body || {};
     if (!nameEncrypted || typeof nameEncrypted !== 'string' || !nameEncrypted.trim()) {
       return reply.status(400).send({ error: 'name_required' });
     }
@@ -49,7 +49,9 @@ async function organizationRoutes(app) {
     }
 
     const orgId = crypto.randomUUID();
-    const slug = nameEncrypted.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 63) || 'org';
+    const slug = (typeof clientSlug === 'string' && clientSlug.trim() && /^[a-z0-9-]{1,63}$/.test(clientSlug))
+      ? clientSlug.trim()
+      : `org-${orgId}`;
 
     await Organization.create({ id: orgId, nameEncrypted: nameEncrypted.trim(), slug, createdAt: new Date() });
     await OrgMember.create({ orgId, accountId: req.userId, role: 'owner', createdAt: new Date() });
@@ -102,6 +104,11 @@ async function organizationRoutes(app) {
     const subscription = await OrgSubscription.findOne({ orgId: req.orgId }).lean();
     const workspaces = await Workspace.find({ orgId: req.orgId }).lean();
 
+    const { WorkspaceKey } = require('../models');
+    const wsEnvelopeRows = await WorkspaceKey.find({ userId: req.userId }).lean();
+    const wsEnvelopeMap = {};
+    for (const e of wsEnvelopeRows) wsEnvelopeMap[e.workspaceId] = e.wrappedKey;
+
     return reply.send({
       id: org.id,
       nameEncrypted: org.nameEncrypted,
@@ -115,7 +122,8 @@ async function organizationRoutes(app) {
       } : null,
       workspaces: workspaces.map(ws => ({
         id: ws.id,
-        name: ws.nameEncrypted,
+        nameEncrypted: ws.nameEncrypted,
+        wrappedKey: wsEnvelopeMap[ws.id] || null,
         emoji: ws.emoji,
         color: ws.color,
       })),
