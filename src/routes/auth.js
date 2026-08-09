@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 const { z }  = require('zod');
 const { Account, Subscription, Session, Workspace, WorkspaceMember, Organization, OrgMember, OrgSubscription } = require('../models');
 const { createSession, validateSession, setSessionCookieIfAvailable } = require('../middleware/auth');
+const { validatePublicKey } = require('../lib/recipient-wrap');
 const { createEmailHash } = require('../lib/crypto');
 const mlkem = require('../lib/mlkem');
 const { sendWelcomeEmail } = require('../email');
@@ -23,6 +24,7 @@ const RegisterSchema = z.object({
     .string()
     .min(12, 'Password must be at least 12 characters')
     .max(128, 'Password too long'),
+  kemPublicKey: z.string().max(4096).optional(),
 });
 
 const LoginSchema = z.object({
@@ -80,7 +82,13 @@ async function authRoutes(app) {
     const kdfSalt = require('crypto').randomBytes(32).toString('hex');
     const emailEncrypted = await mlkem.encryptMetadata(email);
 
-    const account = await Account.create({ emailHmac: emailHash, emailEncrypted, passwordHash, kdfSalt });
+    const kemPublicKey = parsed.data.kemPublicKey;
+    if (kemPublicKey && !validatePublicKey(kemPublicKey)) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Invalid kemPublicKey.' });
+    }
+    const accountData = { emailHmac: emailHash, emailEncrypted, passwordHash, kdfSalt };
+    if (kemPublicKey) accountData.kemPublicKey = kemPublicKey;
+    const account = await Account.create(accountData);
 
     const plan = isEnterpriseMode() ? 'enterprise' : 'free';
     const storageQuotaBytes = isEnterpriseMode() ? getQuotaBytes('enterprise') : 0;
@@ -120,6 +128,7 @@ async function authRoutes(app) {
         id:    account.id,
         emailHash: account.emailHmac,
         kdfSalt: account.kdfSalt,
+        kemPublicKey: account.kemPublicKey || null,
       },
       organization: {
         id: orgId,
@@ -227,9 +236,22 @@ async function authRoutes(app) {
         id:    account.id,
         emailHash: account.emailHmac,
         kdfSalt: account.kdfSalt,
+        kemPublicKey: account.kemPublicKey || null,
       },
       subscription: subscription ?? null,
     });
+  });
+
+  app.post('/keypair', {
+    ...authRateLimit,
+    preHandler: [app.authenticate],
+  }, async (req, reply) => {
+    const { kemPublicKey } = req.body ?? {};
+    if (!kemPublicKey || typeof kemPublicKey !== 'string' || !validatePublicKey(kemPublicKey)) {
+      return reply.status(400).send({ error: 'validation_error', message: 'A valid kemPublicKey is required.' });
+    }
+    await Account.updateOne({ _id: req.userId }, { $set: { kemPublicKey } });
+    return reply.send({ ok: true });
   });
 
   app.post('/verify-session', {
