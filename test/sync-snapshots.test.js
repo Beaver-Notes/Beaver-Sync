@@ -285,3 +285,18 @@ test('keeps opaque rows available after recovery and compaction', async () => {
     { data: Buffer.from('opaque-envelope'), encrypted: true, deviceId: 'remote', clock: 2 },
   ]);
 });
+
+test('writeDocumentSnapshot and recoverDocument are disabled when YJS_PLAINTEXT_RECOVERY is off', async () => {
+  const hadFlag = process.env.YJS_PLAINTEXT_RECOVERY;
+  delete process.env.YJS_PLAINTEXT_RECOVERY;
+  try {
+    const { service } = setup();
+    const write = await service.writeDocumentSnapshot({ workspaceId: 'w', noteId: 'n', generation: 1, state: new Uint8Array([1]) });
+    assert.deepEqual(write, { disabled: true });
+    const recover = await service.recoverDocument('w', 'n');
+    assert.deepEqual(recover, { disabled: true });
+  } finally {
+    if (hadFlag === undefined) delete process.env.YJS_PLAINTEXT_RECOVERY;
+    else process.env.YJS_PLAINTEXT_RECOVERY = hadFlag;
+  }
+});
