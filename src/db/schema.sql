@@ -102,11 +102,33 @@ CREATE TABLE IF NOT EXISTS compaction_locks (
   created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS collaboration_keys (
-  note_id        TEXT PRIMARY KEY,
-  key_encrypted  TEXT NOT NULL,
-  created_at     TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS note_keys (
+  note_id     TEXT NOT NULL,
+  user_id     TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  wrapped_key TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (note_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS workspace_keys (
+  workspace_id TEXT NOT NULL,
+  user_id      TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  wrapped_key  TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS org_keys (
+  org_id      TEXT NOT NULL,
+  user_id     TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  wrapped_key TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  PRIMARY KEY (org_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_keys_user ON note_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_keys_user ON workspace_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_org_keys_user ON org_keys(user_id);
 
 CREATE TABLE IF NOT EXISTS note_invitations (
   note_id      TEXT NOT NULL,
@@ -277,17 +299,19 @@ CREATE TABLE IF NOT EXISTS vault_key_params (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_key_params_workspace ON vault_key_params(workspace_id);
 
 CREATE TABLE IF NOT EXISTS note_comments (
-  id          TEXT PRIMARY KEY,
-  note_id     TEXT NOT NULL,
-  thread_id   TEXT NOT NULL,
-  author_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  content     TEXT NOT NULL,
-  anchor_from INTEGER,
-  anchor_to   INTEGER,
-  resolved    INTEGER NOT NULL DEFAULT 0,
-  parent_id   TEXT,
-  created_at  TEXT NOT NULL,
-  updated_at  TEXT NOT NULL
+  id                TEXT PRIMARY KEY,
+  note_id           TEXT NOT NULL,
+  thread_id         TEXT NOT NULL,
+  author_id         TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  content_encrypted TEXT NOT NULL,
+  content_iv        TEXT NOT NULL,
+  anchor_from       INTEGER,
+  anchor_to         INTEGER,
+  resolved          INTEGER NOT NULL DEFAULT 0,
+  parent_id         TEXT,
+  mentions          TEXT NOT NULL DEFAULT '[]',
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_note_comments_note ON note_comments(note_id);

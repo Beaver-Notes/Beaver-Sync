@@ -300,7 +300,8 @@ class MultiQuery {
 const ALLOWED_TABLES = new Set([
   'accounts', 'sessions', 'commits', 'workspaces', 'subscriptions',
   'devices', 'credentials', 'quick_connect_codes', 'compaction_locks',
-  'collaboration_keys', 'note_invitations', 'email_aliases',
+  'note_keys', 'workspace_keys', 'org_keys',
+  'note_invitations', 'email_aliases',
   'webauthn_challenges', 'workspace_members', 'workspace_invites',
   'sso_configs', 'sso_oidc_states', 'audit_logs', 'yjs_doc_updates',
   'vault_key_params', 'note_invite_links',
@@ -471,7 +472,9 @@ const Subscription = createModel('subscriptions');
 const Credential = createModel('credentials');
 const QuickConnectCode = createModel('quick_connect_codes', 'code');
 const CompactionLock = createModel('compaction_locks');
-const CollaborationKey = createModel('collaboration_keys');
+const NoteKey = createModel('note_keys', '_composite');
+const WorkspaceKey = createModel('workspace_keys', '_composite');
+const OrgKey = createModel('org_keys', '_composite');
 const NoteInvitation = createModel('note_invitations', '_composite');
 const Workspace = createModel('workspaces');
 const WorkspaceMember = createModel('workspace_members', '_composite');
@@ -492,7 +495,8 @@ const OrgSubscription = createModel('org_subscriptions');
 module.exports = {
   Account, Session, CommitMeta, Device, Subscription,
   Credential, QuickConnectCode, CompactionLock,
-  CollaborationKey, NoteInvitation,
+  NoteKey, WorkspaceKey, OrgKey,
+  NoteInvitation,
   Workspace, WorkspaceMember, WorkspaceInvite,
   AuditLog, SsoConfig, SsoOidcState, EmailAlias, WebAuthnChallenge,
   YjsDocUpdate, VaultKeyParams, NoteInviteLink, NoteComment,
