@@ -304,6 +304,7 @@ const ALLOWED_TABLES = new Set([
   'webauthn_challenges', 'workspace_members', 'workspace_invites',
   'sso_configs', 'sso_oidc_states', 'audit_logs', 'yjs_doc_updates',
   'vault_key_params', 'note_invite_links',
+  'note_comments',
   // New org tables
   'organizations', 'org_members', 'org_subscriptions',
 ]);
@@ -483,6 +484,7 @@ const WebAuthnChallenge = createModel('webauthn_challenges');
 const YjsDocUpdate = createModel('yjs_doc_updates');
 const VaultKeyParams = createModel('vault_key_params');
 const NoteInviteLink = createModel('note_invite_links');
+const NoteComment = createModel('note_comments');
 const Organization = createModel('organizations');
 const OrgMember = createModel('org_members', '_composite');
 const OrgSubscription = createModel('org_subscriptions');
@@ -493,6 +495,6 @@ module.exports = {
   CollaborationKey, NoteInvitation,
   Workspace, WorkspaceMember, WorkspaceInvite,
   AuditLog, SsoConfig, SsoOidcState, EmailAlias, WebAuthnChallenge,
-  YjsDocUpdate, VaultKeyParams, NoteInviteLink,
+  YjsDocUpdate, VaultKeyParams, NoteInviteLink, NoteComment,
   Organization, OrgMember, OrgSubscription,
 };

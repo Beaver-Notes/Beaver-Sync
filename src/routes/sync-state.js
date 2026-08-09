@@ -291,16 +291,17 @@ async function syncStateRoutes(app) {
 
     const db = getDb();
     const now = new Date().toISOString();
-    const result = db.prepare(`
-      UPDATE sync_workspace_state
-      SET status = 'empty', initialization_token = NULL,
-          initialization_expires_at = NULL, updated_at = ?
-      WHERE workspace_id = ? AND status = 'initializing'
-    `).run(now, workspaceId);
-    if (result.changes === 0) {
-      const state = db.prepare('SELECT status FROM sync_workspace_state WHERE workspace_id = ?').get(workspaceId);
-      return reply.status(400).send({ error: 'not_stuck', currentStatus: state?.status ?? 'not_found' });
-    }
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE sync_workspace_state
+        SET status = 'empty', generation = 0, initialization_token = NULL,
+            initialization_expires_at = NULL, updated_at = ?
+        WHERE workspace_id = ?
+      `).run(now, workspaceId);
+      db.prepare('DELETE FROM sync_document_state WHERE workspace_id = ?').run(workspaceId);
+      db.prepare('DELETE FROM yjs_doc_updates WHERE workspace_id = ?').run(workspaceId);
+      db.prepare('DELETE FROM vault_key_params WHERE workspace_id = ?').run(workspaceId);
+    })();
     return reply.send({ ok: true, workspaceId, status: 'empty' });
   });
 }

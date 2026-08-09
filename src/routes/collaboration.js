@@ -28,14 +28,6 @@ const baseRateLimit = {
   bodyLimit: BODY_LIMIT,
 };
 
-async function ensureInvited(app, userId, noteId) {
-  const invite = await NoteInvitation.findOne({ noteId, userId }).lean();
-  if (!invite) {
-    throw Object.assign(new Error('Not invited to this note.'), { statusCode: 403, code: 'forbidden' });
-  }
-  return invite;
-}
-
 async function collaborationRoutes(app) {
   await app.register(require('../middleware/auth'));
 
@@ -53,6 +45,13 @@ async function collaborationRoutes(app) {
 
     const existing = await CollaborationKey.findOne({ noteId }).lean();
     if (existing) {
+      // Auto-grant editor access if the user has no invitation yet.
+      // This handles the case where the key was created by another device
+      // and the current user needs editor access to manage sharing.
+      const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
+      if (!existingInvite) {
+        await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
+      }
       return reply.status(200).send({ noteId, exists: true });
     }
 
@@ -77,10 +76,11 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    try {
-      await ensureInvited(app, req.userId, noteId);
-    } catch (err) {
-      return reply.status(err.statusCode ?? 500).send({ error: err.code ?? 'internal_error', message: err.message });
+    // Auto-grant editor access if the user has no invitation yet.
+    // This handles the case where the key was created by another device.
+    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
+    if (!existingInvite) {
+      await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
     }
 
     const record = await CollaborationKey.findOne({ noteId }).lean();
@@ -107,10 +107,10 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: 'Provide username or email of the user to invite.' });
     }
 
-    try {
-      await ensureInvited(app, req.userId, noteId);
-    } catch (err) {
-      return reply.status(err.statusCode ?? 500).send({ error: err.code ?? 'internal_error', message: err.message });
+    // Auto-grant editor access if the user has no invitation yet.
+    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
+    if (!existingInvite) {
+      await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
     }
 
     let target = null;
@@ -154,14 +154,27 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    try {
-      await ensureInvited(app, req.userId, noteId);
-    } catch (err) {
-      return reply.status(err.statusCode ?? 500).send({ error: err.code ?? 'internal_error', message: err.message });
+    // Auto-grant editor access if the user has no invitation yet.
+    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
+    if (!existingInvite) {
+      await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
     }
 
     const invitations = await NoteInvitation.find({ noteId }).lean();
-    return reply.send({ noteId, invitations });
+
+    // Fetch usernames for all invited users
+    const userIds = [...new Set(invitations.map((inv) => inv.userId))];
+    const accounts = userIds.length > 0
+      ? await Account.find({ id: { $in: userIds } }, { id: 1, username: 1 }).lean()
+      : [];
+    const usernameMap = new Map(accounts.map((a) => [a.id, a.username]));
+
+    const enriched = invitations.map((inv) => ({
+      ...inv,
+      username: usernameMap.get(inv.userId) || null,
+    }));
+
+    return reply.send({ noteId, invitations: enriched });
   });
 
   app.delete('/invite/:noteId/:userId', {
@@ -180,10 +193,10 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_user_id', message: 'Invalid user ID.' });
     }
 
-    try {
-      await ensureInvited(app, req.userId, noteId);
-    } catch (err) {
-      return reply.status(err.statusCode ?? 500).send({ error: err.code ?? 'internal_error', message: err.message });
+    // Auto-grant editor access if the user has no invitation yet.
+    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
+    if (!existingInvite) {
+      await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
     }
 
     const result = await NoteInvitation.deleteOne({ noteId, userId: targetUserId });

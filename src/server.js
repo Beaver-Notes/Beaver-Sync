@@ -155,6 +155,7 @@ async function buildApp() {
   await app.register(require('./routes/audit'),       { prefix: '/audit' });
   await app.register(require('./routes/admin'),       { prefix: '/admin' });
   await app.register(require('./routes/webhooks'),    { prefix: '/webhooks' });
+  await app.register(require('./routes/comments'),    { prefix: '/comments' });
 
   app.get('/health', {
     config: {
