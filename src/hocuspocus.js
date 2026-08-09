@@ -1,6 +1,7 @@
 'use strict';
 
 const { Server } = require('@hocuspocus/server');
+const { relayStoredUpdates } = require('./lib/relay');
 
 const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.internal:3000';
 const HOCUSPOCUS_PORT = parseInt(process.env.HOCUSPOCUS_PORT ?? '8080', 10);
@@ -117,6 +118,31 @@ async function startHocuspocus() {
           }
         },
       });
+    },
+
+    async connected({ documentName, connection }) {
+      if (PLAINTEXT_RELAY) return; // flag-on path already reconstructs via onLoadDocument
+      if (!persistence) return;
+
+      const parsed = persistence.parseRoomName(documentName);
+      if (!parsed) return;
+
+      const { workspaceId, noteId } = parsed;
+
+      try {
+        await relayStoredUpdates({
+          connection,
+          persistence,
+          workspaceId,
+          noteId,
+          log: (msg) => console.log(`[hocuspocus] ${msg}`),
+        });
+      } catch (err) {
+        console.warn(
+          `[hocuspocus] Failed to relay stored updates for ${documentName}:`,
+          err.message,
+        );
+      }
     },
 
     async onLoadDocument({ document, documentName }) {
