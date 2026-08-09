@@ -26,8 +26,10 @@ async function startHocuspocus() {
   const { initErrorMonitoring } = require('./lib/error-monitoring');
   initErrorMonitoring(process.env.GLITCHTIP_DSN ?? process.env.HOCUSPOCUS_GLITCHTIP_DSN);
 
+  const PLAINTEXT_RELAY = process.env.YJS_PLAINTEXT_RECOVERY === 'true';
+
   // Run recovery job on startup — flush stale SQLite updates to R2
-  if (persistence) {
+  if (persistence && process.env.YJS_PLAINTEXT_RECOVERY === 'true') {
     try {
       const { flushUnsyncedDocuments } = require('./lib/yjs-recovery');
       const result = await flushUnsyncedDocuments();
@@ -90,6 +92,7 @@ async function startHocuspocus() {
       // Flush full document state to R2 on session close
       configuration.extensions.push({
         async onStoreDocument({ document, documentName }) {
+          if (!PLAINTEXT_RELAY) return;
           if (!r2 || !snapshots) return;
 
           const parsed = persistence.parseRoomName(documentName);
@@ -118,6 +121,7 @@ async function startHocuspocus() {
 
     async onLoadDocument({ document, documentName }) {
       if (!persistence) return;
+      if (!PLAINTEXT_RELAY) return; // server does not reconstruct plaintext docs
 
       const parsed = persistence.parseRoomName(documentName);
       if (!parsed) return;
@@ -175,7 +179,7 @@ async function startHocuspocus() {
           update instanceof Uint8Array ? update : new Uint8Array(update),
           connection?.socketId ?? userId,
           Date.now(),
-          false,
+          true,
         );
       } catch (err) {
         console.warn(
@@ -187,6 +191,7 @@ async function startHocuspocus() {
 
     async afterStoreDocument({ document: _document, documentName }) {
       if (!persistence) return;
+      if (!PLAINTEXT_RELAY) return;
 
       const parsed = persistence.parseRoomName(documentName);
       if (!parsed) return;

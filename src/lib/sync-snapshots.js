@@ -69,12 +69,18 @@ function createSnapshotService({ r2 = defaultR2, persistence = defaultPersistenc
   }
 
   async function writeDocumentSnapshot({ workspaceId, noteId, generation, state }) {
+    if (process.env.YJS_PLAINTEXT_RECOVERY !== 'true') {
+      return { disabled: true };
+    }
     return withDocumentLock(workspaceId, noteId, () => writeSnapshot({
       workspaceId, noteId, generation, state,
     }));
   }
 
   async function recoverDocument(workspaceId, noteId) {
+    if (process.env.YJS_PLAINTEXT_RECOVERY !== 'true') {
+      return { disabled: true };
+    }
     return withDocumentLock(workspaceId, noteId, async () => {
       const current = await persistence.getDocumentSyncState(workspaceId, noteId);
       const updates = await persistence.loadAllUpdates(workspaceId, noteId);

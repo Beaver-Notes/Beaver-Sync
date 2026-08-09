@@ -20,6 +20,10 @@ const FLUSH_AGE_MS = parseInt(process.env.YJS_FLUSH_AGE_MS ?? '300000', 10); // 
  * via the Hocuspocus onStoreDocument hook.
  */
 async function flushUnsyncedDocuments() {
+  if (process.env.YJS_PLAINTEXT_RECOVERY !== 'true') {
+    return { flushed: 0, disabled: true };
+  }
+
   if (!snapshots) return { flushed: 0 };
 
   const db = getDb();
