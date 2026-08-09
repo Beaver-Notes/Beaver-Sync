@@ -47,13 +47,25 @@ async function organizationRoutes(app) {
     if (!Array.isArray(recipients) || !recipients.some((r) => r.userId === req.userId)) {
       return reply.status(400).send({ error: 'validation_error', message: 'recipients must include the owner.' });
     }
+    for (const r of recipients) {
+      if (!r || typeof r.userId !== 'string' || typeof r.wrappedKey !== 'string' || !r.wrappedKey) {
+        return reply.status(400).send({ error: 'validation_error', message: 'Each recipient needs userId and wrappedKey.' });
+      }
+    }
 
     const orgId = crypto.randomUUID();
     const slug = (typeof clientSlug === 'string' && clientSlug.trim() && /^[a-z0-9-]{1,63}$/.test(clientSlug))
       ? clientSlug.trim()
       : `org-${orgId}`;
 
-    await Organization.create({ id: orgId, nameEncrypted: nameEncrypted.trim(), slug, createdAt: new Date() });
+    try {
+      await Organization.create({ id: orgId, nameEncrypted: nameEncrypted.trim(), slug, createdAt: new Date() });
+    } catch (err) {
+      if (String(err?.message ?? err).includes('UNIQUE')) {
+        return reply.status(409).send({ error: 'slug_taken', message: 'That slug is already in use.' });
+      }
+      throw err;
+    }
     await OrgMember.create({ orgId, accountId: req.userId, role: 'owner', createdAt: new Date() });
     await OrgSubscription.create({ id: crypto.randomUUID(), orgId, plan: 'free', status: 'active', seats: 1, createdAt: new Date() });
 

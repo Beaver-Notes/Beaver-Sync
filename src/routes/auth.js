@@ -99,12 +99,12 @@ async function authRoutes(app) {
     const orgName = account.username || email.split('@')[0];
     const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 
-    await Organization.create({ id: orgId, nameEncrypted: orgName, slug, createdAt: new Date() });
+    await Organization.create({ id: orgId, nameEncrypted: '', slug, createdAt: new Date() });
     await OrgMember.create({ orgId, accountId: account.id, role: 'owner', createdAt: new Date() });
     await OrgSubscription.create({ id: require('crypto').randomUUID(), orgId, plan, status: 'active', seats: 1, storageQuotaBytes, createdAt: new Date() });
 
     // Create default workspace in personal org
-    const defaultWorkspace = await Workspace.create({ nameEncrypted: 'Default', ownerId: account.id, orgId, createdAt: new Date() });
+    const defaultWorkspace = await Workspace.create({ nameEncrypted: '', ownerId: account.id, orgId, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: defaultWorkspace.id, accountId: account.id, role: 'owner', createdAt: new Date() });
 
     // Initialize sync state for the new workspace so /sync/state doesn't 404
@@ -132,12 +132,12 @@ async function authRoutes(app) {
       },
       organization: {
         id: orgId,
-        name: orgName,
+        nameEncrypted: '',
         role: 'owner',
       },
       workspace: {
         id: defaultWorkspace.id,
-        name: 'Default',
+        nameEncrypted: '',
         role: 'owner',
       },
     });
@@ -251,6 +251,7 @@ async function authRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: 'A valid kemPublicKey is required.' });
     }
     await Account.updateOne({ _id: req.userId }, { $set: { kemPublicKey } });
+    audit(req, 'kem_keypair_updated', {});
     return reply.send({ ok: true });
   });
 

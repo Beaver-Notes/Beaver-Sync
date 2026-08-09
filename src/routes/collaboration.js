@@ -64,6 +64,10 @@ async function collaborationRoutes(app) {
       if (!isCollab) {
         return reply.status(403).send({ error: 'forbidden', message: `User ${r.userId} is not a collaborator.` });
       }
+      const recipientAccount = await Account.findById(r.userId, { kemPublicKey: 1 }).lean();
+      if (!recipientAccount || !recipientAccount.kemPublicKey) {
+        return reply.status(403).send({ error: 'keypair_required', message: `User ${r.userId} has not set up end-to-end encryption.` });
+      }
     }
 
     for (const r of recipients) {
@@ -344,6 +348,11 @@ async function collaborationRoutes(app) {
     const existing = await NoteInvitation.findOne({ noteId: link.noteId, userId: req.userId }).lean();
     if (existing) {
       return reply.send({ success: true, message: 'Already a member.', role: existing.role });
+    }
+
+    const joiner = await Account.findById(req.userId, { kemPublicKey: 1 }).lean();
+    if (!joiner || !joiner.kemPublicKey) {
+      return reply.status(403).send({ error: 'keypair_required', message: 'Set up end-to-end encryption before joining.' });
     }
 
     // Add as collaborator

@@ -52,6 +52,11 @@ async function workspaceRoutes(app) {
     if (!Array.isArray(recipients) || recipients.length === 0 || !recipients.some((r) => r.userId === req.userId)) {
       return reply.status(400).send({ error: 'validation_error', message: 'recipients must include the owner.' });
     }
+    for (const r of recipients) {
+      if (!r || typeof r.userId !== 'string' || typeof r.wrappedKey !== 'string' || !r.wrappedKey) {
+        return reply.status(400).send({ error: 'validation_error', message: 'Each recipient needs userId and wrappedKey.' });
+      }
+    }
 
     if (!orgId) {
       return reply.status(400).send({ error: 'validation_error', message: 'Organization ID is required.' });
@@ -291,6 +296,11 @@ async function workspaceRoutes(app) {
     const existing = await WorkspaceMember.findOne({ workspaceId: invite.workspaceId, accountId: req.userId }).lean();
     if (existing) {
       return reply.status(409).send({ error: 'already_member', message: 'You are already a member of this workspace.' });
+    }
+
+    const joiner = await Account.findById(req.userId, { kemPublicKey: 1 }).lean();
+    if (!joiner || !joiner.kemPublicKey) {
+      return reply.status(403).send({ error: 'keypair_required', message: 'Set up end-to-end encryption before joining.' });
     }
 
     await WorkspaceMember.create({ workspaceId: invite.workspaceId, accountId: req.userId, role: invite.role, createdAt: new Date() });
