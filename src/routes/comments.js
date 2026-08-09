@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const { z } = require('zod');
-const { NoteComment, NoteInvitation, Account } = require('../models');
+const { NoteComment, NoteInvitation } = require('../models');
 
 const BODY_LIMIT = parseInt(process.env.COMMENTS_BODY_LIMIT_BYTES ?? '8192', 10);
 
@@ -25,20 +25,6 @@ async function requireCollaborator(noteId, userId) {
   return !!invite;
 }
 
-async function enrichAuthors(comments) {
-  if (!comments.length) return comments;
-  const authorIds = [...new Set(comments.map((c) => c.authorId))];
-  const accounts = await Account.find({ _id: { $in: authorIds } }).lean();
-  const byId = {};
-  for (const a of accounts) {
-    byId[a.id] = a.username || a.emailHmac || 'Anonymous';
-  }
-  return comments.map((c) => ({
-    ...c,
-    authorName: byId[c.authorId] || 'Anonymous',
-  }));
-}
-
 async function commentRoutes(app) {
   await app.register(require('../middleware/auth'));
 
@@ -59,9 +45,7 @@ async function commentRoutes(app) {
     }
 
     const comments = await NoteComment.find({ noteId }).sort({ createdAt: 1 }).lean();
-    const enriched = await enrichAuthors(comments);
-
-    return reply.send({ comments: enriched });
+    return reply.send({ comments });
   });
 
   app.post('/:noteId', {
@@ -78,9 +62,19 @@ async function commentRoutes(app) {
       return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
     }
 
-    const { content, threadId, anchorFrom, anchorTo, parentId } = req.body ?? {};
-    if (!content || typeof content !== 'string' || content.trim().length === 0) {
-      return reply.status(400).send({ error: 'validation_error', message: 'Content is required.' });
+    const { contentEncrypted, contentIv, mentions, threadId, anchorFrom, anchorTo, parentId } = req.body ?? {};
+    if (!contentEncrypted || typeof contentEncrypted !== 'string' || !contentIv || typeof contentIv !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'contentEncrypted and contentIv are required.' });
+    }
+
+    let mentionList = [];
+    if (mentions !== undefined) {
+      if (!Array.isArray(mentions) || mentions.some((m) => typeof m !== 'string')) {
+        return reply.status(400).send({ error: 'validation_error', message: 'mentions must be an array of user IDs.' });
+      }
+      const collabRows = await NoteInvitation.find({ noteId }).lean();
+      const collabIds = new Set(collabRows.map((c) => c.userId));
+      mentionList = mentions.filter((m) => collabIds.has(m) && m !== req.userId);
     }
 
     const now = new Date().toISOString();
@@ -88,16 +82,18 @@ async function commentRoutes(app) {
       noteId,
       threadId: threadId || crypto.randomUUID(),
       authorId: req.userId,
-      content: content.trim(),
+      contentEncrypted,
+      contentIv,
       anchorFrom: anchorFrom ?? null,
       anchorTo: anchorTo ?? null,
       resolved: false,
       parentId: parentId ?? null,
+      mentions: JSON.stringify(mentionList),
       createdAt: now,
       updatedAt: now,
     });
 
-    return reply.status(201).send({ comment: { ...comment.toJSON(), authorName: 'You' } });
+    return reply.status(201).send({ comment: comment.toJSON() });
   });
 
   app.patch('/:commentId', {
@@ -119,14 +115,14 @@ async function commentRoutes(app) {
       return reply.status(403).send({ error: 'forbidden', message: 'Can only edit your own comments.' });
     }
 
-    const { content } = req.body ?? {};
-    if (!content || typeof content !== 'string' || content.trim().length === 0) {
-      return reply.status(400).send({ error: 'validation_error', message: 'Content is required.' });
+    const { contentEncrypted, contentIv } = req.body ?? {};
+    if (!contentEncrypted || typeof contentEncrypted !== 'string' || !contentIv || typeof contentIv !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'contentEncrypted and contentIv are required.' });
     }
 
     await NoteComment.updateOne(
       { _id: commentId },
-      { $set: { content: content.trim(), updatedAt: new Date().toISOString() } }
+      { $set: { contentEncrypted, contentIv, updatedAt: new Date().toISOString() } }
     );
 
     return reply.send({ success: true });
@@ -151,9 +147,7 @@ async function commentRoutes(app) {
       return reply.status(403).send({ error: 'forbidden', message: 'Can only delete your own comments.' });
     }
 
-    // Delete the comment and all its replies
     await NoteComment.deleteMany({ $or: [{ _id: commentId }, { parentId: commentId }] });
-
     return reply.send({ success: true });
   });
 
