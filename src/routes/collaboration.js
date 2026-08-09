@@ -123,6 +123,11 @@ async function collaborationRoutes(app) {
       return reply.status(403).send({ error: 'forbidden', message: 'Recipient is not a collaborator.' });
     }
 
+    const recipientAccount = await Account.findById(recipientUserId, { kemPublicKey: 1 }).lean();
+    if (!recipientAccount || !recipientAccount.kemPublicKey) {
+      return reply.status(403).send({ error: 'keypair_required', message: `User ${recipientUserId} has not set up end-to-end encryption.` });
+    }
+
     await NoteKey.findOneAndUpdate(
       { noteId, userId: recipientUserId },
       { $set: { wrappedKey } },
