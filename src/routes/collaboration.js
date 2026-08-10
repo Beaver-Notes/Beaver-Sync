@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { z } = require('zod');
+const { getDb } = require('../db');
 const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models');
 const { validatePublicKey } = require('../lib/recipient-wrap');
 
@@ -70,15 +71,25 @@ async function collaborationRoutes(app) {
       }
     }
 
-    for (const r of recipients) {
-      await NoteKey.findOneAndUpdate(
-        { noteId, userId: r.userId },
-        { $set: { wrappedKey: r.wrappedKey } },
-        { upsert: true }
-      );
-    }
+    const db = getDb();
+    const outcome = db.transaction(() => {
+      // Idempotent provisioning: the first writer wins. If the note already has
+      // any key envelopes, refuse to overwrite so a late joiner or a concurrent
+      // provisioner cannot rotate an existing note key.
+      if (NoteKey.countDocuments({ noteId }) > 0) {
+        return { existing: true, stored: 0 };
+      }
+      for (const r of recipients) {
+        NoteKey.findOneAndUpdate(
+          { noteId, userId: r.userId },
+          { $set: { wrappedKey: r.wrappedKey } },
+          { upsert: true }
+        );
+      }
+      return { existing: false, stored: recipients.length };
+    })();
 
-    return reply.send({ noteId, stored: recipients.length });
+    return reply.send({ noteId, stored: outcome.stored, noteHasKey: true, existing: outcome.existing });
   });
 
   app.get('/keys/:noteId', {
@@ -91,11 +102,23 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
+    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
+    if (!existingInvite) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
+    }
+
+    const noteHasKey = (await NoteKey.countDocuments({ noteId })) > 0;
+    if (!noteHasKey) {
+      return reply.send({ noteId, wrappedKey: null, noteHasKey: false });
+    }
+
     const row = await NoteKey.findOne({ noteId, userId: req.userId }).lean();
     if (!row) {
-      return reply.status(404).send({ error: 'not_found', message: 'No key envelope for this user on this note.' });
+      // Caller is a collaborator but has no envelope yet — late joiner. They
+      // must be re-wrapped by an owner, not provision a fresh key.
+      return reply.send({ noteId, wrappedKey: null, noteHasKey: true });
     }
-    return reply.send({ noteId, wrappedKey: row.wrappedKey });
+    return reply.send({ noteId, wrappedKey: row.wrappedKey, noteHasKey: true });
   });
 
   app.post('/keys/:noteId/recipient', {

@@ -50,6 +50,7 @@ async function makeKeypair() {
 let app;
 let alice, bob;
 let aliceSession, bobSession;
+let originalAliceKemCt;
 
 test.before(async () => {
   alice = await makeKeypair();
@@ -98,14 +99,78 @@ test('stores recipient envelopes and returns only the caller\u2019s own', async 
   });
   assert.equal(res.statusCode, 200);
   assert.equal(res.json().stored, 2);
+  assert.equal(res.json().noteHasKey, true);
+  assert.equal(res.json().existing, false);
 
   const aliceGet = await get(aliceSession, '/collaboration/keys/note-1');
   assert.equal(aliceGet.statusCode, 200);
+  assert.equal(aliceGet.json().noteHasKey, true);
   const parsed = JSON.parse(aliceGet.json().wrappedKey);
   assert.equal(parsed.kemCt, aliceEnv.kemCt);
 
   const bobGet = await get(bobSession, '/collaboration/keys/note-1');
+  assert.equal(bobGet.json().noteHasKey, true);
   assert.equal(JSON.parse(bobGet.json().wrappedKey).kemCt, bobEnv.kemCt);
+});
+
+test('GET /keys/:noteId reports noteHasKey for fresh notes and late joiners', async () => {
+  // Fresh note: no envelopes yet, but the caller must be a collaborator first.
+  let fresh = await get(aliceSession, '/collaboration/keys/note-fresh');
+  assert.equal(fresh.statusCode, 403);
+  assert.equal(fresh.json().error, 'forbidden');
+  await post(aliceSession, '/collaboration/invite/note-fresh', { username: 'alice' }).catch(() => {});
+
+  fresh = await get(aliceSession, '/collaboration/keys/note-fresh');
+  assert.equal(fresh.statusCode, 200);
+  assert.equal(fresh.json().noteHasKey, false);
+  assert.equal(fresh.json().wrappedKey, null);
+
+  // Seed an envelope for alice only.
+  const secret = Buffer.from('b'.repeat(64), 'hex');
+  const aliceEnv = await wrapForRecipient(alice.pk, secret);
+  originalAliceKemCt = aliceEnv.kemCt;
+  const store = await post(aliceSession, '/collaboration/keys/note-fresh/recipients', {
+    recipients: [{ userId: 'alice', wrappedKey: JSON.stringify(aliceEnv) }],
+  });
+  assert.equal(store.statusCode, 200);
+  assert.equal(store.json().existing, false);
+
+  // Late joiner with no envelope still learns the note already has a key.
+  await post(aliceSession, '/collaboration/invite/note-fresh', { username: 'bob' });
+  const bobGet = await get(bobSession, '/collaboration/keys/note-fresh');
+  assert.equal(bobGet.statusCode, 200);
+  assert.equal(bobGet.json().noteHasKey, true);
+  assert.equal(bobGet.json().wrappedKey, null);
+
+  // Non-collaborators are still denied.
+  const outsider = await makeKeypair();
+  seedAccount('outsider2', outsider.pk);
+  const outsiderSession = await createSession('outsider2', {});
+  const denied = await get(outsiderSession, '/collaboration/keys/note-fresh');
+  assert.equal(denied.statusCode, 403);
+  assert.equal(denied.json().error, 'forbidden');
+});
+
+test('storeRecipients is idempotent and refuses to rotate an existing note key', async () => {
+  // note-fresh already has an envelope for alice; bob is a collaborator.
+  const secret = Buffer.from('c'.repeat(64), 'hex');
+  const bobEnv = await wrapForRecipient(bob.pk, secret);
+  const res = await post(bobSession, '/collaboration/keys/note-fresh/recipients', {
+    recipients: [{ userId: 'bob', wrappedKey: JSON.stringify(bobEnv) }],
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().existing, true);
+  assert.equal(res.json().stored, 0);
+  assert.equal(res.json().noteHasKey, true);
+
+  // Bob's attempted overwrite did not land — still no envelope for bob.
+  const bobGet = await get(bobSession, '/collaboration/keys/note-fresh');
+  assert.equal(bobGet.json().noteHasKey, true);
+  assert.equal(bobGet.json().wrappedKey, null);
+
+  // Alice's original envelope is untouched.
+  const aliceGet = await get(aliceSession, '/collaboration/keys/note-fresh');
+  assert.equal(JSON.parse(aliceGet.json().wrappedKey).kemCt, originalAliceKemCt);
 });
 
 test('comments are stored encrypted with mentions filtered to collaborators', async () => {
