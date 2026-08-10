@@ -151,13 +151,22 @@ async function collaborationRoutes(app) {
       return reply.status(403).send({ error: 'keypair_required', message: `User ${recipientUserId} has not set up end-to-end encryption.` });
     }
 
-    await NoteKey.findOneAndUpdate(
-      { noteId, userId: recipientUserId },
-      { $set: { wrappedKey } },
-      { upsert: true }
-    );
+    const db = getDb();
+    const outcome = db.transaction(() => {
+      // Mirror storeRecipients idempotency: if the note already has any key
+      // envelopes, refuse to overwrite so no caller can rotate an existing key.
+      if (NoteKey.countDocuments({ noteId }) > 0) {
+        return { existing: true, stored: false };
+      }
+      NoteKey.findOneAndUpdate(
+        { noteId, userId: recipientUserId },
+        { $set: { wrappedKey } },
+        { upsert: true }
+      );
+      return { existing: false, stored: true };
+    })();
 
-    return reply.send({ noteId, recipientUserId, stored: true });
+    return reply.send({ noteId, recipientUserId, stored: outcome.stored, existing: outcome.existing, noteHasKey: true });
   });
 
   app.get('/public-keys/:noteId', {

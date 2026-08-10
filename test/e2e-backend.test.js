@@ -173,6 +173,29 @@ test('storeRecipients is idempotent and refuses to rotate an existing note key',
   assert.equal(JSON.parse(aliceGet.json().wrappedKey).kemCt, originalAliceKemCt);
 });
 
+test('singular recipient refuses to overwrite an existing note key', async () => {
+  // note-fresh already has an envelope for alice (see earlier tests).
+  const secret = Buffer.from('d'.repeat(64), 'hex');
+  const bobEnv = await wrapForRecipient(bob.pk, secret);
+  const res = await post(bobSession, '/collaboration/keys/note-fresh/recipient', {
+    recipientUserId: 'bob',
+    wrappedKey: JSON.stringify(bobEnv),
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().existing, true);
+  assert.equal(res.json().stored, false);
+  assert.equal(res.json().noteHasKey, true);
+
+  // Bob's attempted overwrite did not land — still no envelope for bob.
+  const bobGet = await get(bobSession, '/collaboration/keys/note-fresh');
+  assert.equal(bobGet.json().noteHasKey, true);
+  assert.equal(bobGet.json().wrappedKey, null);
+
+  // Alice's original envelope is untouched.
+  const aliceGet = await get(aliceSession, '/collaboration/keys/note-fresh');
+  assert.equal(JSON.parse(aliceGet.json().wrappedKey).kemCt, originalAliceKemCt);
+});
+
 test('comments are stored encrypted with mentions filtered to collaborators', async () => {
   const res = await post(aliceSession, '/comments/note-1', {
     contentEncrypted: 'ciphertext',
