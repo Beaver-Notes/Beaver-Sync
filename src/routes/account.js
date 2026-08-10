@@ -248,9 +248,10 @@ async function accountRoutes(app) {
       });
     }
 
-    // Resolve the recipient before removal: sendWithAlias looks the account back up,
-    // and deleteTx() deletes it synchronously below, so this must complete first.
-    await sendAccountDeletedEmail(app, account.id);
+    // Fire-and-forget (matches sendWelcomeEmail convention): sendWithAlias resolves the
+    // recipient from the account before deletion and swallows its own errors, so the
+    // deletion below must not be gated on the (untimed) Resend HTTP call.
+    sendAccountDeletedEmail(app, account.id);
 
     const accountIdHash = hashAccountId(req.userId);
 
