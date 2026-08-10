@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+. "$(dirname "$0")/_/husky.sh"
+if ! grep -qs "^Signed-off-by:" "$1"; then
+  SOB="Signed-off-by: Daniele-rolli <danielerolli@proton.me>"
+  if grep -qs "^[^#]" "$1"; then
+    printf "\n%s\n" "$SOB" >> "$1"
+  fi
+fi
+exit 0
