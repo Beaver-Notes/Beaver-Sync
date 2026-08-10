@@ -125,3 +125,29 @@ test('comments are stored encrypted with mentions filtered to collaborators', as
   assert.equal(list.json().comments[0].contentEncrypted, 'ciphertext');
   assert.ok(!('authorName' in list.json().comments[0]));
 });
+
+test('public-keys exposes only keypair\u2019d collaborators and rejects non-collaborators', async () => {
+  const db = getDb();
+  const ins = db.prepare(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES (?, ?, ?, ?, ?)'
+  );
+  ins.run('note-pub', 'alice', 'alice', 'editor', now);
+  ins.run('note-pub', 'bob', 'alice', 'editor', now);
+  ins.run('note-pub', 'nokey', 'alice', 'viewer', now);
+
+  const res = await get(aliceSession, '/collaboration/public-keys/note-pub');
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.noteId, 'note-pub');
+  const userMap = new Map(body.collaborators.map((c) => [c.userId, c.kemPublicKey]));
+  assert.ok(userMap.has('bob'));
+  assert.equal(userMap.get('bob'), bob.pk);
+  assert.ok(!userMap.has('nokey'));
+
+  const outsider = await makeKeypair();
+  seedAccount('outsider', outsider.pk);
+  const outsiderSession = await createSession('outsider', {});
+  const denied = await get(outsiderSession, '/collaboration/public-keys/note-pub');
+  assert.equal(denied.statusCode, 403);
+  assert.equal(denied.json().error, 'forbidden');
+});

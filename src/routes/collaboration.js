@@ -137,6 +137,30 @@ async function collaborationRoutes(app) {
     return reply.send({ noteId, recipientUserId, stored: true });
   });
 
+  app.get('/public-keys/:noteId', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const noteId = req.params.noteId;
+    const parsed = NoteIdSchema.safeParse(noteId);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
+    }
+    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
+    if (!existingInvite) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
+    }
+    const invitations = await NoteInvitation.find({ noteId }).lean();
+    const userIds = [...new Set(invitations.map((inv) => inv.userId))];
+    const accounts = userIds.length > 0
+      ? await Account.find({ id: { $in: userIds } }, { id: 1, kemPublicKey: 1 }).lean()
+      : [];
+    const collaborators = accounts
+      .filter((a) => a.kemPublicKey)
+      .map((a) => ({ userId: a.id, kemPublicKey: a.kemPublicKey }));
+    return reply.send({ noteId, collaborators });
+  });
+
   app.post('/invite/:noteId', {
     ...baseRateLimit,
     ...protect,
