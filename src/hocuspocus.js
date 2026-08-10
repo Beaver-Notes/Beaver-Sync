@@ -13,34 +13,10 @@ const ROOM_PATTERN = /^workspace:([a-zA-Z0-9-]+):note:([a-zA-Z0-9-]+)$/;
 const persistence = YJS_PERSISTENCE_ENABLED
   ? require('./persistence/yjs')
   : null;
-let r2 = null;
-if (persistence) {
-  try {
-    r2 = require('./services/r2');
-  } catch {
-    // R2 not configured — snapshot writes will be skipped
-  }
-}
-const snapshots = persistence && r2 ? require('./lib/sync-snapshots') : null;
 
 async function startHocuspocus() {
   const { initErrorMonitoring } = require('./lib/error-monitoring');
   initErrorMonitoring(process.env.GLITCHTIP_DSN ?? process.env.HOCUSPOCUS_GLITCHTIP_DSN);
-
-  const PLAINTEXT_RELAY = process.env.YJS_PLAINTEXT_RECOVERY === 'true';
-
-  // Run recovery job on startup — flush stale SQLite updates to R2
-  if (persistence && process.env.YJS_PLAINTEXT_RECOVERY === 'true') {
-    try {
-      const { flushUnsyncedDocuments } = require('./lib/yjs-recovery');
-      const result = await flushUnsyncedDocuments();
-      if (result.flushed > 0) {
-        console.log(`[hocuspocus] Recovery: flushed ${result.flushed} documents to R2`);
-      }
-    } catch (err) {
-      console.warn('[hocuspocus] Recovery job failed:', err.message);
-    }
-  }
 
   const server = new Server({
     port: HOCUSPOCUS_PORT,
@@ -87,41 +63,7 @@ async function startHocuspocus() {
       return { userId, workspaceId, noteId, role };
     },
 
-    async onConfigure({ configuration }) {
-      if (!persistence) return;
-
-      // Flush full document state to R2 on session close
-      configuration.extensions.push({
-        async onStoreDocument({ document, documentName }) {
-          if (!PLAINTEXT_RELAY) return;
-          if (!r2 || !snapshots) return;
-
-          const parsed = persistence.parseRoomName(documentName);
-          if (!parsed) return;
-
-          const { workspaceId, noteId } = parsed;
-
-          try {
-            const state = document.toBinary();
-            const current = await persistence.getDocumentSyncState(workspaceId, noteId);
-            await snapshots.writeDocumentSnapshot({
-              workspaceId,
-              noteId,
-              generation: (current?.snapshotGeneration ?? 0) + 1,
-              state,
-            });
-          } catch (err) {
-            console.warn(
-              `[hocuspocus] Failed to flush snapshot to R2 for ${documentName}:`,
-              err.message,
-            );
-          }
-        },
-      });
-    },
-
     async connected({ documentName, connection }) {
-      if (PLAINTEXT_RELAY) return; // flag-on path already reconstructs via onLoadDocument
       if (!persistence) return;
 
       const parsed = persistence.parseRoomName(documentName);
@@ -145,47 +87,9 @@ async function startHocuspocus() {
       }
     },
 
-    async onLoadDocument({ document, documentName }) {
-      if (!persistence) return;
-      if (!PLAINTEXT_RELAY) return; // server does not reconstruct plaintext docs
-
-      const parsed = persistence.parseRoomName(documentName);
-      if (!parsed) return;
-
-      const { workspaceId, noteId } = parsed;
-
-      // Check the currently advertised versioned snapshot first.
-      if (snapshots) {
-        try {
-          const snapshot = await snapshots.loadDocumentSnapshot(workspaceId, noteId);
-          if (snapshot) {
-            document.applyUpdate(new Uint8Array(snapshot));
-          }
-        } catch (err) {
-          console.warn(
-            `[hocuspocus] Failed to load snapshot from R2 for ${documentName}:`,
-            err.message,
-          );
-        }
-      }
-
-      // Fall back to SQLite incremental updates
-      const updates = await persistence.loadAllUpdates(workspaceId, noteId);
-
-      for (const update of updates) {
-        if (update.encrypted) continue;
-        try {
-          const data = update.data instanceof Uint8Array
-            ? update.data
-            : new Uint8Array(update.data);
-          document.applyUpdate(data);
-        } catch (err) {
-          console.warn(
-            `[hocuspocus] Failed to apply persisted update for ${documentName}:`,
-            err.message,
-          );
-        }
-      }
+    async onLoadDocument() {
+      // Server never reconstructs documents — updates are opaque and relayed
+      // to new joiners via the connected hook. No-op by design.
     },
 
     async onChange({ document: _document, documentName, update, connection }) {
@@ -212,37 +116,6 @@ async function startHocuspocus() {
           `[hocuspocus] Failed to persist update for ${documentName}:`,
           err.message,
         );
-      }
-    },
-
-    async afterStoreDocument({ document: _document, documentName }) {
-      if (!persistence) return;
-      if (!PLAINTEXT_RELAY) return;
-
-      const parsed = persistence.parseRoomName(documentName);
-      if (!parsed) return;
-
-      const { workspaceId, noteId } = parsed;
-      const count = await persistence.getUpdateCount(workspaceId, noteId);
-
-      const COMPACTION_THRESHOLD = parseInt(
-        process.env.YJS_COMPACTION_THRESHOLD ?? '500',
-        10,
-      );
-
-      if (count > COMPACTION_THRESHOLD) {
-        if (!snapshots) {
-          console.warn(`[hocuspocus] Skipping compaction for ${documentName}: R2 snapshot service is unavailable`);
-          return;
-        }
-        try {
-          await snapshots.recoverDocument(workspaceId, noteId);
-        } catch (err) {
-          console.warn(
-            `[hocuspocus] Compaction failed for ${documentName}:`,
-            err.message,
-          );
-        }
       }
     },
 
