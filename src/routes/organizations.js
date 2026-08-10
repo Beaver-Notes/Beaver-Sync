@@ -283,6 +283,11 @@ async function organizationRoutes(app) {
     if (invite.maxUses > 0 && invite.usedCount >= invite.maxUses) return reply.status(410).send({ error: 'invite_max_uses' });
     const existing = await OrgMember.findOne({ orgId: invite.orgId, accountId: req.userId }).lean();
     if (existing) return reply.status(409).send({ error: 'already_member' });
+    const { Account } = require('../models');
+    const joiner = await Account.findById(req.userId, { kemPublicKey: 1 }).lean();
+    if (!joiner || !joiner.kemPublicKey) {
+      return reply.status(403).send({ error: 'keypair_required', message: 'Set up end-to-end encryption before joining.' });
+    }
     if (invite.requireApproval && !invite.approvedBy) {
       return reply.status(202).send({ pending: true, message: 'Join request requires approval.' });
     }

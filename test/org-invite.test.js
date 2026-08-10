@@ -95,6 +95,25 @@ test('admin creates an invite that returns a raw token and grants membership on 
   assert.equal(duplicate.json().error, 'already_member');
 });
 
+test('a keyless user cannot join via invite and is rejected with 403 keypair_required', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  seedAccount('inv-keyless', null);
+  const ownerSession = await createSession('inv-owner', { headers: {} });
+  const keylessSession = await createSession('inv-keyless', { headers: {} });
+
+  const create = await inject(app, ownerSession, 'POST', '/organizations/org-invite-1/invite', { role: 'member' });
+  assert.equal(create.statusCode, 201);
+  const token = create.json().token;
+
+  const join = await inject(app, keylessSession, 'POST', `/organizations/join/${token}`);
+  assert.equal(join.statusCode, 403);
+  assert.equal(join.json().error, 'keypair_required');
+  const membership = getDb().prepare('SELECT COUNT(*) AS count FROM org_members WHERE org_id = ? AND account_id = ?')
+    .get('org-invite-1', 'inv-keyless').count;
+  assert.equal(membership, 0);
+});
+
 test('a require-approval invite is pending until an admin approves it, then join succeeds', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());

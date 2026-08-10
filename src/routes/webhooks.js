@@ -114,7 +114,9 @@ async function webhookRoutes(app) {
           const status = sub.status === 'active' || sub.status === 'trialing' ? 'active' : 'expired';
           const renewsAt = sub.current_period_end ? new Date(sub.current_period_end * 1000) : null;
           await upsertSubscription({ accountId, plan, status, provider: 'stripe', providerId: sub.id, renewsAt, stripeCustomerId: sub.customer });
-          sendSubscriptionReceiptEmail(app, accountId, {});
+          if (status === 'active') {
+            sendSubscriptionReceiptEmail(app, accountId, {});
+          }
           break;
         }
         case 'customer.subscription.deleted': {
