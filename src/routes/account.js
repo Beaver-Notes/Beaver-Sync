@@ -10,6 +10,7 @@ const r2 = require('../services/r2');
 const { hashAccountId } = require('../lib/crypto');
 const { isEnterpriseMode } = require('../lib/license');
 const { getQuotaBytes } = require('../lib/plans');
+const { sendAccountDeletedEmail } = require('../email');
 
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{3,32}$/;
 
@@ -246,6 +247,10 @@ async function accountRoutes(app) {
         message: 'Password incorrect.',
       });
     }
+
+    // Resolve the recipient before removal: sendWithAlias looks the account back up,
+    // and deleteTx() deletes it synchronously below, so this must complete first.
+    await sendAccountDeletedEmail(app, account.id);
 
     const accountIdHash = hashAccountId(req.userId);
 

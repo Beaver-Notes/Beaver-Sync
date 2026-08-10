@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember } = require('../models');
 const { audit } = require('../lib/audit');
+const { sendWorkspaceInviteEmail } = require('../email');
 
 const BODY_LIMIT = parseInt(process.env.WORKSPACE_BODY_LIMIT_BYTES ?? '8192', 10);
 
@@ -218,6 +219,9 @@ async function workspaceRoutes(app) {
       usedCount: 0,
       createdAt: new Date(),
     });
+
+    const inviter = await Account.findById(req.userId, { username: 1 }).lean();
+    sendWorkspaceInviteEmail(app, target.id, { inviterName: inviter?.username || 'Someone' });
 
     app.log.info({ workspaceId, invitedUser: target.id, byUser: req.userId }, 'Workspace invite created');
     audit(req, 'member_added', { workspaceId, targetUserId: target.id, role: inviteRole });

@@ -6,6 +6,7 @@ const { OAuth2Client } = require('google-auth-library');
 const Stripe = require('stripe');
 
 const { upsertSubscription, findByProvider, expireSubscription, markGracePeriod, planFromPrice, planFromProductId } = require('../lib/billing');
+const { sendSubscriptionReceiptEmail } = require('../email');
 
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const WEBHOOK_BODY_LIMIT_BYTES = parseInt(process.env.WEBHOOK_BODY_LIMIT_BYTES ?? '262144', 10);
@@ -113,6 +114,7 @@ async function webhookRoutes(app) {
           const status = sub.status === 'active' || sub.status === 'trialing' ? 'active' : 'expired';
           const renewsAt = sub.current_period_end ? new Date(sub.current_period_end * 1000) : null;
           await upsertSubscription({ accountId, plan, status, provider: 'stripe', providerId: sub.id, renewsAt, stripeCustomerId: sub.customer });
+          sendSubscriptionReceiptEmail(app, accountId, {});
           break;
         }
         case 'customer.subscription.deleted': {

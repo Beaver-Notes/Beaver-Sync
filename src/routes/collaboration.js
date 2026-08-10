@@ -5,6 +5,7 @@ const { z } = require('zod');
 const { getDb } = require('../db');
 const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models');
 const { validatePublicKey } = require('../lib/recipient-wrap');
+const { sendNoteInviteEmail } = require('../email');
 
 const BODY_LIMIT = parseInt(process.env.COLLAB_BODY_LIMIT_BYTES ?? '4096', 10);
 
@@ -243,6 +244,9 @@ async function collaborationRoutes(app) {
 
     const role = req.body.role === 'viewer' ? 'viewer' : 'editor';
     await NoteInvitation.create({ noteId, userId: target.id, invitedBy: req.userId, role, createdAt: new Date() });
+
+    const inviter = await Account.findById(req.userId, { username: 1 }).lean();
+    sendNoteInviteEmail(app, target.id, { inviterName: inviter?.username || 'Someone' });
 
     app.log.info({ noteId, invitedUser: target.id, byUser: req.userId }, 'User invited to note');
 
