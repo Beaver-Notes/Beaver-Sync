@@ -307,7 +307,7 @@ const ALLOWED_TABLES = new Set([
   'vault_key_params', 'note_invite_links',
   'note_comments',
   // New org tables
-  'organizations', 'org_members', 'org_subscriptions',
+  'organizations', 'org_members', 'org_subscriptions', 'org_invites',
 ]);
 
 function validateTableName(table) {
@@ -491,6 +491,7 @@ const NoteComment = createModel('note_comments');
 const Organization = createModel('organizations');
 const OrgMember = createModel('org_members', '_composite');
 const OrgSubscription = createModel('org_subscriptions');
+const OrgInvite = createModel('org_invites');
 
 module.exports = {
   Account, Session, CommitMeta, Device, Subscription,
@@ -500,5 +501,5 @@ module.exports = {
   Workspace, WorkspaceMember, WorkspaceInvite,
   AuditLog, SsoConfig, SsoOidcState, EmailAlias, WebAuthnChallenge,
   YjsDocUpdate, VaultKeyParams, NoteInviteLink, NoteComment,
-  Organization, OrgMember, OrgSubscription,
+  Organization, OrgMember, OrgSubscription, OrgInvite,
 };

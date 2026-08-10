@@ -130,6 +130,22 @@ CREATE INDEX IF NOT EXISTS idx_note_keys_user ON note_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_keys_user ON workspace_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_org_keys_user ON org_keys(user_id);
 
+CREATE TABLE IF NOT EXISTS org_invites (
+  id               TEXT PRIMARY KEY,
+  org_id           TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  created_by       TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  token_hash       TEXT NOT NULL UNIQUE,
+  role             TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('member', 'admin')),
+  require_approval INTEGER NOT NULL DEFAULT 0,
+  approved_by      TEXT,
+  max_uses         INTEGER NOT NULL DEFAULT 0,
+  used_count       INTEGER NOT NULL DEFAULT 0,
+  expires_at       TEXT,
+  revoked          INTEGER NOT NULL DEFAULT 0,
+  created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_org_invites_org ON org_invites(org_id);
+
 CREATE TABLE IF NOT EXISTS note_invitations (
   note_id      TEXT NOT NULL,
   user_id      TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

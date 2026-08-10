@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember, OrgKey } = require('../models');
+const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember, OrgKey, OrgInvite } = require('../models');
 const { requireOrgMember, requireOrgAdmin, requireOrgOwner } = require('../middleware/org');
 
 async function organizationRoutes(app) {
@@ -244,6 +244,60 @@ async function organizationRoutes(app) {
 
     await OrgMember.deleteOne({ orgId: req.orgId, accountId: req.userId });
     return reply.send({ left: true });
+  });
+
+  // Create an org invite link
+  app.post('/:id/invite', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
+    const { role = 'member', requireApproval = false, maxUses = 0, expiresIn } = req.body ?? {};
+    if (!['member', 'admin'].includes(role)) return reply.status(400).send({ error: 'invalid_role' });
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    let expiresAt = null;
+    if (expiresIn) { const ms = parseInt(expiresIn, 10); if (Number.isFinite(ms) && ms > 0) expiresAt = new Date(Date.now() + ms).toISOString(); }
+    const invite = await OrgInvite.create({
+      orgId: req.orgId, createdBy: req.userId, tokenHash, role,
+      requireApproval: requireApproval ? 1 : 0, maxUses, usedCount: 0, expiresAt,
+    });
+    return reply.status(201).send({ id: invite.id, token: rawToken, role, requireApproval, maxUses, expiresAt });
+  });
+
+  // List org invite links
+  app.get('/:id/invite', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
+    const invites = await OrgInvite.find({ orgId: req.orgId, revoked: 0 }).sort({ createdAt: -1 }).lean();
+    return reply.send({ invites });
+  });
+
+  // Revoke an org invite link
+  app.delete('/:id/invite/:token', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
+    const tokenHash = crypto.createHash('sha256').update(req.params.token).digest('hex');
+    await OrgInvite.updateOne({ orgId: req.orgId, tokenHash }, { $set: { revoked: 1 } });
+    return reply.send({ revoked: true });
+  });
+
+  // Join an organization via invite token
+  app.post('/join/:token', { preHandler: [app.authenticate] }, async (req, reply) => {
+    const tokenHash = crypto.createHash('sha256').update(req.params.token).digest('hex');
+    const invite = await OrgInvite.findOne({ tokenHash, revoked: 0 }).lean();
+    if (!invite) return reply.status(404).send({ error: 'invite_not_found' });
+    if (invite.expiresAt && new Date(invite.expiresAt) < new Date()) return reply.status(410).send({ error: 'invite_expired' });
+    if (invite.maxUses > 0 && invite.usedCount >= invite.maxUses) return reply.status(410).send({ error: 'invite_max_uses' });
+    const existing = await OrgMember.findOne({ orgId: invite.orgId, accountId: req.userId }).lean();
+    if (existing) return reply.status(409).send({ error: 'already_member' });
+    if (invite.requireApproval && !invite.approvedBy) {
+      return reply.status(202).send({ pending: true, message: 'Join request requires approval.' });
+    }
+    await OrgMember.create({ orgId: invite.orgId, accountId: req.userId, role: invite.role, createdAt: new Date() });
+    await OrgInvite.updateOne({ tokenHash }, { $inc: { usedCount: 1 } });
+    return reply.status(201).send({ orgId: invite.orgId, role: invite.role });
+  });
+
+  // Approve a pending join for a require-approval invite
+  app.post('/:id/invite/:token/approve', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
+    const tokenHash = crypto.createHash('sha256').update(req.params.token).digest('hex');
+    const invite = await OrgInvite.findOne({ orgId: req.orgId, tokenHash, revoked: 0 }).lean();
+    if (!invite) return reply.status(404).send({ error: 'invite_not_found' });
+    await OrgInvite.updateOne({ tokenHash }, { $set: { approvedBy: req.userId } });
+    return reply.send({ approved: true });
   });
 
   // Get subscription
