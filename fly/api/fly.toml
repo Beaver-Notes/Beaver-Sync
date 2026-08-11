@@ -10,6 +10,10 @@ primary_region = "iad"
   HOST = "0.0.0.0"
   STORAGE_FORCE_PATH_STYLE = "false"
 
+[mounts]
+  source = "beaver_data"
+  destination = "/data"
+
 [http_service]
   internal_port = 3000
   force_https = true
