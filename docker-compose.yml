@@ -106,6 +106,30 @@ services:
       retries: 3
       start_period: 10s
 
+  hocuspocus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beaver-sync-hocuspocus
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
+      AUTH_BACKEND_URL: http://api:3000
+    command: ["node", "src/hocuspocus.js"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - beaver-internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
 volumes:
   pg_data:
   minio_data:

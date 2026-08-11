@@ -193,3 +193,8 @@ services:
       - "127.0.0.1:8080:8080"
     networks:
       - beaver-internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
