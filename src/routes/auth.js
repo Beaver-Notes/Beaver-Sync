@@ -108,11 +108,11 @@ async function authRoutes(app) {
     await WorkspaceMember.create({ workspaceId: defaultWorkspace.id, accountId: account.id, role: 'owner', createdAt: new Date() });
 
     // Initialize sync state for the new workspace so /sync/state doesn't 404
-    const { getDb } = require('../db');
-    const syncDb = getDb();
-    syncDb.prepare(
-      'INSERT OR IGNORE INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES (?, ?, ?, ?)'
-    ).run(defaultWorkspace.id, 'empty', 0, new Date().toISOString());
+    const { query } = require('../db/postgres');
+    await query(
+      'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+      [defaultWorkspace.id, 'empty', 0, new Date().toISOString()]
+    );
 
     const token = await createSession(account.id, req);
 

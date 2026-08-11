@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const archiver = require('archiver');
 
 const { Account, Subscription, Device, Organization, OrgMember, OrgSubscription, Workspace } = require('../models');
-const { getDb } = require('../db');
+const { query, transaction } = require('../db/postgres');
 const mlkem = require('../lib/mlkem');
 const r2 = require('../services/r2');
 const { hashAccountId } = require('../lib/crypto');
@@ -255,32 +255,30 @@ async function accountRoutes(app) {
 
     const accountIdHash = hashAccountId(req.userId);
 
-    const db = getDb();
-    const deleteTx = db.transaction(() => {
-      db.prepare(`DELETE FROM audit_logs WHERE account_id_hash = ?`).run(accountIdHash);
+    await transaction(async (client) => {
+      await client.query(`DELETE FROM audit_logs WHERE account_id_hash = $1`, [accountIdHash]);
 
       // Remove org memberships
-      db.prepare(`DELETE FROM org_members WHERE account_id = ?`).run(req.userId);
+      await client.query(`DELETE FROM org_members WHERE account_id = $1`, [req.userId]);
 
       // Remove org subscriptions for orgs owned by this account
-      db.prepare(`DELETE FROM org_subscriptions WHERE org_id IN (
-        SELECT org_id FROM org_members WHERE account_id = ? AND role = 'owner'
-      )`).run(req.userId);
+      await client.query(`DELETE FROM org_subscriptions WHERE org_id IN (
+        SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'
+      )`, [req.userId]);
 
       // Remove workspaces for orgs owned by this account
-      db.prepare(`DELETE FROM workspaces WHERE org_id IN (
-        SELECT org_id FROM org_members WHERE account_id = ? AND role = 'owner'
-      )`).run(req.userId);
+      await client.query(`DELETE FROM workspaces WHERE org_id IN (
+        SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'
+      )`, [req.userId]);
 
       // Remove organizations owned by this account
-      db.prepare(`DELETE FROM organizations WHERE id IN (
-        SELECT org_id FROM org_members WHERE account_id = ? AND role = 'owner'
-      )`).run(req.userId);
+      await client.query(`DELETE FROM organizations WHERE id IN (
+        SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'
+      )`, [req.userId]);
 
       // Remove the account itself
-      db.prepare(`DELETE FROM accounts WHERE id = ?`).run(req.userId);
+      await client.query(`DELETE FROM accounts WHERE id = $1`, [req.userId]);
     });
-    deleteTx();
 
     setImmediate(() => {
       (async () => {

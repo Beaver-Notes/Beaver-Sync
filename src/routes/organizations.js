@@ -92,11 +92,11 @@ async function organizationRoutes(app) {
     }
 
     // Initialize sync state
-    const { getDb } = require('../db');
-    const syncDb = getDb();
-    syncDb.prepare(
-      'INSERT OR IGNORE INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES (?, ?, ?, ?)'
-    ).run(workspace.id, 'empty', 0, new Date().toISOString());
+    const { query } = require('../db/postgres');
+    await query(
+      'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+      [workspace.id, 'empty', 0, new Date().toISOString()]
+    );
 
     return reply.status(201).send({
       id: orgId,

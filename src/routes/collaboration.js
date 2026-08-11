@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const { z } = require('zod');
-const { getDb } = require('../db');
+const { transaction } = require('../db/postgres');
 const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models');
 const { validatePublicKey } = require('../lib/recipient-wrap');
 const { sendNoteInviteEmail } = require('../email');
@@ -72,23 +72,22 @@ async function collaborationRoutes(app) {
       }
     }
 
-    const db = getDb();
-    const outcome = db.transaction(() => {
+    const outcome = await transaction(async (client) => {
       // Idempotent provisioning: the first writer wins. If the note already has
       // any key envelopes, refuse to overwrite so a late joiner or a concurrent
       // provisioner cannot rotate an existing note key.
-      if (NoteKey.countDocuments({ noteId }) > 0) {
+      if (await NoteKey.countDocuments({ noteId }) > 0) {
         return { existing: true, stored: 0 };
       }
       for (const r of recipients) {
-        NoteKey.findOneAndUpdate(
+        await NoteKey.findOneAndUpdate(
           { noteId, userId: r.userId },
           { $set: { wrappedKey: r.wrappedKey } },
           { upsert: true }
         );
       }
       return { existing: false, stored: recipients.length };
-    })();
+    });
 
     return reply.send({ noteId, stored: outcome.stored, noteHasKey: true, existing: outcome.existing });
   });
@@ -152,20 +151,19 @@ async function collaborationRoutes(app) {
       return reply.status(403).send({ error: 'keypair_required', message: `User ${recipientUserId} has not set up end-to-end encryption.` });
     }
 
-    const db = getDb();
-    const outcome = db.transaction(() => {
+    const outcome = await transaction(async (client) => {
       // Mirror storeRecipients idempotency: if the note already has any key
       // envelopes, refuse to overwrite so no caller can rotate an existing key.
-      if (NoteKey.countDocuments({ noteId }) > 0) {
+      if (await NoteKey.countDocuments({ noteId }) > 0) {
         return { existing: true, stored: false };
       }
-      NoteKey.findOneAndUpdate(
+      await NoteKey.findOneAndUpdate(
         { noteId, userId: recipientUserId },
         { $set: { wrappedKey } },
         { upsert: true }
       );
       return { existing: false, stored: true };
-    })();
+    });
 
     return reply.send({ noteId, recipientUserId, stored: outcome.stored, existing: outcome.existing, noteHasKey: true });
   });

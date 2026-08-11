@@ -6,7 +6,7 @@ const r2 = require('../services/r2');
 const mlkem = require('../lib/mlkem');
 const { createNoteHash } = require('../lib/crypto');
 const { audit } = require('../lib/audit');
-const { getDb } = require('../db');
+const { query } = require('../db/postgres');
 
 const COMMIT_BODY_LIMIT_BYTES = parseInt(process.env.COMMIT_BODY_LIMIT_BYTES ?? '1048576', 10);
 const MAX_CURSOR_BYTES = parseInt(process.env.COMMIT_CURSOR_QUERY_MAX_BYTES ?? '4096', 10);
@@ -233,7 +233,6 @@ async function commitRoutes(app) {
     const beforeTs = parseInt(req.query.before, 10);
     const before = Number.isFinite(beforeTs) ? new Date(beforeTs) : null;
 
-    const db = getDb();
     const params = [req.userId, noteIdHash];
     let sql = `
       SELECT
@@ -247,16 +246,17 @@ async function commitRoutes(app) {
       FROM commits
       LEFT JOIN accounts ON commits.account_id = accounts.id
       LEFT JOIN devices ON commits.account_id = devices.account_id AND commits.device_id = devices.device_id
-      WHERE commits.account_id = ? AND commits.note_id_hash = ?
+      WHERE commits.account_id = $1 AND commits.note_id_hash = $2
     `;
+    let paramIndex = 3;
     if (before) {
-      sql += ` AND commits.created_at < ?`;
+      sql += ` AND commits.created_at < $${paramIndex++}`;
       params.push(before.toISOString());
     }
-    sql += ` ORDER BY commits.created_at DESC LIMIT ?`;
+    sql += ` ORDER BY commits.created_at DESC LIMIT $${paramIndex}`;
     params.push(limit);
 
-    const commits = db.prepare(sql).all(...params);
+    const { rows: commits } = await query(sql, params);
 
     return reply.send({ commits, noteId });
   });
