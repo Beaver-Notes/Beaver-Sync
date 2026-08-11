@@ -157,6 +157,9 @@ async function buildApp() {
   await app.register(require('./routes/webhooks'),    { prefix: '/webhooks' });
   await app.register(require('./routes/comments'),    { prefix: '/comments' });
 
+  await app.register(require('@fastify/websocket'));
+  await app.register(require('./routes/ws'));
+
   app.get('/health', {
     config: {
       security: {
@@ -229,6 +232,13 @@ async function start() {
     await ensureBucket();
   } catch (err) {
     app.log.warn('Storage bucket check failed (non-fatal):', err.message);
+  }
+
+  try {
+    const { startPostgresListener } = require('./lib/events');
+    await startPostgresListener();
+  } catch (err) {
+    app.log.warn('Postgres listener start failed (non-fatal):', err.message);
   }
 
   const port = parseInt(process.env.PORT ?? '3000');
