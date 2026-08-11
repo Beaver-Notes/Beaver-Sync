@@ -20,12 +20,33 @@ networks:
     driver: bridge
 
 volumes:
+  pg_data:
   minio_data:
   beaver_data:
   glitchtip_db:
   glitchtip_data:
 
 services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: beaver-sync-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-beaver}
+      POSTGRES_USER: ${POSTGRES_USER:-beaver}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-beaver}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - beaver-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-beaver}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ── MinIO ────────────────────────────────────────────────────────
   minio:
@@ -43,6 +64,11 @@ services:
       - "127.0.0.1:9001:9001"
     networks:
       - beaver-internal
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   minio-setup:
     image: minio/mc:RELEASE.2025-02-21T16-00-46Z
@@ -101,15 +127,17 @@ services:
     container_name: beaver-sync-api
     restart: unless-stopped
     depends_on:
+      postgres:
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
       glitchtip:
         condition: service_started
     env_file: .env
     environment:
       ENTERPRISE_MODE: "true"
       LICENSE_SECRET: ${LICENSE_SECRET}
-      DATABASE_PATH: /app/data/beaver.db
+      DATABASE_URL: postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: 3000
@@ -132,7 +160,6 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - beaver_data:/app/data
       - beaver_data:/app/keys
     networks:
       - beaver-internal
