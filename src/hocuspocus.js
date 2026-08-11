@@ -56,14 +56,23 @@ async function startHocuspocus() {
 
       const { userId, role } = await response.json();
 
-      if (role === 'viewer' || role === 'guest') {
+      const readOnly = role === 'viewer' || role === 'guest';
+      if (readOnly) {
         connection.readOnly = true;
       }
 
-      return { userId, workspaceId, noteId, role };
+      return { userId, workspaceId, noteId, role, readOnly };
     },
 
-    async connected({ documentName, connection }) {
+    async connected({ documentName, connection, context }) {
+      const role = context?.role || 'editor';
+      const readOnly = connection.readOnly || false;
+      try {
+        connection.sendStateless(JSON.stringify({ type: 'auth', readOnly, role }));
+      } catch {
+        // client may have disconnected before we could send
+      }
+
       if (!persistence) return;
 
       const parsed = persistence.parseRoomName(documentName);

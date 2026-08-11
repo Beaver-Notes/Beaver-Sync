@@ -44,8 +44,11 @@ CREATE TABLE IF NOT EXISTS workspaces (
   id                 TEXT PRIMARY KEY,
   name_encrypted     TEXT NOT NULL,
   owner_id           TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  org_id             TEXT REFERENCES organizations(id),
   storage_used_bytes INTEGER NOT NULL DEFAULT 0 CHECK(storage_used_bytes >= 0),
   data_residency     TEXT NOT NULL DEFAULT 'auto' CHECK(data_residency IN ('auto', 'eu', 'us', 'asia', 'custom')),
+  emoji              TEXT,
+  color              TEXT,
   created_at         TEXT NOT NULL
 );
 
@@ -129,6 +132,38 @@ CREATE TABLE IF NOT EXISTS org_keys (
 CREATE INDEX IF NOT EXISTS idx_note_keys_user ON note_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_keys_user ON workspace_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_org_keys_user ON org_keys(user_id);
+
+CREATE TABLE IF NOT EXISTS organizations (
+  id TEXT PRIMARY KEY,
+  name_encrypted TEXT NOT NULL,
+  slug TEXT UNIQUE,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS org_members (
+  org_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'member')),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (org_id, account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_org_members_account ON org_members(account_id);
+
+CREATE TABLE IF NOT EXISTS org_subscriptions (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL UNIQUE REFERENCES organizations(id) ON DELETE CASCADE,
+  plan TEXT NOT NULL CHECK(plan IN ('free', 'basic', 'pro', 'team', 'enterprise')),
+  status TEXT DEFAULT 'active' CHECK(status IN ('active', 'grace_period', 'expired')),
+  seats INTEGER DEFAULT 1,
+  provider TEXT CHECK(provider IN ('stripe', 'apple', 'google')),
+  renews_at TEXT,
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT,
+  storage_quota_bytes INTEGER DEFAULT 0,
+  storage_used_bytes INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS org_invites (
   id               TEXT PRIMARY KEY,
@@ -332,3 +367,15 @@ CREATE TABLE IF NOT EXISTS note_comments (
 
 CREATE INDEX IF NOT EXISTS idx_note_comments_note ON note_comments(note_id);
 CREATE INDEX IF NOT EXISTS idx_note_comments_thread ON note_comments(thread_id);
+
+CREATE TABLE IF NOT EXISTS vault_proof_challenges (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  challenge_hash TEXT NOT NULL UNIQUE,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_vault_proof_challenges_lookup
+  ON vault_proof_challenges(workspace_id, account_id, expires_at);

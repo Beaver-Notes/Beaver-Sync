@@ -135,6 +135,39 @@ async function workspaceRoutes(app) {
     return reply.send({ workspaces });
   });
 
+  app.patch('/:id', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const workspaceId = req.params.id;
+
+    const workspace = await Workspace.findById(workspaceId).lean();
+    if (!workspace) {
+      return reply.status(404).send({ error: 'not_found' });
+    }
+
+    // Check user is owner or admin
+    const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
+    if (!membership) {
+      return reply.status(403).send({ error: 'not_workspace_member' });
+    }
+    if (membership.role !== 'owner' && membership.role !== 'admin') {
+      return reply.status(403).send({ error: 'insufficient_permissions', message: 'Only owners or admins can rename workspaces.' });
+    }
+
+    const { nameEncrypted } = req.body ?? {};
+    if (!nameEncrypted || typeof nameEncrypted !== 'string' || nameEncrypted.length > 8192) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Encrypted workspace name is required.' });
+    }
+
+    await Workspace.updateOne({ _id: workspaceId }, { $set: { nameEncrypted } });
+
+    app.log.info({ workspaceId, userId: req.userId }, 'Workspace renamed');
+    audit(req, 'workspace_renamed', { workspaceId });
+
+    return reply.send({ id: workspaceId, nameEncrypted });
+  });
+
   app.delete('/:id', {
     ...rateLimit,
     ...protect,
