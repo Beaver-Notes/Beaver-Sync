@@ -58,7 +58,7 @@ We will respond to valid security disclosures within 72 hours and provide securi
 - Docker containers run as unprivileged `beaver` user
 - Reproducible builds with `--frozen-lockfile`
 - All secrets validated at startup
-- SQLite uses WAL mode for data integrity
+- Postgres with TLS for data integrity
 
 ## Vulnerability Disclosure Timeline
 
