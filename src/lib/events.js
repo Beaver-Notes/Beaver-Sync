@@ -22,6 +22,13 @@ async function startPostgresListener() {
   try {
     await client.query('LISTEN beaver_events');
 
+    client.on('error', (err) => {
+      console.error('[events] Postgres listener error:', err.message);
+      setTimeout(() => {
+        startPostgresListener().catch(console.error);
+      }, 5000);
+    });
+
     client.on('notification', (msg) => {
       try {
         const { channel, payload } = msg;

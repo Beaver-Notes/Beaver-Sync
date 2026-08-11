@@ -6,7 +6,8 @@ const { subscribe, publish } = require('../lib/events');
 
 async function wsRoutes(app) {
   app.get('/ws', { websocket: true }, async (socket, req) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+    const host = req.headers.host || 'localhost';
+    const url = new URL(req.url, `http://${host}`);
     const token = url.searchParams.get('token');
 
     if (!token) {
