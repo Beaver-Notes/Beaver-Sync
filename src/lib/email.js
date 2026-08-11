@@ -85,7 +85,7 @@ async function sendWithAlias(app, accountId, subject, html) {
     }
 
     const { EmailAlias } = require("../models");
-    let aliasRecord = await EmailAlias.findOne({ accountId }).lean();
+    const aliasRecord = await EmailAlias.findOne({ accountId }).lean();
     let alias;
 
     if (
@@ -145,7 +145,7 @@ async function forwardToRealEmail(alias, emailContent) {
 async function sendViaSmtp({ host, port, user, pass, from, to, subject, html }) {
   return new Promise((resolve, reject) => {
     const useTls = port === 465;
-    const socket = useTls
+    let socket = useTls
       ? tls.connect(port, host, { servername: host })
       : net.connect(port, host);
 

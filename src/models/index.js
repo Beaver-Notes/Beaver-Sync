@@ -344,8 +344,8 @@ function createModel(table, pkField) {
     },
 
     async updateOne(filter, update) {
-      const { sql: setSql, params: setParams } = buildUpdate(update);
-      const { sql: whereSql, params: whereParams } = buildWhere(filter);
+      const { sql: setSql, params: setParams, nextIndex } = buildUpdate(update);
+      const { sql: whereSql, params: whereParams } = buildWhere(filter, nextIndex);
       const result = await query(`UPDATE ${table} SET ${setSql} ${whereSql}`, [...setParams, ...whereParams]);
       return { modifiedCount: result.rowCount };
     },

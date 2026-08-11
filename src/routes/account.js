@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const archiver = require('archiver');
 
 const { Account, Subscription, Device, Organization, OrgMember, OrgSubscription, Workspace } = require('../models');
-const { query, transaction } = require('../db/postgres');
+const { transaction } = require('../db/postgres');
 const mlkem = require('../lib/mlkem');
 const r2 = require('../services/r2');
 const { hashAccountId } = require('../lib/crypto');
@@ -34,12 +34,13 @@ async function accountRoutes(app) {
       },
     },
   }, async (req, reply) => {
-    const [account, subscription, devices, memberships] = await Promise.all([
+    const [account, sub, devices, memberships] = await Promise.all([
       Account.findById(req.userId, { username: 1, emailHmac: 1, emailEncrypted: 1, createdAt: 1 }).lean(),
       Subscription.findOne({ accountId: req.userId }).lean(),
       Device.find({ accountId: req.userId }).sort({ lastSeen: -1 }).lean(),
       OrgMember.find({ account_id: req.userId }).lean(),
     ]);
+    let subscription = sub;
 
     if (!account) {
       return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });

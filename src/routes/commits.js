@@ -1,7 +1,7 @@
 'use strict';
 
 const { z } = require('zod');
-const { CommitMeta, Device, Workspace, Subscription, Account } = require('../models');
+const { CommitMeta, Device, Workspace, Subscription } = require('../models');
 const r2 = require('../services/r2');
 const mlkem = require('../lib/mlkem');
 const { createNoteHash } = require('../lib/crypto');
