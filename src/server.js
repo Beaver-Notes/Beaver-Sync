@@ -18,7 +18,7 @@ function validateRequiredEnv() {
     }
   }
 
-  requireVar('DATABASE_PATH', true, 0);
+  requireVar('DATABASE_URL', true, 1);
 requireVar('SESSION_HMAC_KEY', true, 32);
     requireVar('EMAIL_HMAC_KEY', true, 32);
     requireVar('COOKIE_SECRET', true, 32);
@@ -225,7 +225,7 @@ async function start() {
   const app = await buildApp();
 
   getDb();
-  app.log.info('SQLite database connected');
+  app.log.info('Database connected');
 
   try {
     const { ensureBucket } = require('./services/r2');

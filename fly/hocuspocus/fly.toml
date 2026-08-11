@@ -7,6 +7,7 @@ primary_region = "iad"
 [env]
   NODE_ENV = "production"
   HOCUSPOCUS_PORT = "8080"
+  AUTH_BACKEND_URL = "http://beaver-sync-api.internal:3000"
 
 [http_service]
   internal_port = 8080
