@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { getDb } = require('../db');
+const { query } = require('../db/postgres');
 
 function toSnake(str) {
   return str.replace(/[A-Z]/g, (m) => '_' + m.toLowerCase());
@@ -45,38 +45,40 @@ function keysToSnake(obj) {
   return r;
 }
 
-function buildWhere(filter) {
-  if (!filter || Object.keys(filter).length === 0) return { sql: '', params: [] };
+function buildWhere(filter, offset = 1) {
+  if (!filter || Object.keys(filter).length === 0) return { sql: '', params: [], nextIndex: offset };
 
   const conds = [];
   const params = [];
+  let idx = offset;
 
   // inner helper for sub-conditions (returns just the conditions, no WHERE/AND prefix)
   function innerCond(f) {
-    const result = buildWhere(f);
+    const result = buildWhere(f, idx);
+    idx = result.nextIndex;
     return { sql: result.sql.replace(/^WHERE /, ''), params: result.params };
   }
 
-for (const [key, value] of Object.entries(filter)) {
-      if (key === '$or') {
-        const parts = value.map((sub) => {
-          const { sql: s, params: p } = innerCond(sub);
-          return { s, p };
-        });
-        conds.push('(' + parts.map((x) => x.s).join(' OR ') + ')');
-        for (const p of parts) params.push(...p.p);
-        continue;
-      }
+  for (const [key, value] of Object.entries(filter)) {
+    if (key === '$or') {
+      const parts = value.map((sub) => {
+        const { sql: s, params: p } = innerCond(sub);
+        return { s, p };
+      });
+      conds.push('(' + parts.map((x) => x.s).join(' OR ') + ')');
+      for (const p of parts) params.push(...p.p);
+      continue;
+    }
 
-      if (key === '$and') {
-        const parts = value.map((sub) => {
-          const { sql: s, params: p } = innerCond(sub);
-          return { s, p };
-        });
-        conds.push('(' + parts.map((x) => x.s).join(' AND ') + ')');
-        for (const p of parts) params.push(...p.p);
-        continue;
-      }
+    if (key === '$and') {
+      const parts = value.map((sub) => {
+        const { sql: s, params: p } = innerCond(sub);
+        return { s, p };
+      });
+      conds.push('(' + parts.map((x) => x.s).join(' AND ') + ')');
+      for (const p of parts) params.push(...p.p);
+      continue;
+    }
 
     const col = key === '_id' ? 'id' : toSnake(key);
 
@@ -84,34 +86,34 @@ for (const [key, value] of Object.entries(filter)) {
       for (const [op, opVal] of Object.entries(value)) {
         switch (op) {
           case '$gt':
-            conds.push(`${col} > ?`);
+            conds.push(`${col} > $${idx++}`);
             params.push(toBindable(opVal));
             break;
           case '$gte':
-            conds.push(`${col} >= ?`);
+            conds.push(`${col} >= $${idx++}`);
             params.push(toBindable(opVal));
             break;
           case '$lt':
-            conds.push(`${col} < ?`);
+            conds.push(`${col} < $${idx++}`);
             params.push(toBindable(opVal));
             break;
           case '$lte':
-            conds.push(`${col} <= ?`);
+            conds.push(`${col} <= $${idx++}`);
             params.push(toBindable(opVal));
             break;
           case '$ne':
-            conds.push(`${col} != ?`);
+            conds.push(`${col} != $${idx++}`);
             params.push(toBindable(opVal));
             break;
           case '$in': {
-            const pl = opVal.map(() => '?').join(',');
-            conds.push(`${col} IN (${pl})`);
+            const placeholders = opVal.map(() => `$${idx++}`).join(',');
+            conds.push(`${col} IN (${placeholders})`);
             params.push(...opVal.map(toBindable));
             break;
           }
           case '$nin': {
-            const pl = opVal.map(() => '?').join(',');
-            conds.push(`${col} NOT IN (${pl})`);
+            const placeholders = opVal.map(() => `$${idx++}`).join(',');
+            conds.push(`${col} NOT IN (${placeholders})`);
             params.push(...opVal.map(toBindable));
             break;
           }
@@ -123,12 +125,12 @@ for (const [key, value] of Object.entries(filter)) {
         }
       }
     } else {
-      conds.push(`${col} = ?`);
+      conds.push(`${col} = $${idx++}`);
       params.push(toBindable(value));
     }
   }
 
-  return { sql: 'WHERE ' + conds.join(' AND '), params };
+  return { sql: 'WHERE ' + conds.join(' AND '), params, nextIndex: idx };
 }
 
 function buildSelect(projection) {
@@ -139,19 +141,20 @@ function buildSelect(projection) {
   return cols.length > 0 ? cols.join(', ') : '*';
 }
 
-function buildUpdate(update) {
+function buildUpdate(update, offset = 1) {
   const clauses = [];
   const params = [];
+  let idx = offset;
 
   for (const [key, value] of Object.entries(update)) {
     if (key === '$set') {
       for (const [k, v] of Object.entries(value)) {
-        clauses.push(`${toSnake(k)} = ?`);
+        clauses.push(`${toSnake(k)} = $${idx++}`);
         params.push(toBindable(v));
       }
     } else if (key === '$inc') {
       for (const [k, v] of Object.entries(value)) {
-        clauses.push(`${toSnake(k)} = ${toSnake(k)} + ?`);
+        clauses.push(`${toSnake(k)} = ${toSnake(k)} + $${idx++}`);
         params.push(v);
       }
     } else if (key === '$unset') {
@@ -159,12 +162,12 @@ function buildUpdate(update) {
         clauses.push(`${toSnake(k)} = NULL`);
       }
     } else {
-      clauses.push(`${toSnake(key)} = ?`);
+      clauses.push(`${toSnake(key)} = $${idx++}`);
       params.push(toBindable(value));
     }
   }
 
-  return { sql: clauses.join(', '), params };
+  return { sql: clauses.join(', '), params, nextIndex: idx };
 }
 
 class Doc {
@@ -178,7 +181,7 @@ class Doc {
     }
   }
 
-  save() {
+  async save() {
     const changes = {};
     for (const [k, v] of Object.entries(this)) {
       if (k.startsWith('_')) continue;
@@ -190,16 +193,16 @@ class Doc {
 
     const cols = [];
     const vals = [];
+    let idx = 1;
     for (const [k, v] of Object.entries(changes)) {
-      cols.push(`${toSnake(k)} = ?`);
+      cols.push(`${toSnake(k)} = $${idx++}`);
       vals.push(toBindable(v));
     }
     const pkCamel = this._pkField === 'id' ? 'id' : (this._pkField === 'code' ? 'code' : toCamel(this._pkField));
     vals.push(this[pkCamel]);
 
-    const db = getDb();
     const pkCol = this._pkField === 'id' ? 'id' : (this._pkField === 'code' ? 'code' : toSnake(this._pkField));
-    db.prepare(`UPDATE ${this._table} SET ${cols.join(', ')} WHERE ${pkCol} = ?`).run(...vals);
+    await query(`UPDATE ${this._table} SET ${cols.join(', ')} WHERE ${pkCol} = $${idx}`, vals);
     this._origData = { ...this._origData, ...changes };
     return this;
   }
@@ -228,18 +231,14 @@ class SingleQuery {
   }
 
   then(resolve, reject) {
-    try {
-      return Promise.resolve(this._exec()).then(resolve, reject);
-    } catch (e) {
-      return Promise.reject(e).catch(reject);
-    }
+    return this._exec().then(resolve, reject);
   }
 
-  _exec() {
+  async _exec() {
     const select = buildSelect(this._projection);
     const { sql: whereSql, params } = buildWhere(this._filter);
-    const db = getDb();
-    const row = db.prepare(`SELECT ${select} FROM ${this._table} ${whereSql} LIMIT 1`).get(...params);
+    const result = await query(`SELECT ${select} FROM ${this._table} ${whereSql} LIMIT 1`, params);
+    const row = result.rows[0];
     if (!row) return null;
     const camel = keysToCamel(row);
     return this._isLean ? camel : new Doc(this._table, camel, this._pkField);
@@ -271,17 +270,12 @@ class MultiQuery {
   }
 
   then(resolve, reject) {
-    try {
-      return Promise.resolve(this._exec()).then(resolve, reject);
-    } catch (e) {
-      return Promise.reject(e).catch(reject);
-    }
+    return this._exec().then(resolve, reject);
   }
 
-  _exec() {
+  async _exec() {
     const select = buildSelect(this._projection);
     const { sql: whereSql, params } = buildWhere(this._filter);
-    const db = getDb();
     let sql = `SELECT ${select} FROM ${this._table} ${whereSql}`;
 
     if (this._sortSpec) {
@@ -293,7 +287,8 @@ class MultiQuery {
 
     if (this._limitVal) sql += ` LIMIT ${this._limitVal}`;
 
-    return db.prepare(sql).all(...params).map((r) => keysToCamel(r));
+    const result = await query(sql, params);
+    return result.rows.map((r) => keysToCamel(r));
   }
 }
 
@@ -335,61 +330,56 @@ function createModel(table, pkField) {
       return new MultiQuery(table, filter, projection, pkField);
     },
 
-    create(data) {
+    async create(data) {
       const d = keysToSnake(data);
       if (!d.id && (pkField === 'id' || !pkField)) d.id = crypto.randomUUID();
       if (d.created_at === undefined) d.created_at = new Date().toISOString();
 
       const cols = Object.keys(d).join(', ');
-      const ph = Object.keys(d).map(() => '?').join(', ');
+      const placeholders = Object.keys(d).map((_, i) => `$${i + 1}`).join(', ');
       const vals = Object.values(d).map(toBindable);
-      const db = getDb();
-      db.prepare(`INSERT INTO ${table} (${cols}) VALUES (${ph})`).run(...vals);
-
+      
+      await query(`INSERT INTO ${table} (${cols}) VALUES (${placeholders})`, vals);
       return new Doc(table, keysToCamel(d), pkField || 'id');
     },
 
-    updateOne(filter, update) {
+    async updateOne(filter, update) {
       const { sql: setSql, params: setParams } = buildUpdate(update);
       const { sql: whereSql, params: whereParams } = buildWhere(filter);
-      const db = getDb();
-      const r = db.prepare(`UPDATE ${table} SET ${setSql} ${whereSql}`).run(...setParams, ...whereParams);
-      return { modifiedCount: r.changes };
+      const result = await query(`UPDATE ${table} SET ${setSql} ${whereSql}`, [...setParams, ...whereParams]);
+      return { modifiedCount: result.rowCount };
     },
 
     updateMany(filter, update) {
       return this.updateOne(filter, update);
     },
 
-    deleteOne(filter) {
+    async deleteOne(filter) {
       const { sql: whereSql, params } = buildWhere(filter);
-      const db = getDb();
-      const r = db.prepare(`DELETE FROM ${table} ${whereSql}`).run(...params);
-      return { deletedCount: r.changes };
+      const result = await query(`DELETE FROM ${table} ${whereSql}`, params);
+      return { deletedCount: result.rowCount };
     },
 
-    deleteMany(filter) {
+    async deleteMany(filter) {
       const { sql: whereSql, params } = buildWhere(filter);
-      const db = getDb();
-      const r = db.prepare(`DELETE FROM ${table} ${whereSql}`).run(...params);
-      return { deletedCount: r.changes };
+      const result = await query(`DELETE FROM ${table} ${whereSql}`, params);
+      return { deletedCount: result.rowCount };
     },
 
-    countDocuments(filter) {
+    async countDocuments(filter) {
       const { sql: whereSql, params } = buildWhere(filter);
-      const db = getDb();
-      const r = db.prepare(`SELECT COUNT(*) AS count FROM ${table} ${whereSql}`).get(...params);
-      return r.count;
+      const result = await query(`SELECT COUNT(*) AS count FROM ${table} ${whereSql}`, params);
+      return result.rows[0].count;
     },
 
-    findOneAndUpdate(filter, update, options) {
+    async findOneAndUpdate(filter, update, options) {
       const opts = options || {};
-      const db = getDb();
       const { sql: whereSql, params: whereParams } = buildWhere(filter);
       const whereClause = whereSql;
 
       if (opts.upsert) {
-        const existing = db.prepare(`SELECT * FROM ${table} ${whereClause} LIMIT 1`).get(...whereParams);
+        const existingResult = await query(`SELECT * FROM ${table} ${whereClause} LIMIT 1`, whereParams);
+        const existing = existingResult.rows[0];
         if (!existing) {
           const insertData = {};
           for (const [k, v] of Object.entries(filter)) {
@@ -419,44 +409,47 @@ function createModel(table, pkField) {
           if (insertData.created_at === undefined) insertData.created_at = new Date().toISOString();
 
           const cols = Object.keys(insertData).join(', ');
-          const ph = Object.keys(insertData).map(() => '?').join(', ');
+          const placeholders = Object.keys(insertData).map((_, i) => `$${i + 1}`).join(', ');
           const vals = Object.values(insertData).map(toBindable);
           try {
-            db.prepare(`INSERT INTO ${table} (${cols}) VALUES (${ph})`).run(...vals);
+            await query(`INSERT INTO ${table} (${cols}) VALUES (${placeholders})`, vals);
           } catch (e) {
             if (e.message.includes('UNIQUE constraint')) return null;
             throw e;
           }
 
           if (opts.new) {
-            const inserted = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(insertData.id);
+            const insertedResult = await query(`SELECT * FROM ${table} WHERE id = $1`, [insertData.id]);
+            const inserted = insertedResult.rows[0];
             return inserted ? new Doc(table, keysToCamel(inserted), pkField || 'id') : null;
           }
           return null;
         }
       }
 
-      const existing = db.prepare(`SELECT * FROM ${table} ${whereClause} LIMIT 1`).get(...whereParams);
+      const existingResult = await query(`SELECT * FROM ${table} ${whereClause} LIMIT 1`, whereParams);
+      const existing = existingResult.rows[0];
       if (!existing) return null;
 
       const { sql: setSql, params: setParams } = buildUpdate(update);
-      db.prepare(`UPDATE ${table} SET ${setSql} ${whereClause}`).run(...setParams, ...whereParams);
+      await query(`UPDATE ${table} SET ${setSql} ${whereClause}`, [...setParams, ...whereParams]);
 
       if (opts.new) {
-        const updated = db.prepare(`SELECT * FROM ${table} ${whereClause} LIMIT 1`).get(...whereParams);
+        const updatedResult = await query(`SELECT * FROM ${table} ${whereClause} LIMIT 1`, whereParams);
+        const updated = updatedResult.rows[0];
         return updated ? new Doc(table, keysToCamel(updated), pkField || 'id') : null;
       }
 
       return new Doc(table, keysToCamel(existing), pkField || 'id');
     },
 
-    findOneAndDelete(filter) {
+    async findOneAndDelete(filter) {
       const { sql: whereSql, params } = buildWhere(filter);
       const whereClause = whereSql;
-      const db = getDb();
-      const existing = db.prepare(`SELECT * FROM ${table} ${whereClause} LIMIT 1`).get(...params);
+      const existingResult = await query(`SELECT * FROM ${table} ${whereClause} LIMIT 1`, params);
+      const existing = existingResult.rows[0];
       if (!existing) return null;
-      db.prepare(`DELETE FROM ${table} ${whereClause}`).run(...params);
+      await query(`DELETE FROM ${table} ${whereClause}`, params);
       return keysToCamel(existing);
     },
   };
