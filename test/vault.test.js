@@ -28,7 +28,37 @@ const { createSession } = require('../src/middleware/auth');
 const now = new Date().toISOString();
 
 test.before(() => {
+  // Clean up leftover data from previous runs
   const db = getDb();
+  db.exec('DELETE FROM vault_key_params');
+  db.exec('DELETE FROM vault_proof_challenges');
+  db.exec('DELETE FROM note_comments');
+  db.exec('DELETE FROM note_invite_links');
+  db.exec('DELETE FROM note_invitations');
+  db.exec('DELETE FROM note_keys');
+  db.exec('DELETE FROM workspace_members');
+  db.exec('DELETE FROM workspace_invites');
+  db.exec('DELETE FROM workspace_keys');
+  db.exec('DELETE FROM org_members');
+  db.exec('DELETE FROM org_invites');
+  db.exec('DELETE FROM org_subscriptions');
+  db.exec('DELETE FROM org_keys');
+  db.exec('DELETE FROM organizations');
+  db.exec('DELETE FROM audit_logs');
+  db.exec('DELETE FROM sso_oidc_states');
+  db.exec('DELETE FROM sso_configs');
+  db.exec('DELETE FROM email_aliases');
+  db.exec('DELETE FROM webauthn_challenges');
+  db.exec('DELETE FROM quick_connect_codes');
+  db.exec('DELETE FROM compaction_locks');
+  db.exec('DELETE FROM credentials');
+  db.exec('DELETE FROM devices');
+  db.exec('DELETE FROM sessions');
+  db.exec('DELETE FROM subscriptions');
+  db.exec('DELETE FROM commits');
+  db.exec('DELETE FROM workspaces');
+  db.exec('DELETE FROM accounts');
+
   db.prepare('INSERT INTO accounts (id, email_hmac, created_at) VALUES (?, ?, ?)').run('vault-account', 'vault-email', now);
   db.prepare('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES (?, ?, ?, ?)').run('vault-workspace', 'name', 'vault-account', now);
   db.prepare('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES (?, ?, ?, ?)').run('vault-workspace', 'vault-account', 'owner', now);

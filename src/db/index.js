@@ -17,6 +17,11 @@ function getBackend() {
     db.pragma('busy_timeout = 5000');
     db.pragma('foreign_keys = ON');
 
+    // Disable foreign keys in test mode for easier cleanup
+    if (process.env.NODE_ENV === 'test') {
+      db.pragma('foreign_keys = OFF');
+    }
+
     const fs = require('fs');
     const path = require('path');
     const schemaPath = path.join(__dirname, 'schema.sql');
