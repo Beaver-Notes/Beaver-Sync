@@ -12,7 +12,7 @@ fs.rmSync(`${dbPath}-shm`, { force: true });
 fs.rmSync(`${dbPath}-wal`, { force: true });
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = dbPath;
+process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -53,7 +53,7 @@ async function request(app, session, url, payload, deviceId = 'device-a') {
   });
 }
 
-test.before(async () => {
+test.before(() => {
   seedAccount('account-1');
   seedWorkspace('workspace-1', 'account-1');
 });

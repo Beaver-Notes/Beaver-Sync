@@ -13,7 +13,7 @@ const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'beaver-sync-task7-'));
 const dbPath = path.join(testDir, 'remote-bootstrap.sqlite');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = dbPath;
+process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';

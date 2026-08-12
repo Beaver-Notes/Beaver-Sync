@@ -18,7 +18,10 @@ function validateRequiredEnv() {
     }
   }
 
-  requireVar('DATABASE_URL', true, 1);
+  // Require either DATABASE_URL or DATABASE_PATH
+  if (!process.env.DATABASE_URL && !process.env.DATABASE_PATH) {
+    missing.push('DATABASE_URL or DATABASE_PATH');
+  }
 requireVar('SESSION_HMAC_KEY', true, 32);
     requireVar('EMAIL_HMAC_KEY', true, 32);
     requireVar('COOKIE_SECRET', true, 32);

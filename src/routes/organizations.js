@@ -92,7 +92,7 @@ async function organizationRoutes(app) {
     }
 
     // Initialize sync state
-    const { query } = require('../db/postgres');
+    const { query } = require('../db');
     await query(
       'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
       [workspace.id, 'empty', 0, new Date().toISOString()]

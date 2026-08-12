@@ -13,7 +13,7 @@ fs.rmSync(`${dbPath}-shm`, { force: true });
 fs.rmSync(`${dbPath}-wal`, { force: true });
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = dbPath;
+process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
 process.env.SESSION_HMAC_KEY = 'test-session-hmac-key-at-least-32-characters-long';
 process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';

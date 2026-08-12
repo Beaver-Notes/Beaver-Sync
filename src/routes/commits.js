@@ -6,7 +6,7 @@ const r2 = require('../services/r2');
 const mlkem = require('../lib/mlkem');
 const { createNoteHash } = require('../lib/crypto');
 const { audit } = require('../lib/audit');
-const { query } = require('../db/postgres');
+const { query } = require('../db');
 
 const COMMIT_BODY_LIMIT_BYTES = parseInt(process.env.COMMIT_BODY_LIMIT_BYTES ?? '1048576', 10);
 const MAX_CURSOR_BYTES = parseInt(process.env.COMMIT_CURSOR_QUERY_MAX_BYTES ?? '4096', 10);

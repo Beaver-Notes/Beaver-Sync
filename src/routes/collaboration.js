@@ -2,7 +2,6 @@
 
 const crypto = require('crypto');
 const { z } = require('zod');
-const { transaction } = require('../db/postgres');
 const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models');
 const { validatePublicKey } = require('../lib/recipient-wrap');
 const { sendNoteInviteEmail } = require('../email');
@@ -72,13 +71,13 @@ async function collaborationRoutes(app) {
       }
     }
 
-    const outcome = await transaction(async (client) => {
-      // Idempotent provisioning: the first writer wins. If the note already has
-      // any key envelopes, refuse to overwrite so a late joiner or a concurrent
-      // provisioner cannot rotate an existing note key.
-      if (await NoteKey.countDocuments({ noteId }) > 0) {
-        return { existing: true, stored: 0 };
-      }
+    // Idempotent provisioning: the first writer wins. If the note already has
+    // any key envelopes, refuse to overwrite so a late joiner or a concurrent
+    // provisioner cannot rotate an existing note key.
+    let outcome;
+    if (await NoteKey.countDocuments({ noteId }) > 0) {
+      outcome = { existing: true, stored: 0 };
+    } else {
       for (const r of recipients) {
         await NoteKey.findOneAndUpdate(
           { noteId, userId: r.userId },
@@ -86,8 +85,8 @@ async function collaborationRoutes(app) {
           { upsert: true }
         );
       }
-      return { existing: false, stored: recipients.length };
-    });
+      outcome = { existing: false, stored: recipients.length };
+    }
 
     return reply.send({ noteId, stored: outcome.stored, noteHasKey: true, existing: outcome.existing });
   });
@@ -151,19 +150,19 @@ async function collaborationRoutes(app) {
       return reply.status(403).send({ error: 'keypair_required', message: `User ${recipientUserId} has not set up end-to-end encryption.` });
     }
 
-    const outcome = await transaction(async (client) => {
-      // Mirror storeRecipients idempotency: if the note already has any key
-      // envelopes, refuse to overwrite so no caller can rotate an existing key.
-      if (await NoteKey.countDocuments({ noteId }) > 0) {
-        return { existing: true, stored: false };
-      }
+    // Mirror storeRecipients idempotency: if the note already has any key
+    // envelopes, refuse to overwrite so no caller can rotate an existing key.
+    let outcome;
+    if (await NoteKey.countDocuments({ noteId }) > 0) {
+      outcome = { existing: true, stored: false };
+    } else {
       await NoteKey.findOneAndUpdate(
         { noteId, userId: recipientUserId },
         { $set: { wrappedKey } },
         { upsert: true }
       );
-      return { existing: false, stored: true };
-    });
+      outcome = { existing: false, stored: true };
+    }
 
     return reply.send({ noteId, recipientUserId, stored: outcome.stored, existing: outcome.existing, noteHasKey: true });
   });

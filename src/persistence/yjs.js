@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { query, transaction } = require('../db/postgres');
+const { query, transaction } = require('../db');
 
 const MAX_BATCH_SIZE = 200;
 const MAX_PULL_PAGE_SIZE = 500;
@@ -351,7 +351,7 @@ async function deleteJournalRows(workspaceId, noteId, rows) {
 
 async function getUpdateCount(workspaceId, noteId) {
   const { rows } = await query(`
-    SELECT COUNT(*)::int AS count FROM yjs_doc_updates
+    SELECT COUNT(*) AS count FROM yjs_doc_updates
     WHERE workspace_id = $1 AND note_id = $2
   `, [workspaceId, noteId]);
   return rows[0]?.count ?? 0;

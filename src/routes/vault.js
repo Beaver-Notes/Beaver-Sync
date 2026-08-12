@@ -4,7 +4,7 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { z } = require('zod');
 const { VaultKeyParams, WorkspaceMember } = require('../models');
-const { query, transaction } = require('../db/postgres');
+const { query, transaction } = require('../db');
 const { audit } = require('../lib/audit');
 
 const BCRYPT_ROUNDS = 12;

@@ -108,7 +108,7 @@ async function authRoutes(app) {
     await WorkspaceMember.create({ workspaceId: defaultWorkspace.id, accountId: account.id, role: 'owner', createdAt: new Date() });
 
     // Initialize sync state for the new workspace so /sync/state doesn't 404
-    const { query } = require('../db/postgres');
+    const { query } = require('../db');
     await query(
       'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
       [defaultWorkspace.id, 'empty', 0, new Date().toISOString()]

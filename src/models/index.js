@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { query } = require('../db/postgres');
+const { query } = require('../db');
 
 function toSnake(str) {
   return str.replace(/[A-Z]/g, (m) => '_' + m.toLowerCase());

@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const archiver = require('archiver');
 
 const { Account, Subscription, Device, Organization, OrgMember, OrgSubscription, Workspace } = require('../models');
-const { transaction } = require('../db/postgres');
+const { transaction } = require('../db');
 const mlkem = require('../lib/mlkem');
 const r2 = require('../services/r2');
 const { hashAccountId } = require('../lib/crypto');

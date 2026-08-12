@@ -1,7 +1,7 @@
 'use strict';
 
 const EventEmitter = require('events');
-const { getPool } = require('../db/postgres');
+const { getPool } = require('../db');
 
 const localEmitter = new EventEmitter();
 localEmitter.setMaxListeners(100);

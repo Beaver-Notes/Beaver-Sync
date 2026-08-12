@@ -2,7 +2,7 @@
 
 const crypto = require('node:crypto');
 const { z } = require('zod');
-const { query, transaction } = require('../db/postgres');
+const { query, transaction } = require('../db');
 const { requireWorkspaceMember, requireWorkspaceOwner } = require('../middleware/org');
 
 const CLAIM_TTL_MS = 5 * 60 * 1000;

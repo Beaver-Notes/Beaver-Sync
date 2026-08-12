@@ -10,7 +10,7 @@ const repoRoot = path.resolve(__dirname, '..');
 const testDbDir = path.join(repoRoot, '.test-data');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(testDbDir, 'e2e-test.db');
+process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long-e2e';

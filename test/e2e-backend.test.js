@@ -12,7 +12,7 @@ fs.rmSync(`${dbPath}-shm`, { force: true });
 fs.rmSync(`${dbPath}-wal`, { force: true });
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = dbPath;
+process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
 process.env.SESSION_HMAC_KEY = 'test-session-hmac-key-at-least-32-characters-long';
 process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
@@ -53,6 +53,38 @@ let aliceSession, bobSession;
 let originalAliceKemCt;
 
 test.before(async () => {
+  // Clean up leftover data from previous runs
+  const db = getDb();
+  db.exec('DELETE FROM yjs_doc_updates');
+  db.exec('DELETE FROM sync_document_state');
+  db.exec('DELETE FROM sync_workspace_state');
+  db.exec('DELETE FROM note_comments');
+  db.exec('DELETE FROM note_invite_links');
+  db.exec('DELETE FROM note_invitations');
+  db.exec('DELETE FROM note_keys');
+  db.exec('DELETE FROM workspace_members');
+  db.exec('DELETE FROM workspace_invites');
+  db.exec('DELETE FROM workspace_keys');
+  db.exec('DELETE FROM org_members');
+  db.exec('DELETE FROM org_invites');
+  db.exec('DELETE FROM org_subscriptions');
+  db.exec('DELETE FROM org_keys');
+  db.exec('DELETE FROM organizations');
+  db.exec('DELETE FROM audit_logs');
+  db.exec('DELETE FROM sso_oidc_states');
+  db.exec('DELETE FROM sso_configs');
+  db.exec('DELETE FROM email_aliases');
+  db.exec('DELETE FROM webauthn_challenges');
+  db.exec('DELETE FROM quick_connect_codes');
+  db.exec('DELETE FROM compaction_locks');
+  db.exec('DELETE FROM credentials');
+  db.exec('DELETE FROM devices');
+  db.exec('DELETE FROM sessions');
+  db.exec('DELETE FROM subscriptions');
+  db.exec('DELETE FROM commits');
+  db.exec('DELETE FROM workspaces');
+  db.exec('DELETE FROM accounts');
+
   alice = await makeKeypair();
   bob = await makeKeypair();
 
