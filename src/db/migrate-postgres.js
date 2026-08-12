@@ -4,6 +4,17 @@ const fs = require('fs');
 const path = require('path');
 const { query } = require('./postgres');
 
+async function ensureSchema() {
+  const schemaPath = path.join(__dirname, 'schema.postgres.sql');
+  if (!fs.existsSync(schemaPath)) {
+    throw new Error('schema.postgres.sql not found; Postgres backend requires it');
+  }
+  const schema = fs.readFileSync(schemaPath, 'utf8');
+  // schema.postgres.sql is fully idempotent (CREATE ... IF NOT EXISTS).
+  await query(schema);
+  await runMigrations();
+}
+
 async function runMigrations() {
   await query(`CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
 
@@ -36,4 +47,4 @@ async function runMigrations() {
   }
 }
 
-module.exports = { runMigrations };
+module.exports = { runMigrations, ensureSchema };

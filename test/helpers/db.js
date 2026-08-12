@@ -2,12 +2,12 @@
 
 const path = require('path');
 
-const repoRoot = path.resolve(__dirname, '..');
+const repoRoot = path.resolve(__dirname, '..', '..');
 
-// Default test Postgres connection string
-const DEFAULT_DATABASE_URL = 'postgresql://beaver:beaver@localhost:5432/beaver';
+// Dedicated Postgres test database, separate from local dev data.
+const DEFAULT_DATABASE_URL = 'postgresql://beaver:beaver@localhost:5432/beaver_test';
 
-function setupTestDb() {
+async function setupTestDb() {
   if (!process.env.DATABASE_URL) {
     process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || DEFAULT_DATABASE_URL;
   }
@@ -30,27 +30,33 @@ function setupTestDb() {
   if (!process.env.WEBAUTHN_ORIGIN) {
     process.env.WEBAUTHN_ORIGIN = 'http://localhost:3000';
   }
+
+  const { ensureSchema } = require('../../src/db/migrate-postgres');
+  await ensureSchema();
 }
 
+// FK-safe delete order: children before parents (workspaces before orgs/accounts).
+const TABLES = [
+  'yjs_doc_updates', 'sync_document_state', 'sync_workspace_state',
+  'note_comments', 'note_invite_links', 'note_invitations', 'note_keys',
+  'vault_key_params', 'vault_proof_challenges',
+  'workspace_members', 'workspace_invites', 'workspace_keys',
+  'compaction_locks', 'subscriptions', 'commits', 'sessions',
+  'devices', 'credentials', 'webauthn_challenges', 'quick_connect_codes',
+  'email_aliases', 'audit_logs', 'sso_oidc_states', 'sso_configs',
+  'workspaces',
+  'org_keys', 'org_subscriptions', 'org_invites', 'org_members',
+  'organizations',
+  'accounts',
+];
+
 async function cleanTestDb() {
-  const { query } = require('../src/db/postgres');
-
-  const tables = [
-    'yjs_doc_updates', 'sync_document_state', 'sync_workspace_state',
-    'note_comments', 'note_invite_links', 'note_invitations', 'note_keys',
-    'workspace_members', 'workspace_invites', 'workspace_keys',
-    'org_members', 'org_invites', 'org_subscriptions', 'org_keys',
-    'organizations', 'audit_logs', 'sso_oidc_states', 'sso_configs',
-    'email_aliases', 'webauthn_challenges', 'quick_connect_codes',
-    'compaction_locks', 'credentials', 'devices', 'sessions',
-    'subscriptions', 'commits', 'workspaces', 'accounts',
-  ];
-
-  for (const table of tables) {
+  const { query } = require('../../src/db/postgres');
+  for (const table of TABLES) {
     try {
       await query(`DELETE FROM ${table}`);
     } catch (err) {
-      // Table might not exist, ignore
+      // Table might not exist yet; ignore.
     }
   }
 }
