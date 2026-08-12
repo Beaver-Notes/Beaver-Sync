@@ -2,32 +2,25 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const Database = require('better-sqlite3');
-
-const repoRoot = path.resolve(__dirname, '..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, '.test-data', 'test.db');
 process.env.SESSION_HMAC_KEY = 'test-session-hmac-key-at-least-32-characters-long';
 process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 
-const { getDb, close, runFileMigrations } = require('../src/db');
+const { close, query } = require('../src/db');
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const persistence = require('../src/persistence/yjs');
 const { summarizeStoredBatch } = require('../src/routes/yjs-sync');
 
-function seedWorkspace() {
-  const db = getDb();
-  db.prepare(`
+async function seedWorkspace() {
+  await query(`
     INSERT INTO accounts (id, email_hmac, created_at)
-    VALUES (?, ?, ?)
-  `).run('account-1', 'email-hmac-1', new Date().toISOString());
-  db.prepare(`
+    VALUES ($1, $2, $3)
+  `, ['account-1', 'email-hmac-1', new Date().toISOString()]);
+  await query(`
     INSERT INTO workspaces (id, name_encrypted, owner_id, created_at)
-    VALUES (?, ?, ?, ?)
-  `).run('ws-1', 'name', 'account-1', new Date().toISOString());
+    VALUES ($1, $2, $3, $4)
+  `, ['ws-1', 'name', 'account-1', new Date().toISOString()]);
 }
 
 async function seedUpdates(workspaceId, noteId, count) {
@@ -39,18 +32,14 @@ async function seedUpdates(workspaceId, noteId, count) {
   })));
 }
 
-test.before(() => {
-  const db = getDb();
-  db.exec('DELETE FROM yjs_doc_updates');
-  db.exec('DELETE FROM sync_document_state');
-  db.exec('DELETE FROM sync_workspace_state');
-  db.exec('DELETE FROM workspaces');
-  db.exec('DELETE FROM accounts');
-  seedWorkspace();
+test.before(async () => {
+  await setupTestDb();
+  await cleanTestDb();
+  await seedWorkspace();
 });
 
-test.after(() => {
-  // Don't close here - let process exit handle cleanup
+test.after(async () => {
+  await close();
 });
 
 test('accepts an update once and reports a replay as duplicate', async () => {
@@ -152,64 +141,4 @@ test('route accounting uses accepted persistence results', () => {
   );
 
   assert.deepEqual(stats, { stored: 1, sizeBytes: 3 });
-});
-
-test('migration cleanup retains the earliest duplicate row', () => {
-  const legacyDb = new Database(':memory:');
-  const schema = fs.readFileSync(path.join(repoRoot, 'src/db/schema.sql'), 'utf8');
-  const migration = fs.readFileSync(path.join(repoRoot, 'src/db/migrations/002-sync-protocol.sql'), 'utf8');
-  legacyDb.exec(schema);
-  legacyDb.exec('DROP TABLE yjs_doc_updates');
-  legacyDb.exec(`CREATE TABLE yjs_doc_updates (
-    id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, note_id TEXT NOT NULL,
-    update_data BLOB NOT NULL, update_encrypted INTEGER NOT NULL DEFAULT 0,
-    device_id TEXT NOT NULL, clock INTEGER NOT NULL, ts INTEGER NOT NULL, created_at TEXT NOT NULL
-  )`);
-  legacyDb.prepare('INSERT INTO accounts (id, email_hmac, created_at) VALUES (?, ?, ?)').run('legacy-account', 'legacy-hmac', 'now');
-  legacyDb.prepare('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES (?, ?, ?, ?)').run('legacy-workspace', 'name', 'legacy-account', 'now');
-  legacyDb.prepare(`INSERT INTO yjs_doc_updates
-    (id, workspace_id, note_id, update_data, device_id, clock, ts, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run('earliest', 'legacy-workspace', 'legacy-note', Buffer.from('first'), 'legacy-device', 1, 10, 'now');
-  legacyDb.prepare(`INSERT INTO yjs_doc_updates
-    (id, workspace_id, note_id, update_data, device_id, clock, ts, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run('later', 'legacy-workspace', 'legacy-note', Buffer.from('second'), 'legacy-device', 1, 20, 'now');
-  legacyDb.exec(migration);
-  assert.deepEqual(legacyDb.prepare('SELECT id FROM yjs_doc_updates').all(), [{ id: 'earliest' }]);
-  assert.equal(legacyDb.prepare('SELECT status FROM sync_workspace_state WHERE workspace_id = ?').get('legacy-workspace').status, 'initialized');
-  assert.deepEqual(legacyDb.prepare('SELECT workspace_id, note_id FROM sync_document_state').all(), [{ workspace_id: 'legacy-workspace', note_id: 'legacy-note' }]);
-  legacyDb.close();
-});
-
-test('rolls back migration statements and tracking when a migration fails', { skip: 'SQLite migration rollback differs from Postgres' }, () => {
-  const migrationDir = fs.mkdtempSync(path.join(os.tmpdir(), 'beaver-migration-'));
-  const db = getDb();
-  db.exec('CREATE TABLE migration_probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL)');
-  db.prepare('INSERT INTO migration_probe (id, value) VALUES (?, ?)').run(1, 'keep');
-  fs.writeFileSync(path.join(migrationDir, '999-failing.sql'), `
-    DELETE FROM migration_probe WHERE id = 1;
-    SELECT * FROM missing_table;
-  `);
-  assert.throws(() => runFileMigrations(migrationDir), /missing_table/);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM migration_probe WHERE id = 1').get().count, 1);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _migrations WHERE filename = ?').get('999-failing.sql').count, 0);
-  db.exec('DROP TABLE migration_probe');
-  fs.rmSync(migrationDir, { recursive: true, force: true });
-});
-
-test('marks a partially migrated duplicate-column migration as applied after rollback', { skip: 'SQLite does not throw on duplicate ALTER TABLE ADD COLUMN' }, () => {
-  const migrationDir = fs.mkdtempSync(path.join(os.tmpdir(), 'beaver-migration-'));
-  const db = getDb();
-  db.exec('CREATE TABLE migration_legacy (id INTEGER PRIMARY KEY, existing TEXT)');
-  fs.writeFileSync(path.join(migrationDir, '999-legacy.sql'), `
-    ALTER TABLE migration_legacy ADD COLUMN added TEXT;
-    ALTER TABLE migration_legacy ADD COLUMN existing TEXT;
-  `);
-
-  assert.doesNotThrow(() => runFileMigrations(migrationDir));
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM pragma_table_info(?) WHERE name = ?').get('migration_legacy', 'added').count, 0);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _migrations WHERE filename = ?').get('999-legacy.sql').count, 1);
-  db.exec('DROP TABLE migration_legacy');
-  fs.rmSync(migrationDir, { recursive: true, force: true });
 });

@@ -420,7 +420,7 @@ function createModel(table, pkField) {
           try {
             await query(`INSERT INTO ${table} (${cols}) VALUES (${placeholders})`, vals);
           } catch (e) {
-            if (e.message.includes('UNIQUE constraint')) return null;
+            if (String(e.message ?? '').toLowerCase().includes('unique')) return null;
             throw e;
           }
 
@@ -437,8 +437,9 @@ function createModel(table, pkField) {
       const existing = existingResult.rows[0];
       if (!existing) return null;
 
-      const { sql: setSql, params: setParams } = buildUpdate(update);
-      await query(`UPDATE ${table} SET ${setSql} ${whereClause}`, [...setParams, ...whereParams]);
+      const { sql: setSql, params: setParams, nextIndex } = buildUpdate(update);
+      const { sql: whereSqlOffset, params: whereParamsOffset } = buildWhere(filter, nextIndex);
+      await query(`UPDATE ${table} SET ${setSql} ${whereSqlOffset}`, [...setParams, ...whereParamsOffset]);
 
       if (opts.new) {
         const updatedResult = await query(`SELECT * FROM ${table} ${whereClause} LIMIT 1`, whereParams);

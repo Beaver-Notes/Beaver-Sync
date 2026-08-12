@@ -3,17 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const fs = require('node:fs');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..');
-const testDbPath = path.join(repoRoot, '.test-data', 'sync-state-test.db');
-fs.rmSync(testDbPath, { force: true });
-fs.rmSync(`${testDbPath}-shm`, { force: true });
-fs.rmSync(`${testDbPath}-wal`, { force: true });
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = testDbPath;
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -22,7 +16,8 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
 const { buildApp } = require('../src/server');
-const { getDb, close } = require('../src/db');
+const { close, query } = require('../src/db');
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const models = require('../src/models');
 const { hashSessionId } = require('../src/lib/crypto');
 
@@ -32,32 +27,26 @@ const users = {
   outsider: 'sync-outsider',
 };
 
-function seedDatabase() {
-  const db = getDb();
+async function seedDatabase() {
   const now = new Date().toISOString();
   for (const id of Object.values(users)) {
-    db.prepare('INSERT INTO accounts (id, email_hmac, created_at) VALUES (?, ?, ?)').run(id, `${id}-email`, now);
+    await query('INSERT INTO accounts (id, email_hmac, created_at) VALUES ($1, $2, $3)', [id, `${id}-email`, now]);
   }
-  db.prepare('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES (?, ?, ?, ?)')
-    .run('sync-workspace', 'encrypted-name', users.owner, now);
-  db.prepare('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES (?, ?, ?, ?)')
-    .run('sync-workspace', users.owner, 'owner', now);
-  db.prepare('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES (?, ?, ?, ?)')
-    .run('sync-workspace', users.member, 'editor', now);
-  db.prepare('INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES (?, ?, ?, ?)')
-    .run('sync-workspace', 'empty', 0, now);
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', ['sync-workspace', 'encrypted-name', users.owner, now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['sync-workspace', users.owner, 'owner', now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['sync-workspace', users.member, 'editor', now]);
+  await query('INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4)', ['sync-workspace', 'empty', 0, now]);
 }
 
-function resetWorkspaceState() {
-  const db = getDb();
+async function resetWorkspaceState() {
   const now = new Date().toISOString();
-  db.prepare('DELETE FROM sync_document_state WHERE workspace_id = ?').run('sync-workspace');
-  db.prepare(`
+  await query('DELETE FROM sync_document_state WHERE workspace_id = $1', ['sync-workspace']);
+  await query(`
     UPDATE sync_workspace_state
     SET status = 'empty', generation = 0, initialization_token = NULL,
-        initialization_expires_at = NULL, updated_at = ?
-    WHERE workspace_id = ?
-  `).run(now, 'sync-workspace');
+        initialization_expires_at = NULL, updated_at = $1
+    WHERE workspace_id = $2
+  `, [now, 'sync-workspace']);
 }
 
 function authFor(userId) {
@@ -94,14 +83,17 @@ async function unauthenticatedRequest(app, method, url, payload) {
   });
 }
 
-test.before(() => seedDatabase());
-test.beforeEach(() => resetWorkspaceState());
+test.before(async () => {
+  await setupTestDb();
+  await cleanTestDb();
+  await seedDatabase();
+});
+test.beforeEach(async () => {
+  await resetWorkspaceState();
+});
 
-test.after(() => {
-  close();
-  fs.rmSync(testDbPath, { force: true });
-  fs.rmSync(`${testDbPath}-shm`, { force: true });
-  fs.rmSync(`${testDbPath}-wal`, { force: true });
+test.after(async () => {
+  await close();
 });
 
 test('a workspace member can read sync state', async (t) => {
@@ -161,9 +153,7 @@ test('an expired claim can be reclaimed', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
 
-  const db = getDb();
-  db.prepare('UPDATE sync_workspace_state SET initialization_expires_at = ? WHERE workspace_id = ?')
-    .run(new Date(Date.now() - 1_000).toISOString(), 'sync-workspace');
+  await query('UPDATE sync_workspace_state SET initialization_expires_at = $1 WHERE workspace_id = $2', [new Date(Date.now() - 1_000).toISOString(), 'sync-workspace']);
   const response = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   assert.equal(response.statusCode, 200);
 });
@@ -231,14 +221,13 @@ test('an expired completion claim is rejected and leaves the workspace initializ
   t.after(() => app.close());
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
-  getDb().prepare('UPDATE sync_workspace_state SET initialization_expires_at = ? WHERE workspace_id = ?')
-    .run(new Date(Date.now() - 1_000).toISOString(), 'sync-workspace');
+  await query('UPDATE sync_workspace_state SET initialization_expires_at = $1 WHERE workspace_id = $2', [new Date(Date.now() - 1_000).toISOString(), 'sync-workspace']);
   const response = await request(app, 'POST', '/sync/initialize/complete', users.owner, {
     workspaceId: 'sync-workspace', token: claim.json().token, generation: 1, documents: [],
   });
   assert.equal(response.statusCode, 403);
   assert.equal(response.json().error, 'initialization_token_expired');
-  assert.equal(getDb().prepare('SELECT status FROM sync_workspace_state WHERE workspace_id = ?').get('sync-workspace').status, 'initializing');
+  assert.equal((await query('SELECT status FROM sync_workspace_state WHERE workspace_id = $1', ['sync-workspace'])).rows[0].status, 'initializing');
 });
 
 test('a completion database failure rolls back document rows and initialization', async (t) => {
@@ -246,13 +235,16 @@ test('a completion database failure rolls back document rows and initialization'
   t.after(() => app.close());
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
-  const db = getDb();
-  db.exec(`
-    CREATE TRIGGER fail_sync_document_insert
+  await query(`CREATE OR REPLACE FUNCTION fail_sync_document_insert() RETURNS trigger AS $$
+    BEGIN
+      IF NEW.note_id = 'note-2' THEN
+        RAISE EXCEPTION 'forced completion failure';
+      END IF;
+      RETURN NEW;
+    END; $$ LANGUAGE plpgsql`);
+  await query(`CREATE TRIGGER fail_sync_document_insert
     BEFORE INSERT ON sync_document_state
-    WHEN NEW.note_id = 'note-2'
-    BEGIN SELECT RAISE(ABORT, 'forced completion failure'); END
-  `);
+    FOR EACH ROW EXECUTE FUNCTION fail_sync_document_insert()`);
   try {
     const response = await request(app, 'POST', '/sync/initialize/complete', users.owner, {
       workspaceId: 'sync-workspace', token: claim.json().token, generation: 1,
@@ -263,27 +255,27 @@ test('a completion database failure rolls back document rows and initialization'
     });
     assert.equal(response.statusCode, 400);
   } finally {
-    db.exec('DROP TRIGGER fail_sync_document_insert');
+    await query('DROP TRIGGER IF EXISTS fail_sync_document_insert ON sync_document_state');
+    await query('DROP FUNCTION IF EXISTS fail_sync_document_insert()');
   }
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM sync_document_state WHERE workspace_id = ?').get('sync-workspace').count, 0);
-  assert.equal(db.prepare('SELECT status FROM sync_workspace_state WHERE workspace_id = ?').get('sync-workspace').status, 'initializing');
+  assert.equal((await query('SELECT COUNT(*)::int AS count FROM sync_document_state WHERE workspace_id = $1', ['sync-workspace'])).rows[0].count, 0);
+  assert.equal((await query('SELECT status FROM sync_workspace_state WHERE workspace_id = $1', ['sync-workspace'])).rows[0].status, 'initializing');
 });
 
 test('state reads include persisted workspace and document mappings', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
 
-  const db = getDb();
-  db.prepare(`
+  await query(`
     INSERT INTO sync_document_state
       (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run('sync-workspace', 'persisted-note', 4, 'snapshot-key', 123, 9, new Date().toISOString());
-  db.prepare(`
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+  `, ['sync-workspace', 'persisted-note', 4, 'snapshot-key', 123, 9, new Date().toISOString()]);
+  await query(`
     UPDATE sync_workspace_state
-    SET status = 'initialized', generation = 4, updated_at = ?
-    WHERE workspace_id = ?
-  `).run(new Date().toISOString(), 'sync-workspace');
+    SET status = 'initialized', generation = 4, updated_at = $1
+    WHERE workspace_id = $2
+  `, [new Date().toISOString(), 'sync-workspace']);
 
   const response = await request(app, 'GET', '/sync/state?workspaceId=sync-workspace', users.member);
   assert.equal(response.statusCode, 200);
@@ -299,8 +291,7 @@ test('completion rejects the wrong token and atomically initializes an empty map
   const app = await buildApp();
   t.after(() => app.close());
 
-  getDb().prepare('UPDATE sync_workspace_state SET initialization_expires_at = ? WHERE workspace_id = ?')
-    .run(new Date(Date.now() - 1_000).toISOString(), 'sync-workspace');
+  await query('UPDATE sync_workspace_state SET initialization_expires_at = $1 WHERE workspace_id = $2', [new Date(Date.now() - 1_000).toISOString(), 'sync-workspace']);
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   const { token } = claim.json();
   const wrong = await request(app, 'POST', '/sync/initialize/complete', users.owner, {

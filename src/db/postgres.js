@@ -1,6 +1,10 @@
 'use strict';
 
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+
+// Return BIGINT columns as JS numbers so the Postgres backend matches the
+// numeric semantics the rest of the codebase expects (SQLite returned numbers).
+types.setTypeParser(types.builtins.INT8, (value) => Number(value));
 
 let pool = null;
 

@@ -171,7 +171,7 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
       } else if (quota.subscription.plan !== 'enterprise') {
         result = await client.query(`UPDATE subscriptions SET storage_used_bytes = storage_used_bytes + $1
           WHERE account_id = $2 AND storage_used_bytes + $1 <= storage_quota_bytes`,
-          [acceptedBytes, quota.accountId, acceptedBytes]);
+          [acceptedBytes, quota.accountId]);
       }
       if (result && result.rowCount !== 1) {
         const error = new Error('Storage quota exceeded');
