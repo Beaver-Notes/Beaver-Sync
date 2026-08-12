@@ -163,8 +163,8 @@ CREATE TABLE IF NOT EXISTS org_subscriptions (
   renews_at TEXT,
   stripe_customer_id TEXT,
   stripe_subscription_id TEXT,
-  storage_quota_bytes INTEGER DEFAULT 0,
-  storage_used_bytes INTEGER DEFAULT 0,
+  storage_quota_bytes BIGINT DEFAULT 0,
+  storage_used_bytes BIGINT DEFAULT 0,
   created_at TEXT NOT NULL
 );
 

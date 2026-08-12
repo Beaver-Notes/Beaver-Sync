@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const repoRoot = path.resolve(__dirname, '..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -51,6 +50,8 @@ require.cache[swaPath] = {
   exports: swaMock,
 };
 
+const { close } = require('../src/db');
+const { setupTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const { createEmailHash } = require('../src/lib/crypto');
@@ -108,6 +109,10 @@ function resetStubs() {
   });
 }
 
+test.before(async () => {
+  await setupTestDb();
+});
+
 test.after(() => {
   Object.assign(models.Account, originalMethods.Account);
   Object.assign(models.Credential, originalMethods.Credential);
@@ -115,6 +120,7 @@ test.after(() => {
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(models.Subscription, originalMethods.Subscription);
   delete require.cache[swaPath];
+  close();
 });
 
 async function makeApp() {

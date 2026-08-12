@@ -3,14 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 
 const repoRoot = path.resolve(__dirname, '..');
-const testDbDir = path.join(repoRoot, '.test-data');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long-e2e';
@@ -19,6 +16,8 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long-e2
 process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../src/db');
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { QuickConnectCode, Account, WebAuthnChallenge, Credential } = require('../src/models');
 const { createEmailHash } = require('../src/lib/crypto');
 
@@ -49,15 +48,13 @@ require.cache[swaPath] = { id: swaPath, filename: swaPath, loaded: true, exports
 
 const { buildApp } = require('../src/server');
 
-test.before(() => {
-  fs.mkdirSync(testDbDir, { recursive: true });
+test.before(async () => {
+  await setupTestDb();
+  await cleanTestDb();
 });
 
-test.after(() => {
-  const dbPath = process.env.DATABASE_PATH;
-  try { fs.unlinkSync(dbPath); } catch {}
-  try { fs.unlinkSync(dbPath + '-wal'); } catch {}
-  try { fs.unlinkSync(dbPath + '-shm'); } catch {}
+test.after(async () => {
+  close();
 });
 
 test('POST /auth/register creates a new account and returns a session token', async (t) => {

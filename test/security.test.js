@@ -8,7 +8,6 @@ const bcrypt = require('bcrypt');
 const repoRoot = path.resolve(__dirname, '..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -18,6 +17,8 @@ process.env.AUTH_RATE_LIMIT_PER_MINUTE = '2';
 process.env.ASSET_URL_TTL_SECONDS = '300';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../src/db');
+const { setupTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const { signToken } = require('../src/middleware/auth');
 const models = require('../src/models');
@@ -124,6 +125,10 @@ async function makeApp() {
   return app;
 }
 
+test.before(async () => {
+  await setupTestDb();
+});
+
 test.after(() => {
   Object.assign(models.Account, originalMethods.Account);
   Object.assign(models.Subscription, originalMethods.Subscription);
@@ -131,6 +136,7 @@ test.after(() => {
   Object.assign(models.Device, originalMethods.Device);
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(r2, originalMethods.r2);
+  close();
 });
 
 test('unauthorized access to private account route is rejected', async (t) => {

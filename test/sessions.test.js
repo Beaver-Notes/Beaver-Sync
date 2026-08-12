@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const repoRoot = path.resolve(__dirname, '..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -17,6 +16,8 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../src/db');
+const { setupTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const { hashSessionId } = require('../src/lib/crypto');
@@ -45,9 +46,14 @@ function resetStubs() {
   models.Account.findById = () => ({ lean: () => null });
 }
 
+test.before(async () => {
+  await setupTestDb();
+});
+
 test.after(() => {
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(models.Account, originalMethods.Account);
+  close();
 });
 
 async function makeApp() {
