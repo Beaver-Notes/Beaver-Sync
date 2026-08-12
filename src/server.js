@@ -21,10 +21,10 @@ function validateRequiredEnv() {
   if (!process.env.DATABASE_URL) {
     missing.push('DATABASE_URL');
   }
-requireVar('SESSION_HMAC_KEY', true, 32);
-    requireVar('EMAIL_HMAC_KEY', true, 32);
-    requireVar('COOKIE_SECRET', true, 32);
-    requireVar('NOTE_HMAC_KEY', isProduction, 32);
+  requireVar('SESSION_HMAC_KEY', true, 32);
+  requireVar('EMAIL_HMAC_KEY', true, 32);
+  requireVar('COOKIE_SECRET', true, 32);
+  requireVar('NOTE_HMAC_KEY', isProduction, 32);
   requireVar('JWT_PRIVATE_KEY_PATH', legacyAuth);
   requireVar('JWT_PUBLIC_KEY_PATH', legacyAuth);
   requireVar('WEBAUTHN_RPID', isProduction);
