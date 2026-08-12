@@ -226,6 +226,9 @@ async function buildApp() {
 async function start() {
   const app = await buildApp();
 
+  const { ensureSchema } = require('./db/migrate-postgres');
+  await ensureSchema();
+
   getDb();
   app.log.info('Database connected');
 
