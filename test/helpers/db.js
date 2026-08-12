@@ -7,6 +7,10 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 // Dedicated Postgres test database, separate from local dev data.
 const DEFAULT_DATABASE_URL = 'postgresql://beaver:beaver@localhost:5432/beaver_test';
 
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || DEFAULT_DATABASE_URL;
+}
+
 async function setupTestDb() {
   if (!process.env.DATABASE_URL) {
     process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || DEFAULT_DATABASE_URL;

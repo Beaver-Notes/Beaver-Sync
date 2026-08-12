@@ -15,9 +15,9 @@ process.env.SESSION_HMAC_KEY = 'test-session-hmac-key-at-least-32-characters-lon
 process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const { close, query } = require('../src/db');
-const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const models = require('../src/models');
 const { hashSessionId } = require('../src/lib/crypto');
 

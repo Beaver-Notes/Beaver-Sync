@@ -1,6 +1,6 @@
 'use strict';
 
-// Postgres-only backend. SQLite (better-sqlite3) support has been removed.
+// Postgres-only backend. SQLite support has been removed.
 
 function getBackend() {
   if (!process.env.DATABASE_URL) {

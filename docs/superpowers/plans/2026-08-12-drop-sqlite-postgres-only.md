@@ -17,6 +17,7 @@
 - `schema.postgres.sql` and `migrations/*.postgres.sql` are the only schema sources. `src/db/schema.sql` and the four non-Postgres migrations are deleted.
 - Keep `npm test` (`node --test --test-concurrency=1`) and `npm run lint` green at the end of every task.
 - Deleted files: `scripts/migrate-sqlite-to-pg.js`, `src/db/migrate-data.js`, `src/db/schema.sql`, `src/db/migrations/{001-organizations,002-sync-protocol,003-vault-proof-challenges,004-session-device}.sql`, `test/scripts/migrate.test.js`, `data/beaver.db`, `.test-data/`.
+- Cross-cutting: when a converted test hits one of these SQLite-only error-string checks in src, apply the same case-insensitive treatment (like the `organizations.js` slug check): `src/models/index.js:423`, `src/routes/account.js:163`, `src/routes/snapshot.js:70` (all match SQLite's uppercase `'UNIQUE constraint'`; Postgres emits lowercase "duplicate key ... unique constraint").
 
 ## Prerequisites (run once before Task 1)
 
@@ -286,13 +287,13 @@ Same recipe as Step 1:
 - Remove `repoRoot`/`dbPath`/`rmSync`/`process.env.DATABASE_PATH` block; add `const { query } = require('../src/db');` and `const { setupTestDb, cleanTestDb } = require('./helpers/db');`.
 - `test.before` becomes `async`: `await setupTestDb(); await cleanTestDb();` then the existing `db.exec('DELETE FROM ...')` block is replaced by `cleanTestDb()` and the seed inserts become `await query(...)`.
 - `test.after`: keep `close()`; remove `fs.rmSync(dbPath, ...)`.
-- The inline `db.prepare('INSERT INTO vault_proof_challenges ...')` and `db.prepare('INSERT OR REPLACE INTO vault_key_params ...')` calls become `await query(...)`. Note: `vault_key_params` has `id` as PRIMARY KEY (no `workspace_id` uniqueness), so `INSERT OR REPLACE` becomes:
+- The inline `db.prepare('INSERT INTO vault_proof_challenges ...')` and `db.prepare('INSERT OR REPLACE INTO vault_key_params ...')` calls become `await query(...)`. Note: `vault_key_params` has a `UNIQUE INDEX` on `workspace_id` (both schemas), so `INSERT OR REPLACE` faithfully becomes `ON CONFLICT (workspace_id)`:
   ```js
   await query(
     `INSERT INTO vault_key_params (id, workspace_id, owner_id, passphrase_hash, key_params_blob, created_at, updated_at, proof_version)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     ON CONFLICT (id) DO UPDATE SET
-       workspace_id = EXCLUDED.workspace_id,
+     ON CONFLICT (workspace_id) DO UPDATE SET
+       id = EXCLUDED.id,
        owner_id = EXCLUDED.owner_id,
        passphrase_hash = EXCLUDED.passphrase_hash,
        key_params_blob = EXCLUDED.key_params_blob,
