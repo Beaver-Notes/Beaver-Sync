@@ -26,7 +26,7 @@ COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 RUN addgroup -S beaver && adduser -S beaver -G beaver \
     && chmod +x /app/docker-entrypoint.sh \
-    && mkdir -p /app/data /app/keys \
+    && mkdir -p /app/keys \
     && chown -R beaver:beaver /app
 
 USER beaver
