@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { z } = require('zod');
 const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models');
+const { query } = require('../db');
 const { validatePublicKey } = require('../lib/recipient-wrap');
 const { sendNoteInviteEmail } = require('../email');
 
@@ -29,6 +30,28 @@ const baseRateLimit = {
   bodyLimit: BODY_LIMIT,
 };
 
+// Gate access to a note's collaboration context. The caller must already be a
+// collaborator. With `bootstrap: true` (invite creation only) a caller may
+// claim a note that has no collaborators yet - this is how the user who
+// created a note first invites people. Never self-grant onto a note that
+// already has collaborators, otherwise any authenticated user could claim
+// another user's note by guessing its ID.
+async function requireCollaborator(reply, noteId, userId, { bootstrap = false } = {}) {
+  const existing = await NoteInvitation.findOne({ noteId, userId }).lean();
+  if (existing) return existing;
+
+  if (bootstrap) {
+    const total = await NoteInvitation.countDocuments({ noteId });
+    if (total === 0) {
+      await NoteInvitation.create({ noteId, userId, invitedBy: userId, role: 'editor', createdAt: new Date() });
+      return true;
+    }
+  }
+
+  reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
+  return null;
+}
+
 async function collaborationRoutes(app) {
   await app.register(require('../middleware/auth'));
 
@@ -44,10 +67,8 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
-    if (!existingInvite) {
-      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
-    }
+    const membership = await requireCollaborator(reply, noteId, req.userId);
+    if (!membership) return;
 
     const { recipients } = req.body ?? {};
     if (!Array.isArray(recipients) || recipients.length === 0) {
@@ -61,12 +82,21 @@ async function collaborationRoutes(app) {
       if (!r || typeof r.userId !== 'string' || typeof r.wrappedKey !== 'string' || !r.wrappedKey) {
         return reply.status(400).send({ error: 'validation_error', message: 'Each recipient needs userId and wrappedKey.' });
       }
-      const isCollab = await NoteInvitation.findOne({ noteId, userId: r.userId }).lean();
-      if (!isCollab) {
+    }
+
+    const userIds = [...new Set(recipients.map((r) => r.userId))];
+    const [collabRows, accountRows] = await Promise.all([
+      NoteInvitation.find({ noteId, userId: { $in: userIds } }, { userId: 1 }).lean(),
+      Account.find({ id: { $in: userIds } }, { id: 1, kemPublicKey: 1 }).lean(),
+    ]);
+    const collaboratorIds = new Set(collabRows.map((c) => c.userId));
+    const keypairIds = new Set(accountRows.filter((a) => a.kemPublicKey).map((a) => a.id));
+
+    for (const r of recipients) {
+      if (!collaboratorIds.has(r.userId)) {
         return reply.status(403).send({ error: 'forbidden', message: `User ${r.userId} is not a collaborator.` });
       }
-      const recipientAccount = await Account.findById(r.userId, { kemPublicKey: 1 }).lean();
-      if (!recipientAccount || !recipientAccount.kemPublicKey) {
+      if (!keypairIds.has(r.userId)) {
         return reply.status(403).send({ error: 'keypair_required', message: `User ${r.userId} has not set up end-to-end encryption.` });
       }
     }
@@ -78,13 +108,16 @@ async function collaborationRoutes(app) {
     if (await NoteKey.countDocuments({ noteId }) > 0) {
       outcome = { existing: true, stored: 0 };
     } else {
-      for (const r of recipients) {
-        await NoteKey.findOneAndUpdate(
-          { noteId, userId: r.userId },
-          { $set: { wrappedKey: r.wrappedKey } },
-          { upsert: true }
-        );
-      }
+      const now = new Date().toISOString();
+      const rows = recipients.map((r) => [noteId, r.userId, r.wrappedKey, now]);
+      const placeholders = rows
+        .map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`)
+        .join(', ');
+      await query(`
+        INSERT INTO note_keys (note_id, user_id, wrapped_key, created_at)
+        VALUES ${placeholders}
+        ON CONFLICT(note_id, user_id) DO UPDATE SET wrapped_key = excluded.wrapped_key
+      `, rows.flat());
       outcome = { existing: false, stored: recipients.length };
     }
 
@@ -101,10 +134,8 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
-    if (!existingInvite) {
-      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
-    }
+    const membership = await requireCollaborator(reply, noteId, req.userId);
+    if (!membership) return;
 
     const noteHasKey = (await NoteKey.countDocuments({ noteId })) > 0;
     if (!noteHasKey) {
@@ -135,10 +166,8 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: 'recipientUserId and wrappedKey are required.' });
     }
 
-    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
-    if (!existingInvite) {
-      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
-    }
+    const membership = await requireCollaborator(reply, noteId, req.userId);
+    if (!membership) return;
 
     const isCollab = await NoteInvitation.findOne({ noteId, userId: recipientUserId }).lean();
     if (!isCollab) {
@@ -176,10 +205,8 @@ async function collaborationRoutes(app) {
     if (!parsed.success) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
-    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
-    if (!existingInvite) {
-      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
-    }
+    const membership = await requireCollaborator(reply, noteId, req.userId);
+    if (!membership) return;
     const invitations = await NoteInvitation.find({ noteId }).lean();
     const userIds = [...new Set(invitations.map((inv) => inv.userId))];
     const accounts = userIds.length > 0
@@ -206,11 +233,8 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: 'Provide username or email of the user to invite.' });
     }
 
-    // Auto-grant editor access if the user has no invitation yet.
-    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
-    if (!existingInvite) {
-      await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
-    }
+    const membership = await requireCollaborator(reply, noteId, req.userId, { bootstrap: true });
+    if (!membership) return;
 
     let target = null;
     if (username) {
@@ -260,15 +284,11 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    // Auto-grant editor access if the user has no invitation yet.
-    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
-    if (!existingInvite) {
-      await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
-    }
+    const membership = await requireCollaborator(reply, noteId, req.userId);
+    if (!membership) return;
 
     const invitations = await NoteInvitation.find({ noteId }).lean();
 
-    // Fetch usernames for all invited users
     const userIds = [...new Set(invitations.map((inv) => inv.userId))];
     const accounts = userIds.length > 0
       ? await Account.find({ id: { $in: userIds } }, { id: 1, username: 1, kemPublicKey: 1 }).lean()
@@ -301,11 +321,8 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_user_id', message: 'Invalid user ID.' });
     }
 
-    // Auto-grant editor access if the user has no invitation yet.
-    const existingInvite = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
-    if (!existingInvite) {
-      await NoteInvitation.create({ noteId, userId: req.userId, invitedBy: req.userId, role: 'editor', createdAt: new Date() });
-    }
+    const membership = await requireCollaborator(reply, noteId, req.userId);
+    if (!membership) return;
 
     const result = await NoteInvitation.deleteOne({ noteId, userId: targetUserId });
     if (result.deletedCount === 0) {
@@ -319,7 +336,6 @@ async function collaborationRoutes(app) {
     return reply.send({ deleted: true, noteId, userId: targetUserId });
   });
 
-  // Generate invite link for a note
   app.post('/links/:noteId', { preHandler: [app.authenticate] }, async (req, reply) => {
     const { noteId } = req.params;
     const { role = 'editor', requireApproval = false, expiresIn } = req.body;
@@ -328,7 +344,6 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: 'Role must be editor or viewer.' });
     }
 
-    // Verify user is owner/editor of the note
     const membership = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
     if (!membership || membership.role !== 'editor') {
       return reply.status(403).send({ error: 'forbidden', message: 'Only editors can create invite links.' });
@@ -364,7 +379,6 @@ async function collaborationRoutes(app) {
     });
   });
 
-  // List invite links for a note
   app.get('/links/:noteId', { preHandler: [app.authenticate] }, async (req, reply) => {
     const { noteId } = req.params;
 
@@ -377,7 +391,6 @@ async function collaborationRoutes(app) {
     return reply.send({ links });
   });
 
-  // Revoke an invite link
   app.delete('/links/:noteId/:linkId', { preHandler: [app.authenticate] }, async (req, reply) => {
     const { noteId, linkId } = req.params;
 
@@ -391,7 +404,6 @@ async function collaborationRoutes(app) {
     return reply.send({ success: true });
   });
 
-  // Join a note via invite link
   app.post('/join/:token', { preHandler: [app.authenticate] }, async (req, reply) => {
     const { token } = req.params;
     const tokenHash = hashToken(token);
@@ -401,12 +413,10 @@ async function collaborationRoutes(app) {
       return reply.status(404).send({ error: 'not_found', message: 'Invalid or revoked invite link.' });
     }
 
-    // Check expiry
     if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
       return reply.status(410).send({ error: 'expired', message: 'This invite link has expired.' });
     }
 
-    // Check if already a member
     const existing = await NoteInvitation.findOne({ noteId: link.noteId, userId: req.userId }).lean();
     if (existing) {
       return reply.send({ success: true, message: 'Already a member.', role: existing.role });
@@ -417,7 +427,6 @@ async function collaborationRoutes(app) {
       return reply.status(403).send({ error: 'keypair_required', message: 'Set up end-to-end encryption before joining.' });
     }
 
-    // Add as collaborator
     await NoteInvitation.create({
       noteId: link.noteId,
       userId: req.userId,

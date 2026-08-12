@@ -11,11 +11,9 @@ const { sendSubscriptionReceiptEmail } = require('../email');
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const WEBHOOK_BODY_LIMIT_BYTES = parseInt(process.env.WEBHOOK_BODY_LIMIT_BYTES ?? '262144', 10);
 
-// ---- Stripe ----
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
-// ---- Apple ----
 const APPLE_BUNDLE_ID = process.env.APPLE_BUNDLE_ID;
 let appleJwksCache = null;
 let appleJwksCachedAt = 0;
@@ -70,9 +68,6 @@ async function webhookRoutes(app) {
     payload.on('error', (err) => done(err));
   });
 
-  // =========================================
-  //  Stripe
-  // =========================================
   app.post('/stripe', {
     bodyLimit: WEBHOOK_BODY_LIMIT_BYTES,
     config: {
@@ -141,9 +136,6 @@ async function webhookRoutes(app) {
     return reply.send({ received: true, processed: true });
   });
 
-  // =========================================
-  //  Apple App Store
-  // =========================================
   app.post('/apple', {
     bodyLimit: WEBHOOK_BODY_LIMIT_BYTES,
     config: {
@@ -186,6 +178,11 @@ async function webhookRoutes(app) {
         return reply.send({ received: true, processed: false });
       }
 
+      if (transactionInfo.bundleId !== APPLE_BUNDLE_ID) {
+        app.log.warn({ bundleId: transactionInfo.bundleId }, 'Apple transaction bundleId mismatch');
+        return reply.send({ received: true, processed: false });
+      }
+
       const accountId = transactionInfo.appAccountToken;
       if (!accountId) {
         app.log.warn({ originalTransactionId: transactionInfo.originalTransactionId }, 'Apple notification missing appAccountToken');
@@ -214,9 +211,6 @@ async function webhookRoutes(app) {
     return reply.send({ received: true });
   });
 
-  // =========================================
-  //  Google Play
-  // =========================================
   app.post('/google', {
     bodyLimit: WEBHOOK_BODY_LIMIT_BYTES,
     config: {

@@ -10,6 +10,7 @@ const { hashSessionId } = require('../lib/crypto');
 const SESSION_TTL_HOURS = parseInt(process.env.SESSION_TTL_HOURS ?? '24', 10);
 const SESSION_MAX_AGE_DAYS = parseInt(process.env.SESSION_MAX_AGE_DAYS ?? '30', 10);
 const IDLE_TIMEOUT_HOURS = parseInt(process.env.IDLE_TIMEOUT_HOURS ?? '24', 10);
+const SESSION_WRITE_THROTTLE_MS = 60 * 1000;
 
 let privateKey;
 let publicKey;
@@ -72,12 +73,18 @@ async function validateSession(rawId) {
   const now = new Date();
   const idleCutoff = new Date(now.getTime() - IDLE_TIMEOUT_HOURS * 60 * 60 * 1000);
   if (session.lastSeenAt < idleCutoff) return null;
-  const newExpiresAt = new Date(now.getTime() + SESSION_TTL_HOURS * 60 * 60 * 1000);
-  const maxExpiresAt = new Date(session.createdAt.getTime() + SESSION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
 
-  session.lastSeenAt = now;
-  session.expiresAt = newExpiresAt > maxExpiresAt ? maxExpiresAt : newExpiresAt;
-  await session.save();
+  // Throttle the sliding-expiry write: the DB copy is only used for idle and
+  // absolute-expiry checks that tolerate being up to a minute stale.
+  const lastSeenMs = session.lastSeenAt instanceof Date ? session.lastSeenAt.getTime() : 0;
+  if (lastSeenMs === 0 || now.getTime() - lastSeenMs >= SESSION_WRITE_THROTTLE_MS) {
+    const newExpiresAt = new Date(now.getTime() + SESSION_TTL_HOURS * 60 * 60 * 1000);
+    const maxExpiresAt = new Date(session.createdAt.getTime() + SESSION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
+
+    session.lastSeenAt = now;
+    session.expiresAt = newExpiresAt > maxExpiresAt ? maxExpiresAt : newExpiresAt;
+    await session.save();
+  }
 
   return { userId: session.accountId, deviceId: session.deviceId || null };
 }
@@ -164,7 +171,6 @@ module.exports = fp(authPlugin);
 module.exports.createSession = createSession;
 module.exports.validateSession = validateSession;
 module.exports.signToken = signToken;
-module.exports.verifyToken = verifyToken;
 module.exports.setSessionCookieIfAvailable = function setSessionCookieIfAvailable(app, reply, rawId) {
   if (app && typeof app.setSessionCookie === 'function') {
     app.setSessionCookie(reply, rawId);

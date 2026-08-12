@@ -63,7 +63,6 @@ async function workspaceRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: 'Organization ID is required.' });
     }
 
-    // Verify user is member of the org
     const membership = await OrgMember.findOne({ org_id: orgId, account_id: req.userId }).lean();
     if (!membership) {
       return reply.status(403).send({ error: 'not_org_member' });
@@ -146,7 +145,6 @@ async function workspaceRoutes(app) {
       return reply.status(404).send({ error: 'not_found' });
     }
 
-    // Check user is owner or admin
     const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
     if (!membership) {
       return reply.status(403).send({ error: 'not_workspace_member' });
@@ -179,7 +177,6 @@ async function workspaceRoutes(app) {
       return reply.status(404).send({ error: 'not_found' });
     }
 
-    // Check user is owner
     const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId, role: 'owner' }).lean();
     if (!membership) {
       return reply.status(403).send({ error: 'not_workspace_owner' });

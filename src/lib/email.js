@@ -23,6 +23,11 @@ function generateAliasToken() {
   return crypto.randomBytes(16).toString("base64url").toLowerCase();
 }
 
+// Prevent CR/LF injection into SMTP commands and message headers.
+function sanitizeHeader(value) {
+  return String(value ?? "").replace(/[\r\n]/g, "").trim();
+}
+
 async function createEmailAlias(accountId, emailEncrypted, ttlMs) {
   const token = generateAliasToken();
   const alias = `${token}@${NOTIFY_DOMAIN}`;
@@ -157,6 +162,10 @@ async function sendViaSmtp({ host, port, user, pass, from, to, subject, html }) 
       socket.write(line + "\r\n");
     }
 
+    from = sanitizeHeader(from);
+    to = sanitizeHeader(to);
+    subject = sanitizeHeader(subject);
+
     function onData(data) {
       buffer += data.toString();
       const lines = buffer.split("\r\n");
@@ -276,6 +285,9 @@ async function sendViaSendmail(to, { subject, html, text }) {
 
     sendmail.on("error", (err) => reject(err));
     sendmail.stderr.on("data", (d) => { stderr += d.toString(); });
+
+    to = sanitizeHeader(to);
+    subject = sanitizeHeader(subject);
 
     const message = [
       `To: ${to}`,

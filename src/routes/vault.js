@@ -114,7 +114,6 @@ async function vaultRoutes(app) {
     return reply.send({ challenge, expiresAt });
   });
 
-  // ── PUT /vault/:id/key-params — Owner publishes vault key params ──────
   app.put('/:id/key-params', {
     ...rateLimit,
     ...protect,
@@ -175,7 +174,6 @@ async function vaultRoutes(app) {
     return reply.status(200).send({ ok: true, workspaceId });
   });
 
-  // ── GET /vault/:id/key-params — Fetch vault key params (owner only) ───
   app.get('/:id/key-params', {
     ...rateLimit,
     ...protect,
@@ -204,7 +202,6 @@ async function vaultRoutes(app) {
     });
   });
 
-  // ── POST /vault/:id/verify — Joiner verifies passphrase ──────────────
   app.post('/:id/verify', {
     ...rateLimit,
     ...protect,
@@ -233,7 +230,7 @@ async function vaultRoutes(app) {
       });
     }
 
-    if (!consumeChallenge({ workspaceId, accountId: req.userId, challenge: parsed.data.challenge })) {
+    if (!await consumeChallenge({ workspaceId, accountId: req.userId, challenge: parsed.data.challenge })) {
       return reply.status(401).send({ error: 'invalid_challenge', message: 'The vault proof challenge is invalid or expired.' });
     }
 
@@ -262,7 +259,6 @@ async function vaultRoutes(app) {
     });
   });
 
-  // ── DELETE /vault/:id/key-params — Owner removes vault key params ─────
   app.delete('/:id/key-params', {
     ...rateLimit,
     ...protect,

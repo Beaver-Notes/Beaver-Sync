@@ -3,7 +3,7 @@
 process.env.DATABASE_URL = 'postgresql://localhost:5432/test';
 
 const { describe, it } = require('node:test');
-const assert = require('node:assert');
+const assert = require('node:assert/strict');
 
 const persistence = require('../../src/persistence/yjs');
 

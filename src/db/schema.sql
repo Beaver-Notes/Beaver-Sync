@@ -311,6 +311,14 @@ CREATE TABLE IF NOT EXISTS yjs_doc_updates (
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_workspace_note ON yjs_doc_updates(workspace_id, note_id, ts);
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_device ON yjs_doc_updates(workspace_id, note_id, device_id);
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_clock ON yjs_doc_updates(workspace_id, note_id, device_id, clock);
+DELETE FROM yjs_doc_updates
+WHERE rowid NOT IN (
+  SELECT MIN(rowid)
+  FROM yjs_doc_updates
+  GROUP BY workspace_id, note_id, device_id, clock
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_yjs_update_identity
+  ON yjs_doc_updates(workspace_id, note_id, device_id, clock);
 
 CREATE TABLE IF NOT EXISTS sync_workspace_state (
   workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,

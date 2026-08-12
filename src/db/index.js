@@ -17,11 +17,6 @@ function getBackend() {
     db.pragma('busy_timeout = 5000');
     db.pragma('foreign_keys = ON');
 
-    // Disable foreign keys in test mode for easier cleanup
-    if (process.env.NODE_ENV === 'test') {
-      db.pragma('foreign_keys = OFF');
-    }
-
     const fs = require('fs');
     const path = require('path');
     const schemaPath = path.join(__dirname, 'schema.sql');
@@ -104,26 +99,48 @@ function exec(sql) {
   };
 }
 
+// Convert Postgres $1, $2, ... placeholders to SQLite positional ? while
+// expanding values so each placeholder occurrence binds the value it names.
+// Postgres allows $1 to be referenced more than once; SQLite does not, so a
+// repeated $1 must become two positional ? bound to the same value.
+function sqliteConvert(text, params) {
+  const values = [];
+  const converted = String(text).replace(/\$\d+/g, (match) => {
+    values.push((params || [])[Number(match.slice(1)) - 1]);
+    return '?';
+  });
+  return { converted, values };
+}
+
 function transaction(fn) {
   const b = getBackend();
 
   if (backendType === 'sqlite') {
-    // SQLite transactions must be synchronous.
-    // Execute the async callback outside the transaction, then commit.
-    // This is not truly transactional for SQLite but allows async code to work.
-    return fn({
-      query: (text, params) => {
-        let paramIndex = 0;
-        const converted = text.replace(/\$\d+/g, () => '?');
-        const stmt = b.sqlite.prepare(converted);
-        if (text.trim().toUpperCase().startsWith('SELECT')) {
-          return Promise.resolve({ rows: stmt.all(...(params || [])) });
-        } else {
-          const result = stmt.run(...(params || []));
+    // better-sqlite3 is synchronous, so the async callback runs to completion
+    // before the event loop can interleave another write on this connection.
+    const started = !b.sqlite.inTransaction;
+    if (started) b.sqlite.exec('BEGIN');
+
+    return Promise.resolve()
+      .then(() => fn({
+        query: (text, params) => {
+          const { converted, values } = sqliteConvert(text, params);
+          const stmt = b.sqlite.prepare(converted);
+          if (text.trim().toUpperCase().startsWith('SELECT')) {
+            return Promise.resolve({ rows: stmt.all(...values) });
+          }
+          const result = stmt.run(...values);
           return Promise.resolve({ rowCount: result.changes });
-        }
-      }
-    });
+        },
+      }))
+      .then((result) => {
+        if (started) b.sqlite.exec('COMMIT');
+        return result;
+      })
+      .catch((err) => {
+        if (started) b.sqlite.exec('ROLLBACK');
+        throw err;
+      });
   }
 
   return b.transaction(fn);
@@ -133,19 +150,16 @@ function query(text, params) {
   const b = getBackend();
 
   if (backendType === 'sqlite') {
-    // Convert $1, $2, ... to ? for SQLite
-    let paramIndex = 0;
-    const converted = text.replace(/\$\d+/g, () => '?');
+    const { converted, values } = sqliteConvert(text, params);
     const stmt = b.sqlite.prepare(converted);
     if (text.trim().toUpperCase().startsWith('SELECT')) {
-      return Promise.resolve({ rows: stmt.all(...(params || [])) });
+      return Promise.resolve({ rows: stmt.all(...values) });
     } else {
-      const result = stmt.run(...(params || []));
+      const result = stmt.run(...values);
       return Promise.resolve({ rowCount: result.changes });
     }
   }
 
-  // For Postgres, ensure we have a valid pool
   if (!b.getPool || !b.getPool()) {
     return Promise.reject(new Error('Database not initialized'));
   }

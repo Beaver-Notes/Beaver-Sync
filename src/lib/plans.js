@@ -35,12 +35,6 @@ const PLAN_QUOTAS = {
   enterprise: Number.MAX_SAFE_INTEGER,
 };
 
-const PAID_PLANS = new Set(["basic", "pro", "team", "enterprise"]);
-
-function isPaidPlan(plan) {
-  return PAID_PLANS.has(plan);
-}
-
 function isFreePlan(plan) {
   return plan === "free";
 }
@@ -49,4 +43,4 @@ function getQuotaBytes(plan) {
   return PLAN_QUOTAS[plan] ?? 0;
 }
 
-module.exports = { PLAN_QUOTAS, isPaidPlan, isFreePlan, getQuotaBytes };
+module.exports = { PLAN_QUOTAS, isFreePlan, getQuotaBytes };

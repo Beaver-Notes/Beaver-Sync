@@ -285,7 +285,13 @@ class MultiQuery {
       sql += ` ORDER BY ${cols}`;
     }
 
-    if (this._limitVal) sql += ` LIMIT ${this._limitVal}`;
+    if (this._limitVal !== null && this._limitVal !== undefined) {
+      const limit = Number(this._limitVal);
+      if (Number.isInteger(limit) && limit > 0) {
+        sql += ` LIMIT $${params.length + 1}`;
+        params.push(limit);
+      }
+    }
 
     const result = await query(sql, params);
     return result.rows.map((r) => keysToCamel(r));
@@ -477,7 +483,6 @@ const SsoConfig = createModel('sso_configs');
 const SsoOidcState = createModel('sso_oidc_states', 'state');
 const EmailAlias = createModel('email_aliases', 'alias');
 const WebAuthnChallenge = createModel('webauthn_challenges');
-const YjsDocUpdate = createModel('yjs_doc_updates');
 const VaultKeyParams = createModel('vault_key_params');
 const NoteInviteLink = createModel('note_invite_links');
 const NoteComment = createModel('note_comments');
@@ -493,6 +498,6 @@ module.exports = {
   NoteInvitation,
   Workspace, WorkspaceMember, WorkspaceInvite,
   AuditLog, SsoConfig, SsoOidcState, EmailAlias, WebAuthnChallenge,
-  YjsDocUpdate, VaultKeyParams, NoteInviteLink, NoteComment,
+  VaultKeyParams, NoteInviteLink, NoteComment,
   Organization, OrgMember, OrgSubscription, OrgInvite,
 };

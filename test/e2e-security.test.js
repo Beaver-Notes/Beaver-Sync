@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..');
-const dbPath = path.join(repoRoot, '.test-data', 'e2e-security-test.db');
+const dbPath = path.join(repoRoot, '.test-data', 'test.db');
 fs.rmSync(dbPath, { force: true });
 fs.rmSync(`${dbPath}-shm`, { force: true });
 fs.rmSync(`${dbPath}-wal`, { force: true });

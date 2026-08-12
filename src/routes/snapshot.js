@@ -61,7 +61,7 @@ async function snapshotRoutes(app) {
 
     try {
       try {
-        acquired = CompactionLock.findOneAndUpdate(
+        acquired = await CompactionLock.findOneAndUpdate(
           { _id: userId, expiresAt: { $lt: new Date() } },
           { $set: { lockedAt: new Date(), expiresAt: new Date(Date.now() + COMPACT_LOCK_TTL_MS) } },
           { upsert: true, new: true }

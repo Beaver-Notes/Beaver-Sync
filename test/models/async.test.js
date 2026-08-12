@@ -28,7 +28,11 @@ describe('Async model layer', () => {
       id: postgresPath,
       filename: postgresPath,
       loaded: true,
-      exports: { query: mockQuery, transaction: mockTransaction }
+      exports: {
+        query: mockQuery,
+        transaction: mockTransaction,
+        getPool: () => ({}),
+      }
     };
   });
 

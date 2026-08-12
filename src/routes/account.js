@@ -46,7 +46,6 @@ async function accountRoutes(app) {
       return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
     }
 
-    // Get orgs with subscriptions and workspaces
     const orgIds = memberships.map(m => m.orgId);
     let organizations = [];
     if (orgIds.length > 0) {
@@ -259,25 +258,20 @@ async function accountRoutes(app) {
     await transaction(async (client) => {
       await client.query(`DELETE FROM audit_logs WHERE account_id_hash = $1`, [accountIdHash]);
 
-      // Remove org memberships
       await client.query(`DELETE FROM org_members WHERE account_id = $1`, [req.userId]);
 
-      // Remove org subscriptions for orgs owned by this account
       await client.query(`DELETE FROM org_subscriptions WHERE org_id IN (
         SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'
       )`, [req.userId]);
 
-      // Remove workspaces for orgs owned by this account
       await client.query(`DELETE FROM workspaces WHERE org_id IN (
         SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'
       )`, [req.userId]);
 
-      // Remove organizations owned by this account
       await client.query(`DELETE FROM organizations WHERE id IN (
         SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'
       )`, [req.userId]);
 
-      // Remove the account itself
       await client.query(`DELETE FROM accounts WHERE id = $1`, [req.userId]);
     });
 
@@ -330,14 +324,23 @@ async function accountRoutes(app) {
       archive.on('error', (err) => reject(err));
 
       (async () => {
-        for (const key of exportKeys) {
-          const data = await r2.get(key).catch(() => null);
-          if (data) {
-            archive.append(data, { name: key.slice(req.userId.length + 1) });
+        try {
+          const CONCURRENT = 8;
+          for (let i = 0; i < exportKeys.length; i += CONCURRENT) {
+            const chunk = exportKeys.slice(i, i + CONCURRENT);
+            const datas = await Promise.all(chunk.map((key) => r2.get(key).catch(() => null)));
+            for (let j = 0; j < chunk.length; j++) {
+              if (datas[j]) {
+                archive.append(datas[j], { name: chunk[j].slice(req.userId.length + 1) });
+              }
+            }
           }
+        } catch (err) {
+          archive.emit('error', err);
+          return;
         }
         archive.finalize();
-      })();
+      })().catch((err) => archive.emit('error', err));
     });
 
     const exportId = crypto.randomUUID();

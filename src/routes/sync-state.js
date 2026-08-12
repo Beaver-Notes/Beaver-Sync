@@ -17,7 +17,7 @@ const CompleteSchema = WorkspaceSchema.extend({
     snapshotKey: z.string().min(1),
     checkpointTs: z.number().int().nonnegative().optional().default(0),
     checkpointSequence: z.number().int().nonnegative().optional().default(0),
-  }).strict()).superRefine((documents, ctx) => {
+  }).strict()).max(5000).superRefine((documents, ctx) => {
     const noteIds = new Set();
     for (const document of documents) {
       if (noteIds.has(document.noteId)) {
@@ -26,7 +26,7 @@ const CompleteSchema = WorkspaceSchema.extend({
       noteIds.add(document.noteId);
     }
   }),
-  assets: z.array(z.string().min(1).max(512)).default([]),
+  assets: z.array(z.string().min(1).max(512)).max(500).default([]),
 });
 
 function snapshotKeyFor(workspaceId, noteId, generation) {

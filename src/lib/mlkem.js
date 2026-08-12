@@ -54,11 +54,6 @@ function requireReady() {
   if (!instance) throw new Error("ML-KEM not initialized - call init() first");
 }
 
-function getPublicKey() {
-  requireReady();
-  return Buffer.from(publicKey);
-}
-
 async function wrapBlob(plaintext) {
   requireReady();
   const input = Buffer.isBuffer(plaintext) ? plaintext : Buffer.from(plaintext);
@@ -128,7 +123,6 @@ async function decryptMetadata(envelope) {
 
 module.exports = {
   init,
-  getPublicKey,
   wrapBlob,
   unwrapBlob,
   encryptMetadata,

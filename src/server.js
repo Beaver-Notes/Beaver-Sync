@@ -18,7 +18,6 @@ function validateRequiredEnv() {
     }
   }
 
-  // Require either DATABASE_URL or DATABASE_PATH
   if (!process.env.DATABASE_URL && !process.env.DATABASE_PATH) {
     missing.push('DATABASE_URL or DATABASE_PATH');
   }
@@ -79,7 +78,7 @@ async function buildApp() {
           : undefined,
     },
     bodyLimit: parseInt(process.env.API_BODY_LIMIT_BYTES ?? '1048576', 10),
-    trustProxy: true,
+    trustProxy: process.env.TRUST_PROXY === 'false' ? false : true,
     requestTimeout: parseInt(process.env.REQUEST_TIMEOUT_MS ?? '30000', 10),
     connectionTimeout: parseInt(process.env.CONNECTION_TIMEOUT_MS ?? '10000', 10),
     keepAliveTimeout: parseInt(process.env.KEEP_ALIVE_TIMEOUT_MS ?? '5000', 10),

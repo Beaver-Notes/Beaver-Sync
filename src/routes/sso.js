@@ -11,6 +11,19 @@ const { isEnterpriseMode } = require('../lib/license');
 
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const SSO_STATE_TTL_MS = 10 * 60 * 1000;
+const OIDC_ISSUER_CACHE_TTL_MS = 60 * 60 * 1000;
+
+// OIDC discovery does a network fetch of the well-known document; cache it per
+// issuer so logins don't pay a round-trip on every request.
+const oidcIssuerCache = new Map();
+
+async function discoverOidcIssuer(issuerUrl) {
+  const cached = oidcIssuerCache.get(issuerUrl);
+  if (cached && Date.now() - cached.at < OIDC_ISSUER_CACHE_TTL_MS) return cached.issuer;
+  const issuer = await Issuer.discover(issuerUrl);
+  oidcIssuerCache.set(issuerUrl, { issuer, at: Date.now() });
+  return issuer;
+}
 
 function safeRedirectTarget(value, fallback) {
   if (!value || typeof value !== 'string') return fallback;
@@ -132,7 +145,7 @@ async function ssoRoutes(app) {
     const config = await decryptConfig(raw);
 
     if (config.protocol === 'oidc') {
-      const issuer = await Issuer.discover(config.oidcIssuer);
+      const issuer = await discoverOidcIssuer(config.oidcIssuer);
       const client = new issuer.Client({
         client_id: config.oidcClientId,
         client_secret: config.oidcClientSecret,
@@ -195,6 +208,7 @@ async function ssoRoutes(app) {
     const fallback = `${APP_URL}/auth/sso/${config.slug}/complete`;
     const redirectTo = safeRedirectTarget(req.query?.RelayState, fallback);
     if (typeof app.setSessionCookie === 'function') app.setSessionCookie(reply, token);
+    reply.header('Referrer-Policy', 'no-referrer');
     return reply.redirect(302, `${redirectTo}?token=${encodeURIComponent(token)}`);
   });
 
@@ -214,7 +228,7 @@ async function ssoRoutes(app) {
       return reply.status(400).send({ error: 'state_expired' });
     }
 
-    const issuer = await Issuer.discover(config.oidcIssuer);
+    const issuer = await discoverOidcIssuer(config.oidcIssuer);
     const client = new issuer.Client({
       client_id: config.oidcClientId,
       client_secret: config.oidcClientSecret,
@@ -248,6 +262,7 @@ async function ssoRoutes(app) {
 
     const redirectTo = `${APP_URL}/auth/sso/${config.slug}/complete`;
     if (typeof app.setSessionCookie === 'function') app.setSessionCookie(reply, token);
+    reply.header('Referrer-Policy', 'no-referrer');
     return reply.redirect(302, `${redirectTo}?token=${encodeURIComponent(token)}`);
   });
 }

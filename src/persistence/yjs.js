@@ -5,9 +5,19 @@ const { query, transaction } = require('../db');
 
 const MAX_BATCH_SIZE = 200;
 const MAX_PULL_PAGE_SIZE = 500;
+const BATCH_INSERT_CHUNK = 500;
 const TEAM_WORKSPACE_QUOTA = 50 * 1024 * 1024 * 1024;
 
 const roomPattern = /^workspace:([a-zA-Z0-9-]+):note:([a-zA-Z0-9-]+)$/;
+const UPDATE_IDENTITY_SEP = '\u0000';
+
+const UPDATE_INSERT_COLUMNS =
+  '(id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at)';
+const UPDATE_COLUMN_COUNT = 9;
+
+function identityOf(noteId, deviceId, clock) {
+  return `${noteId}${UPDATE_IDENTITY_SEP}${deviceId}${UPDATE_IDENTITY_SEP}${clock}`;
+}
 
 function parseRoomName(documentName) {
   const match = roomPattern.exec(documentName);
@@ -97,17 +107,61 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
     now,
   ]));
 
+  if (batch.length === 0) {
+    return { accepted: 0, duplicate: 0, acceptedBytes: 0, checkpoint: null, checkpoints: {} };
+  }
+
+  // Collapse within-batch duplicates (same note, device, clock) so each update
+  // identity is inserted at most once per call.
+  const seen = new Set();
+  const uniqueRows = [];
+  for (const row of batch) {
+    const identity = identityOf(row[2], row[5], row[6]);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    uniqueRows.push(row);
+  }
+
   await transaction(async (client) => {
-    for (const row of batch) {
+    // Determine which identities already exist so acceptedBytes only counts
+    // rows this call actually inserts.
+    const existingIdentities = new Set();
+    {
+      const identityParams = uniqueRows.flatMap((row) => [row[2], row[5], row[6]]);
+      const placeholders = uniqueRows
+        .map((_, i) => `(note_id = $${i * 3 + 2} AND device_id = $${i * 3 + 3} AND clock = $${i * 3 + 4})`)
+        .join(' OR ');
+      const { rows } = await client.query(`
+        SELECT note_id, device_id, clock
+        FROM yjs_doc_updates
+        WHERE workspace_id = $1 AND (${placeholders})
+      `, [workspaceId, ...identityParams]);
+      for (const r of rows) {
+        existingIdentities.add(identityOf(r.note_id, r.device_id, r.clock));
+      }
+    }
+
+    for (const row of uniqueRows) {
+      if (!existingIdentities.has(identityOf(row[2], row[5], row[6]))) {
+        acceptedBytes += row[3].byteLength;
+      }
+    }
+
+    // Insert in chunks to bound statement size and round-trips.
+    for (let i = 0; i < uniqueRows.length; i += BATCH_INSERT_CHUNK) {
+      const chunk = uniqueRows.slice(i, i + BATCH_INSERT_CHUNK);
+      const placeholders = chunk
+        .map((_, r) => `(${Array.from({ length: UPDATE_COLUMN_COUNT }, (_, c) => `$${r * UPDATE_COLUMN_COUNT + c + 1}`).join(', ')})`)
+        .join(', ');
       const result = await client.query(`
         INSERT INTO yjs_doc_updates
-        (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ${UPDATE_INSERT_COLUMNS}
+        VALUES ${placeholders}
         ON CONFLICT DO NOTHING
-      `, row);
+      `, chunk.flat());
       accepted += result.rowCount;
-      acceptedBytes += result.rowCount * row[3].byteLength;
     }
+
     if (quota && acceptedBytes > 0 && quota.subscription) {
       let result;
       if (quota.workspaceId && ['team', 'enterprise'].includes(quota.subscription.plan)) {
@@ -127,11 +181,13 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
     }
   });
 
-  const identityParams = batch.flatMap((row) => [row[2], row[5], row[6]]);
-  const placeholders = batch.map((_, i) => `(note_id = $${i * 3 + 2} AND device_id = $${i * 3 + 3} AND clock = $${i * 3 + 4})`).join(' OR ');
-  const storedRows = batch.length
+  const identityParams = uniqueRows.flatMap((row) => [row[2], row[5], row[6]]);
+  const placeholders = uniqueRows
+    .map((_, i) => `(note_id = $${i * 3 + 2} AND device_id = $${i * 3 + 3} AND clock = $${i * 3 + 4})`)
+    .join(' OR ');
+  const storedRows = uniqueRows.length
     ? (await query(`
-      SELECT ts, clock, device_id
+      SELECT note_id, ts, clock, device_id
       FROM yjs_doc_updates
       WHERE workspace_id = $1 AND (${placeholders})
     `, [workspaceId, ...identityParams])).rows

@@ -1,6 +1,7 @@
 'use strict';
 
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const { z }  = require('zod');
 const { Account, Subscription, Session, Workspace, WorkspaceMember, Organization, OrgMember, OrgSubscription } = require('../models');
 const { createSession, validateSession, setSessionCookieIfAvailable } = require('../middleware/auth');
@@ -17,6 +18,15 @@ const MAX_FAILED_ATTEMPTS = 10;
 const LOCKOUT_MINUTES = 15;
 const AUTH_BODY_LIMIT_BYTES = parseInt(process.env.AUTH_BODY_LIMIT_BYTES ?? '16384', 10);
 const DUMMY_BCRYPT_HASH = '$2b$12$' + 'a'.repeat(53);
+
+function timingSafeEqualStr(a, b) {
+  const aBuf = Buffer.from(String(a));
+  const bBuf = Buffer.from(String(b));
+  if (aBuf.length !== bBuf.length) {
+    return crypto.timingSafeEqual(aBuf, aBuf) && false;
+  }
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
 
 const RegisterSchema = z.object({
   email:    z.string().email('Invalid email address').max(254),
@@ -94,7 +104,6 @@ async function authRoutes(app) {
     const storageQuotaBytes = isEnterpriseMode() ? getQuotaBytes('enterprise') : 0;
     await Subscription.create({ accountId: account.id, plan, status: 'active', storageQuotaBytes, createdAt: new Date() });
 
-    // Create personal org
     const orgId = require('crypto').randomUUID();
     const orgName = account.username || email.split('@')[0];
     const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
@@ -103,7 +112,6 @@ async function authRoutes(app) {
     await OrgMember.create({ orgId, accountId: account.id, role: 'owner', createdAt: new Date() });
     await OrgSubscription.create({ id: require('crypto').randomUUID(), orgId, plan, status: 'active', seats: 1, storageQuotaBytes, createdAt: new Date() });
 
-    // Create default workspace in personal org
     const defaultWorkspace = await Workspace.create({ nameEncrypted: '', ownerId: account.id, orgId, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: defaultWorkspace.id, accountId: account.id, role: 'owner', createdAt: new Date() });
 
@@ -269,7 +277,7 @@ async function authRoutes(app) {
     const internalSecret = process.env.INTERNAL_API_SECRET;
     if (internalSecret) {
       const providedSecret = req.headers['x-internal-secret'];
-      if (!providedSecret || providedSecret !== internalSecret) {
+      if (!providedSecret || !timingSafeEqualStr(providedSecret, internalSecret)) {
         return reply.status(403).send({
           error: 'forbidden',
           message: 'Internal API access denied.',

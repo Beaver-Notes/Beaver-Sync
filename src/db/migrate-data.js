@@ -9,7 +9,6 @@ function migrateData() {
   const accounts = db.prepare('SELECT id, username, email_hmac FROM accounts').all();
 
   for (const account of accounts) {
-    // Check if personal org already exists
     const existingOrg = db.prepare(`
       SELECT o.id FROM organizations o
       JOIN org_members om ON o.id = om.org_id
@@ -19,7 +18,6 @@ function migrateData() {
 
     if (existingOrg) continue;
 
-    // Create personal org
     const orgId = crypto.randomUUID();
     const orgName = account.username || account.email_hmac.slice(0, 8);
     const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
@@ -29,25 +27,21 @@ function migrateData() {
       VALUES (?, ?, ?, ?)
     `).run(orgId, orgName, slug, new Date().toISOString());
 
-    // Add account as org owner
     db.prepare(`
       INSERT INTO org_members (org_id, account_id, role, created_at)
       VALUES (?, ?, 'owner', ?)
     `).run(orgId, account.id, new Date().toISOString());
 
-    // Create free-tier subscription
     db.prepare(`
       INSERT INTO org_subscriptions (id, org_id, plan, status, seats, created_at)
       VALUES (?, ?, 'free', 'active', 1, ?)
     `).run(crypto.randomUUID(), orgId, new Date().toISOString());
 
-    // Migrate existing workspaces
     const workspaces = db.prepare('SELECT id FROM workspaces WHERE owner_id = ?').all(account.id);
     for (const ws of workspaces) {
       db.prepare('UPDATE workspaces SET org_id = ? WHERE id = ?').run(orgId, ws.id);
     }
 
-    // Migrate existing subscription
     const sub = db.prepare('SELECT * FROM subscriptions WHERE account_id = ?').get(account.id);
     if (sub) {
       db.prepare(`

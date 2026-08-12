@@ -14,6 +14,100 @@ const ASSET_URL_TTL_SECONDS = Math.min(
   900
 );
 const ASSET_KEY_PATTERN = /^[a-zA-Z0-9._ -]{1,256}$/;
+const ASSET_UPLOAD_CONCURRENCY = 8;
+
+// Runs `fn` over `items` with bounded concurrency, preserving order.
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = [];
+  for (let w = 0; w < concurrency; w++) {
+    workers.push((async () => {
+      while (cursor < items.length) {
+        const index = cursor++;
+        results[index] = await fn(items[index], index);
+      }
+    })());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
+// Shared per-asset upload pipeline used by /batch and /seed-batch.
+// Runs the R2 puts with bounded concurrency and applies a single aggregated
+// storage-usage increment at the end.
+async function storeAssetBatch(req, assets) {
+  const results = new Array(assets.length);
+  let uploadedBytesAccount = 0;
+  let uploadedBytesWorkspace = 0;
+
+  const storeOne = async (index) => {
+    const item = assets[index];
+    const assetKey = item?.key;
+    const dataB64 = item?.data;
+
+    if (!assetKey || !dataB64 || !ASSET_KEY_PATTERN.test(assetKey)) {
+      results[index] = { key: assetKey || '?', status: 'error', error: 'invalid_key' };
+      return;
+    }
+
+    const body = Buffer.from(dataB64, 'base64');
+    if (body.length === 0) {
+      results[index] = { key: assetKey, status: 'error', error: 'empty_body' };
+      return;
+    }
+    if (body.length > MAX_ASSET_SIZE_BYTES) {
+      results[index] = { key: assetKey, status: 'skipped', error: 'too_large' };
+      return;
+    }
+
+    const r2Key = r2.assetKey(req.userId, assetKey);
+    try {
+      await r2.put(r2Key, body, 'application/octet-stream', { ifNoneMatch: true });
+    } catch (err) {
+      if (err && (err.name === 'PreconditionFailed' || err.$metadata?.httpStatusCode === 412)) {
+        results[index] = { key: assetKey, status: 'already_exists', sizeBytes: body.length };
+        return;
+      }
+      results[index] = { key: assetKey, status: 'error', error: err.message };
+      return;
+    }
+
+    if (req.workspaceId) {
+      uploadedBytesWorkspace += body.length;
+    } else {
+      uploadedBytesAccount += body.length;
+    }
+    results[index] = { key: assetKey, status: 'uploaded', sizeBytes: body.length };
+  };
+
+  let cursor = 0;
+  const workers = [];
+  for (let w = 0; w < ASSET_UPLOAD_CONCURRENCY; w++) {
+    workers.push((async () => {
+      while (cursor < assets.length) {
+        const index = cursor++;
+        await storeOne(index);
+      }
+    })());
+  }
+  await Promise.all(workers);
+
+  if (uploadedBytesAccount > 0) {
+    await Subscription.updateOne(
+      { accountId: req.userId },
+      { $inc: { storageUsedBytes: uploadedBytesAccount } }
+    );
+  }
+  if (uploadedBytesWorkspace > 0) {
+    await Workspace.updateOne(
+      { _id: req.workspaceId },
+      { $inc: { storageUsedBytes: uploadedBytesWorkspace } }
+    );
+  }
+
+  return results;
+}
 
 async function assetRoutes(app) {
   await app.register(require('../middleware/auth'));
@@ -48,71 +142,12 @@ async function assetRoutes(app) {
       return reply.status(400).send({ error: 'too_many_items', message: `Max ${BATCH_MAX_ITEMS} assets per batch.` });
     }
 
-    const results = [];
-    for (const item of assets) {
-      const assetKey = item.key;
-      const dataB64 = item.data;
-      if (!assetKey || !dataB64 || !ASSET_KEY_PATTERN.test(assetKey)) {
-        results.push({ key: assetKey || '?', status: 'error', error: 'invalid_key' });
-        continue;
-      }
-
-      const body = Buffer.from(dataB64, 'base64');
-      if (body.length === 0) {
-        results.push({ key: assetKey, status: 'error', error: 'empty_body' });
-        continue;
-      }
-      if (body.length > MAX_ASSET_SIZE_BYTES) {
-        results.push({ key: assetKey, status: 'skipped', error: 'too_large' });
-        continue;
-      }
-
-      const r2Key = r2.assetKey(req.userId, assetKey);
-      try {
-        const existing = await r2.stat(r2Key);
-        if (existing) {
-          results.push({ key: assetKey, status: 'already_exists', sizeBytes: existing.sizeBytes });
-          continue;
-        }
-      } catch (err) {
-        if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
-          results.push({ key: assetKey, status: 'error', error: 'storage_unavailable' });
-          continue;
-        }
-        throw err;
-      }
-
-      try {
-        await r2.put(r2Key, body, 'application/octet-stream', { ifNoneMatch: true });
-      } catch (err) {
-        if (err && (err.name === 'PreconditionFailed' || err.$metadata?.httpStatusCode === 412)) {
-          results.push({ key: assetKey, status: 'already_exists', sizeBytes: body.length });
-          continue;
-        }
-        results.push({ key: assetKey, status: 'error', error: err.message });
-        continue;
-      }
-
-      if (req.workspaceId) {
-        await Workspace.updateOne(
-          { _id: req.workspaceId },
-          { $inc: { storageUsedBytes: body.length } }
-        );
-      } else {
-        await Subscription.updateOne(
-          { accountId: req.userId },
-          { $inc: { storageUsedBytes: body.length } }
-        );
-      }
-      results.push({ key: assetKey, status: 'uploaded', sizeBytes: body.length });
-    }
-
+    const results = await storeAssetBatch(req, assets);
     const uploaded = results.filter((r) => r.status === 'uploaded').length;
     const skipped = results.filter((r) => r.status === 'already_exists').length;
     return reply.send({ results, uploaded, skipped, total: assets.length });
   });
 
-  // ── Seed batch upload (higher limits, no rate limit) ──────────────
   // Used during initial workspace seed to upload many assets at once.
   const SEED_BATCH_MAX_ITEMS = 50;
   const SEED_BATCH_MAX_BODY_BYTES = 100 * 1024 * 1024;
@@ -132,71 +167,12 @@ async function assetRoutes(app) {
       return reply.status(400).send({ error: 'too_many_items', message: `Max ${SEED_BATCH_MAX_ITEMS} assets per batch.` });
     }
 
-    const results = [];
-    for (const item of assets) {
-      const assetKey = item.key;
-      const dataB64 = item.data;
-      if (!assetKey || !dataB64 || !ASSET_KEY_PATTERN.test(assetKey)) {
-        results.push({ key: assetKey || '?', status: 'error', error: 'invalid_key' });
-        continue;
-      }
-
-      const body = Buffer.from(dataB64, 'base64');
-      if (body.length === 0) {
-        results.push({ key: assetKey, status: 'error', error: 'empty_body' });
-        continue;
-      }
-      if (body.length > MAX_ASSET_SIZE_BYTES) {
-        results.push({ key: assetKey, status: 'skipped', error: 'too_large' });
-        continue;
-      }
-
-      const r2Key = r2.assetKey(req.userId, assetKey);
-      try {
-        const existing = await r2.stat(r2Key);
-        if (existing) {
-          results.push({ key: assetKey, status: 'already_exists', sizeBytes: existing.sizeBytes });
-          continue;
-        }
-      } catch (err) {
-        if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
-          results.push({ key: assetKey, status: 'error', error: 'storage_unavailable' });
-          continue;
-        }
-        throw err;
-      }
-
-      try {
-        await r2.put(r2Key, body, 'application/octet-stream', { ifNoneMatch: true });
-      } catch (err) {
-        if (err && (err.name === 'PreconditionFailed' || err.$metadata?.httpStatusCode === 412)) {
-          results.push({ key: assetKey, status: 'already_exists', sizeBytes: body.length });
-          continue;
-        }
-        results.push({ key: assetKey, status: 'error', error: err.message });
-        continue;
-      }
-
-      if (req.workspaceId) {
-        await Workspace.updateOne(
-          { _id: req.workspaceId },
-          { $inc: { storageUsedBytes: body.length } }
-        );
-      } else {
-        await Subscription.updateOne(
-          { accountId: req.userId },
-          { $inc: { storageUsedBytes: body.length } }
-        );
-      }
-      results.push({ key: assetKey, status: 'uploaded', sizeBytes: body.length });
-    }
-
+    const results = await storeAssetBatch(req, assets);
     const uploaded = results.filter((r) => r.status === 'uploaded').length;
     const skipped = results.filter((r) => r.status === 'already_exists').length;
     return reply.send({ results, uploaded, skipped, total: assets.length });
   });
 
-  // ── Unauthenticated HMAC-signed endpoints (for MinIO parity) ─────────
   // These bypass session auth — the HMAC token IS the authorization.
   // Used when STORAGE_BACKEND=minio (internal Docker hostnames are unresolvable
   // from clients, so presigned URLs must route through the API server).
@@ -607,40 +583,29 @@ async function assetRoutes(app) {
 
     const useProxy = storageConfig.provider === 'minio';
     const PRESIGN_TTL = 3600;
-    const urls = [];
 
-    if (useProxy) {
-      // MinIO: generate server-proxied HMAC-signed URLs
-      const { signAssetDownload } = require('../lib/asset-sign');
-      for (const assetKey of keys) {
-        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
-        const key = r2.assetKey(req.userId, assetKey);
-        try {
-          const stat = await r2.stat(key);
-          if (!stat) continue;
+    const entries = await mapWithConcurrency(keys, ASSET_UPLOAD_CONCURRENCY, async (assetKey) => {
+      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) return null;
+      const key = r2.assetKey(req.userId, assetKey);
+      try {
+        const stat = await r2.stat(key);
+        if (!stat) return null;
+        if (useProxy) {
+          // MinIO: generate server-proxied HMAC-signed URLs
+          const { signAssetDownload } = require('../lib/asset-sign');
           const { url } = signAssetDownload(assetKey, req.userId, PRESIGN_TTL);
-          urls.push({ assetKey, url, sizeBytes: stat.sizeBytes });
-        } catch (err) {
-          console.warn('[assets] presign-get-proxy failed:', assetKey, err.message);
+          return { assetKey, url, sizeBytes: stat.sizeBytes };
         }
+        // R2/S3: generate native presigned URLs (externally resolvable)
+        const url = await r2.presignGet(key, PRESIGN_TTL);
+        return { assetKey, url, sizeBytes: stat.sizeBytes };
+      } catch (err) {
+        console.warn('[assets] presign-get failed:', assetKey, err.message);
+        return null;
       }
-    } else {
-      // R2/S3: generate native presigned URLs (externally resolvable)
-      for (const assetKey of keys) {
-        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
-        const key = r2.assetKey(req.userId, assetKey);
-        try {
-          const stat = await r2.stat(key);
-          if (!stat) continue;
-          const url = await r2.presignGet(key, PRESIGN_TTL);
-          urls.push({ assetKey, url, sizeBytes: stat.sizeBytes });
-        } catch (err) {
-          console.warn('[assets] presign-get failed:', assetKey, err.message);
-        }
-      }
-    }
+    });
 
-    return reply.send({ urls, expiresInSeconds: PRESIGN_TTL });
+    return reply.send({ urls: entries.filter(Boolean), expiresInSeconds: PRESIGN_TTL });
   });
 
   app.post('/confirm-seed', {
@@ -656,13 +621,24 @@ async function assetRoutes(app) {
     if (!Array.isArray(keys)) {
       return reply.status(400).send({ error: 'invalid_body', message: 'Body must contain a keys array.' });
     }
+    if (keys.length > 200) {
+      return reply.status(400).send({ error: 'too_many_keys', message: 'Max 200 keys per request.' });
+    }
+
+    const stats = await mapWithConcurrency(keys, ASSET_UPLOAD_CONCURRENCY, async (assetKey) => {
+      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) return null;
+      const key = r2.assetKey(req.userId, assetKey);
+      try {
+        return await r2.stat(key);
+      } catch (err) {
+        console.warn('[assets] confirm-seed stat failed:', assetKey, err.message);
+        return null;
+      }
+    });
 
     let verified = 0;
     let totalSizeBytes = 0;
-    for (const assetKey of keys) {
-      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
-      const key = r2.assetKey(req.userId, assetKey);
-      const stat = await r2.stat(key);
+    for (const stat of stats) {
       if (stat) {
         verified++;
         totalSizeBytes += stat.sizeBytes;

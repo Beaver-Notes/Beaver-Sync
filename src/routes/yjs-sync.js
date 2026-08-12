@@ -200,16 +200,15 @@ async function yjsSyncRoutes(app) {
     const { workspaceId, notes } = parsed.data;
     if (!await requireWorkspaceRole(req, reply, workspaceId, false)) return;
 
-    const result = {};
-    for (const { noteId, checkpoint, limit } of notes) {
+    const entries = await Promise.all(notes.map(async ({ noteId, checkpoint, limit }) => {
       const page = await persistence.loadUpdatesAfter(workspaceId, noteId, checkpoint, Math.min(limit, MAX_UPDATES_PER_PULL));
-      result[noteId] = {
+      return [noteId, {
         updates: page.updates.map((update) => formatUpdate(noteId, update)),
         nextCheckpoint: page.nextCheckpoint,
         hasMore: page.hasMore,
-      };
-    }
-    return reply.send({ notes: result });
+      }];
+    }));
+    return reply.send({ notes: Object.fromEntries(entries) });
   });
 
   app.get('/note-ids', { ...protect }, async (req, reply) => {

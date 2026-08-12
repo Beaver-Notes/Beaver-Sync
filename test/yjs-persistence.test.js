@@ -16,6 +16,7 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 
 const { getDb, close, runFileMigrations } = require('../src/db');
 const persistence = require('../src/persistence/yjs');
+const { summarizeStoredBatch } = require('../src/routes/yjs-sync');
 
 function seedWorkspace() {
   const db = getDb();
@@ -67,7 +68,7 @@ test('accepts an update once and reports a replay as duplicate', async () => {
   assert.equal(await persistence.getUpdateCount('ws-1', 'note-1'), 1);
 });
 
-test('returns continuation metadata when a pull is truncated', { skip: 'SQLite parameter binding issue' }, async () => {
+test('returns continuation metadata when a pull is truncated', async () => {
   await seedUpdates('ws-1', 'note-2', 3);
   const page = await persistence.loadUpdatesAfter('ws-1', 'note-2', null, 2);
 
@@ -81,7 +82,7 @@ test('returns continuation metadata when a pull is truncated', { skip: 'SQLite p
   assert.equal(secondPage.hasMore, false);
 });
 
-test('orders same-timestamp updates from different devices deterministically', { skip: 'SQLite parameter binding issue' }, async () => {
+test('orders same-timestamp updates from different devices deterministically', async () => {
   await persistence.storeUpdatesBatch('ws-1', 'note-same-clock', [
     { deviceId: 'device-b', sequence: 1, data: Buffer.from('b'), ts: 50 },
     { deviceId: 'device-a', sequence: 1, data: Buffer.from('a'), ts: 50 },
@@ -145,7 +146,7 @@ test('reports accepted payload bytes for mixed new and replayed updates', async 
   assert.equal(result.acceptedBytes, Buffer.byteLength('new-payload'));
 });
 
-test('route accounting uses accepted persistence results', { skip: 'SQLite parameter binding issue' }, () => {
+test('route accounting uses accepted persistence results', () => {
   const stats = summarizeStoredBatch(
     { accepted: 1, duplicate: 1, acceptedBytes: 3 },
   );
