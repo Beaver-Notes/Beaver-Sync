@@ -45,7 +45,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  close();
+  await close();
 });
 
 test('admin creates an invite that returns a raw token and grants membership on join', async (t) => {

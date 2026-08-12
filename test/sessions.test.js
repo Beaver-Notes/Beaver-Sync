@@ -53,7 +53,7 @@ test.before(async () => {
 test.after(() => {
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(models.Account, originalMethods.Account);
-  close();
+  return close();
 });
 
 async function makeApp() {

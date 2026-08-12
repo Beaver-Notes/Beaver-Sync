@@ -25,7 +25,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  close();
+  await close();
 });
 
 async function makeAccount(email) {

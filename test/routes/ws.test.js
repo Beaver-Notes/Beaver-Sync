@@ -25,7 +25,7 @@ describe('WebSocket routes', () => {
   });
 
   after(() => {
-    close();
+    return close();
   });
   it('ws.js module exports a function', () => {
     const wsRoutes = require('../../src/routes/ws');

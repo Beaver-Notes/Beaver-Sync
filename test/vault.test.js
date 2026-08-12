@@ -29,7 +29,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  close();
+  await close();
 });
 
 test('publish rejects plaintext passphrase and requires a proof', async (t) => {

@@ -49,7 +49,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  close();
+  await close();
 });
 
 test('createEmailAlias stores mapping and returns alias', async (t) => {

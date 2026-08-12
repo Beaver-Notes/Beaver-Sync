@@ -7,14 +7,24 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 // Dedicated Postgres test database, separate from local dev data.
 const DEFAULT_DATABASE_URL = 'postgresql://beaver:beaver@localhost:5432/beaver_test';
 
-if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || DEFAULT_DATABASE_URL;
+function resolveTestDatabaseUrl() {
+  const url = process.env.TEST_DATABASE_URL || DEFAULT_DATABASE_URL;
+  const dbName = new URL(url).pathname.replace(/^\//, '');
+  if (!dbName.endsWith('_test')) {
+    throw new Error(
+      `Refusing to run the test suite against ${url}: database name must end in "_test" ` +
+      `(got "${dbName}"). Point TEST_DATABASE_URL at a dedicated test database.`
+    );
+  }
+  return url;
 }
 
+// Own the test database URL unconditionally, so an exported DATABASE_URL from
+// a real dev/prod environment can never make the suite DELETE its data.
+process.env.DATABASE_URL = resolveTestDatabaseUrl();
+
 async function setupTestDb() {
-  if (!process.env.DATABASE_URL) {
-    process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || DEFAULT_DATABASE_URL;
-  }
+  process.env.DATABASE_URL = resolveTestDatabaseUrl();
 
   process.env.NODE_ENV = process.env.NODE_ENV || 'test';
   process.env.SESSION_HMAC_KEY = process.env.SESSION_HMAC_KEY || 'test-session-hmac-key-at-least-32-characters-long';
@@ -60,7 +70,8 @@ async function cleanTestDb() {
     try {
       await query(`DELETE FROM ${table}`);
     } catch (err) {
-      // Table might not exist yet; ignore.
+      // Table might not exist yet; skip it but surface the reason.
+      console.warn(`[test] Skipping DELETE on table ${table}: ${err.message}`);
     }
   }
 }

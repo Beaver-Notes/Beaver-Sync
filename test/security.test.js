@@ -136,7 +136,7 @@ test.after(() => {
   Object.assign(models.Device, originalMethods.Device);
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(r2, originalMethods.r2);
-  close();
+  return close();
 });
 
 test('unauthorized access to private account route is rejected', async (t) => {

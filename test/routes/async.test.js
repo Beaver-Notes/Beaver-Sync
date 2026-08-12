@@ -25,7 +25,7 @@ describe('Async routes', () => {
   });
 
   after(() => {
-    close();
+    return close();
   });
   it('account route handler is async', () => {
     const accountRoutes = require('../../src/routes/account');

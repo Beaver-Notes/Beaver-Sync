@@ -28,14 +28,15 @@ describe('Postgres HA integration', () => {
 
   it('can create and query account', async () => {
     const { Account } = require('../../src/models');
+    const emailHmac = `test-${Date.now()}@example.com`;
     const account = await Account.create({
-      emailHmac: `test@example.com`,
+      emailHmac,
       username: 'testuser',
     });
     assert(account.id);
 
     const found = await Account.findById(account.id).lean();
-    assert(found.emailHmac === 'test@example.com');
+    assert(found.emailHmac === emailHmac);
 
     await Account.deleteOne({ _id: account.id });
   });

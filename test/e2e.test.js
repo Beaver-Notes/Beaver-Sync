@@ -54,7 +54,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  close();
+  await close();
 });
 
 test('POST /auth/register creates a new account and returns a session token', async (t) => {
@@ -220,10 +220,10 @@ test('GET /health returns ok with db connected', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// QuickConnect e2e tests (real SQLite)
+// QuickConnect e2e tests (real Postgres)
 // ---------------------------------------------------------------------------
 
-test('quickconnect: initiate stores code and secret in SQLite', async (t) => {
+test('quickconnect: initiate stores code and secret in the database', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
 
@@ -358,10 +358,10 @@ test('quickconnect: connect with unknown secret returns 404', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// Passkey e2e tests (real SQLite, mocked WebAuthn)
+// Passkey e2e tests (real Postgres, mocked WebAuthn)
 // ---------------------------------------------------------------------------
 
-test('passkey: register begin stores challenge in SQLite', async (t) => {
+test('passkey: register begin stores challenge in the database', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
 

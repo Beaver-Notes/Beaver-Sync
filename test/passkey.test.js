@@ -120,7 +120,7 @@ test.after(() => {
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(models.Subscription, originalMethods.Subscription);
   delete require.cache[swaPath];
-  close();
+  return close();
 });
 
 async function makeApp() {

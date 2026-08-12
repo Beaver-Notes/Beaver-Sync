@@ -47,7 +47,7 @@ test.before(async () => {
 test.after(() => {
   Object.assign(models.QuickConnectCode, originalMethods.QuickConnectCode);
   Object.assign(models.Session, originalMethods.Session);
-  close();
+  return close();
 });
 
 async function makeApp() {
