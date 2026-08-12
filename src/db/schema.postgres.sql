@@ -1,5 +1,4 @@
 -- Postgres schema for Beaver Sync
--- Converted from src/db/schema.sql (SQLite)
 
 CREATE TABLE IF NOT EXISTS accounts (
   id                    TEXT PRIMARY KEY,
