@@ -3,42 +3,33 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const fs = require('node:fs');
-const path = require('node:path');
-
-const repoRoot = path.resolve(__dirname, '..');
-const dbPath = path.join(repoRoot, '.test-data', 'test.db');
-fs.rmSync(dbPath, { force: true });
-fs.rmSync(`${dbPath}-shm`, { force: true });
-fs.rmSync(`${dbPath}-wal`, { force: true });
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
 process.env.SESSION_HMAC_KEY = 'test-session-hmac-key-at-least-32-characters-long';
 process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 process.env.ENTERPRISE_MODE = 'false';
 
-const { getDb, close } = require('../src/db');
+const { close, query } = require('../src/db');
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const { createSession } = require('../src/middleware/auth');
 const { createMlKem768 } = require('mlkem');
 
 const now = new Date().toISOString();
 
-function seedAccount(id, kemPublicKey = null) {
-  const db = getDb();
-  db.prepare(
-    'INSERT INTO accounts (id, username, email_hmac, created_at, kem_public_key) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, id, `${id}-email`, now, kemPublicKey);
+async function seedAccount(id, kemPublicKey = null) {
+  await query(
+    'INSERT INTO accounts (id, username, email_hmac, created_at, kem_public_key) VALUES ($1, $2, $3, $4, $5)',
+    [id, id, `${id}-email`, now, kemPublicKey]
+  );
 }
 
-function seedWorkspace(id, ownerId) {
-  const db = getDb();
-  db.prepare('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES (?, ?, ?, ?)').run(id, '', ownerId, now);
-  db.prepare('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES (?, ?, ?, ?)').run(id, ownerId, 'owner', now);
-  db.prepare('INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(`${ownerId}-sub`, ownerId, 'pro', 'active', 1000000, 0, now);
+async function seedWorkspace(id, ownerId) {
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', [id, '', ownerId, now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', [id, ownerId, 'owner', now]);
+  await query('INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)', [`${ownerId}-sub`, ownerId, 'pro', 'active', 1000000, 0, now]);
 }
 
 async function makeKeypair() {
@@ -52,11 +43,14 @@ let alice;
 let aliceSession, nokeySession;
 
 test.before(async () => {
+  await setupTestDb();
+  await cleanTestDb();
+
   alice = await makeKeypair();
 
-  seedAccount('alice', alice.pk);
-  seedAccount('nokey', null);
-  seedWorkspace('ws-1', 'alice');
+  await seedAccount('alice', alice.pk);
+  await seedAccount('nokey', null);
+  await seedWorkspace('ws-1', 'alice');
 
   app = await buildApp();
   await app.ready();
@@ -81,9 +75,10 @@ function post(session, url, payload) {
 test('note join-link gate: keyless joiner is rejected with keypair_required', async () => {
   const token = crypto.randomBytes(32).toString('hex');
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-  getDb().prepare(
-    'INSERT INTO note_invite_links (id, note_id, created_by, token_hash, role, require_approval, revoked, created_at) VALUES (?, ?, ?, ?, ?, 0, 0, ?)'
-  ).run(crypto.randomUUID(), 'join-note', 'alice', tokenHash, 'editor', now);
+  await query(
+    'INSERT INTO note_invite_links (id, note_id, created_by, token_hash, role, require_approval, revoked, created_at) VALUES ($1, $2, $3, $4, $5, 0, 0, $6)',
+    [crypto.randomUUID(), 'join-note', 'alice', tokenHash, 'editor', now]
+  );
 
   const res = await post(nokeySession, `/collaboration/join/${token}`, {});
   assert.equal(res.statusCode, 403);
@@ -94,9 +89,10 @@ test('workspace join gate: keyless joiner is rejected with keypair_required', as
   const token = crypto.randomBytes(32).toString('hex');
   const tokenHash = crypto.createHmac('sha256', process.env.SESSION_HMAC_KEY).update(token).digest('hex');
   const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-  getDb().prepare(
-    'INSERT INTO workspace_invites (token_hash, workspace_id, role, expires_at, max_uses, used_count, created_at) VALUES (?, ?, ?, ?, 0, 0, ?)'
-  ).run(tokenHash, 'ws-1', 'editor', future, now);
+  await query(
+    'INSERT INTO workspace_invites (token_hash, workspace_id, role, expires_at, max_uses, used_count, created_at) VALUES ($1, $2, $3, $4, 0, 0, $5)',
+    [tokenHash, 'ws-1', 'editor', future, now]
+  );
 
   const res = await post(nokeySession, `/workspaces/join/${token}`, {});
   assert.equal(res.statusCode, 403);
@@ -104,9 +100,14 @@ test('workspace join gate: keyless joiner is rejected with keypair_required', as
 });
 
 test('singular recipient gate: keyless collaborator is rejected with keypair_required', async () => {
-  const db = getDb();
-  db.prepare('INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES (?, ?, ?, ?, ?)').run('rec-note', 'alice', 'alice', 'editor', now);
-  db.prepare('INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES (?, ?, ?, ?, ?)').run('rec-note', 'nokey', 'alice', 'editor', now);
+  await query(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
+    ['rec-note', 'alice', 'alice', 'editor', now]
+  );
+  await query(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
+    ['rec-note', 'nokey', 'alice', 'editor', now]
+  );
 
   const res = await post(aliceSession, '/collaboration/keys/rec-note/recipient', {
     recipientUserId: 'nokey',
@@ -117,9 +118,14 @@ test('singular recipient gate: keyless collaborator is rejected with keypair_req
 });
 
 test('plural recipients gate: keyless collaborator is rejected with keypair_required', async () => {
-  const db = getDb();
-  db.prepare('INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES (?, ?, ?, ?, ?)').run('recs-note', 'alice', 'alice', 'editor', now);
-  db.prepare('INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES (?, ?, ?, ?, ?)').run('recs-note', 'nokey', 'alice', 'editor', now);
+  await query(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
+    ['recs-note', 'alice', 'alice', 'editor', now]
+  );
+  await query(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
+    ['recs-note', 'nokey', 'alice', 'editor', now]
+  );
 
   const res = await post(aliceSession, '/collaboration/keys/recs-note/recipients', {
     recipients: [{ userId: 'nokey', wrappedKey: '{"kemCt":"abc","ct":"def","tag":"ghi"}' }],
@@ -161,9 +167,8 @@ test('registration stores empty encrypted names for personal org and workspace',
   assert.equal(organization.nameEncrypted, '');
   assert.equal(workspace.nameEncrypted, '');
 
-  const db = getDb();
-  const org = db.prepare('SELECT name_encrypted FROM organizations WHERE id = ?').get(organization.id);
+  const org = (await query('SELECT name_encrypted FROM organizations WHERE id = $1', [organization.id])).rows[0];
   assert.equal(org.name_encrypted, '');
-  const personalWs = db.prepare('SELECT name_encrypted FROM workspaces WHERE id = ?').get(workspace.id);
+  const personalWs = (await query('SELECT name_encrypted FROM workspaces WHERE id = $1', [workspace.id])).rows[0];
   assert.equal(personalWs.name_encrypted, '');
 });

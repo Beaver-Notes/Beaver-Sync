@@ -2,24 +2,16 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-
-const repoRoot = path.resolve(__dirname, '..');
-const dbPath = path.join(repoRoot, '.test-data', 'test.db');
-fs.rmSync(dbPath, { force: true });
-fs.rmSync(`${dbPath}-shm`, { force: true });
-fs.rmSync(`${dbPath}-wal`, { force: true });
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
 process.env.SESSION_HMAC_KEY = 'test-session-hmac-key-at-least-32-characters-long';
 process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 process.env.ENTERPRISE_MODE = 'false';
 
-const { getDb, close } = require('../src/db');
+const { close, query } = require('../src/db');
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const { createSession } = require('../src/middleware/auth');
 const { createMlKem768 } = require('mlkem');
@@ -27,18 +19,17 @@ const { wrapForRecipient } = require('../src/lib/recipient-wrap');
 
 const now = new Date().toISOString();
 
-function seedAccount(id, kemPublicKey = null) {
-  const db = getDb();
-  db.prepare(
-    'INSERT INTO accounts (id, username, email_hmac, created_at, kem_public_key) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, id, `${id}-email`, now, kemPublicKey);
+async function seedAccount(id, kemPublicKey = null) {
+  await query(
+    'INSERT INTO accounts (id, username, email_hmac, created_at, kem_public_key) VALUES ($1, $2, $3, $4, $5)',
+    [id, id, `${id}-email`, now, kemPublicKey]
+  );
 }
 
-function seedWorkspace(id, ownerId) {
-  const db = getDb();
-  db.prepare('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES (?, ?, ?, ?)').run(id, 'cipher', ownerId, now);
-  db.prepare('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES (?, ?, ?, ?)').run(id, ownerId, 'owner', now);
-  db.prepare('INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(`${ownerId}-sub`, ownerId, 'pro', 'active', 1000000, 0, now);
+async function seedWorkspace(id, ownerId) {
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', [id, 'cipher', ownerId, now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', [id, ownerId, 'owner', now]);
+  await query('INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)', [`${ownerId}-sub`, ownerId, 'pro', 'active', 1000000, 0, now]);
 }
 
 async function makeKeypair() {
@@ -53,45 +44,16 @@ let aliceSession, bobSession;
 let originalAliceKemCt;
 
 test.before(async () => {
-  // Clean up leftover data from previous runs
-  const db = getDb();
-  db.exec('DELETE FROM yjs_doc_updates');
-  db.exec('DELETE FROM sync_document_state');
-  db.exec('DELETE FROM sync_workspace_state');
-  db.exec('DELETE FROM note_comments');
-  db.exec('DELETE FROM note_invite_links');
-  db.exec('DELETE FROM note_invitations');
-  db.exec('DELETE FROM note_keys');
-  db.exec('DELETE FROM workspace_members');
-  db.exec('DELETE FROM workspace_invites');
-  db.exec('DELETE FROM workspace_keys');
-  db.exec('DELETE FROM org_members');
-  db.exec('DELETE FROM org_invites');
-  db.exec('DELETE FROM org_subscriptions');
-  db.exec('DELETE FROM org_keys');
-  db.exec('DELETE FROM organizations');
-  db.exec('DELETE FROM audit_logs');
-  db.exec('DELETE FROM sso_oidc_states');
-  db.exec('DELETE FROM sso_configs');
-  db.exec('DELETE FROM email_aliases');
-  db.exec('DELETE FROM webauthn_challenges');
-  db.exec('DELETE FROM quick_connect_codes');
-  db.exec('DELETE FROM compaction_locks');
-  db.exec('DELETE FROM credentials');
-  db.exec('DELETE FROM devices');
-  db.exec('DELETE FROM sessions');
-  db.exec('DELETE FROM subscriptions');
-  db.exec('DELETE FROM commits');
-  db.exec('DELETE FROM workspaces');
-  db.exec('DELETE FROM accounts');
+  await setupTestDb();
+  await cleanTestDb();
 
   alice = await makeKeypair();
   bob = await makeKeypair();
 
-  seedAccount('alice', alice.pk);
-  seedAccount('bob', bob.pk);
-  seedAccount('nokey', null);
-  seedWorkspace('ws-1', 'alice');
+  await seedAccount('alice', alice.pk);
+  await seedAccount('bob', bob.pk);
+  await seedAccount('nokey', null);
+  await seedWorkspace('ws-1', 'alice');
 
   app = await buildApp();
   await app.ready();
@@ -176,7 +138,7 @@ test('GET /keys/:noteId reports noteHasKey for fresh notes and late joiners', as
 
   // Non-collaborators are still denied.
   const outsider = await makeKeypair();
-  seedAccount('outsider2', outsider.pk);
+  await seedAccount('outsider2', outsider.pk);
   const outsiderSession = await createSession('outsider2', {});
   const denied = await get(outsiderSession, '/collaboration/keys/note-fresh');
   assert.equal(denied.statusCode, 403);
@@ -247,13 +209,18 @@ test('comments are stored encrypted with mentions filtered to collaborators', as
 });
 
 test('public-keys exposes only keypair\u2019d collaborators and rejects non-collaborators', async () => {
-  const db = getDb();
-  const ins = db.prepare(
-    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES (?, ?, ?, ?, ?)'
+  await query(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
+    ['note-pub', 'alice', 'alice', 'editor', now]
   );
-  ins.run('note-pub', 'alice', 'alice', 'editor', now);
-  ins.run('note-pub', 'bob', 'alice', 'editor', now);
-  ins.run('note-pub', 'nokey', 'alice', 'viewer', now);
+  await query(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
+    ['note-pub', 'bob', 'alice', 'editor', now]
+  );
+  await query(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
+    ['note-pub', 'nokey', 'alice', 'viewer', now]
+  );
 
   const res = await get(aliceSession, '/collaboration/public-keys/note-pub');
   assert.equal(res.statusCode, 200);
@@ -265,7 +232,7 @@ test('public-keys exposes only keypair\u2019d collaborators and rejects non-coll
   assert.ok(!userMap.has('nokey'));
 
   const outsider = await makeKeypair();
-  seedAccount('outsider', outsider.pk);
+  await seedAccount('outsider', outsider.pk);
   const outsiderSession = await createSession('outsider', {});
   const denied = await get(outsiderSession, '/collaboration/public-keys/note-pub');
   assert.equal(denied.statusCode, 403);

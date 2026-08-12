@@ -375,7 +375,7 @@ function createModel(table, pkField) {
     async countDocuments(filter) {
       const { sql: whereSql, params } = buildWhere(filter);
       const result = await query(`SELECT COUNT(*) AS count FROM ${table} ${whereSql}`, params);
-      return result.rows[0].count;
+      return Number(result.rows[0].count);
     },
 
     async findOneAndUpdate(filter, update, options) {

@@ -61,7 +61,7 @@ async function organizationRoutes(app) {
     try {
       await Organization.create({ id: orgId, nameEncrypted: nameEncrypted.trim(), slug, createdAt: new Date() });
     } catch (err) {
-      if (String(err?.message ?? err).includes('UNIQUE')) {
+      if (String(err?.message ?? err).toLowerCase().includes('unique')) {
         return reply.status(409).send({ error: 'slug_taken', message: 'That slug is already in use.' });
       }
       throw err;
