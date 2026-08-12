@@ -3,17 +3,11 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 
-describe('Postgres HA integration', () => {
-  let pgAvailable = true;
+const { setupTestDb } = require('../helpers/db');
 
+describe('Postgres HA integration', () => {
   before(async () => {
-    process.env.DATABASE_URL = 'postgresql://localhost:5432/test';
-    try {
-      const { query } = require('../../src/db/postgres');
-      await query('SELECT 1');
-    } catch {
-      pgAvailable = false;
-    }
+    await setupTestDb();
   });
 
   after(async () => {
@@ -21,21 +15,21 @@ describe('Postgres HA integration', () => {
     await close();
   });
 
-  it('can connect to Postgres', { skip: () => !pgAvailable }, async () => {
+  it('can connect to Postgres', async () => {
     const { query } = require('../../src/db/postgres');
     const result = await query('SELECT NOW()');
     assert(result.rows[0].now);
   });
 
-  it('can run migrations', { skip: () => !pgAvailable }, async () => {
+  it('can run migrations', async () => {
     const { runMigrations } = require('../../src/db/migrate-postgres');
     await runMigrations();
   });
 
-  it('can create and query account', { skip: () => !pgAvailable }, async () => {
+  it('can create and query account', async () => {
     const { Account } = require('../../src/models');
     const account = await Account.create({
-      emailHmac: 'test@example.com',
+      emailHmac: `test@example.com`,
       username: 'testuser',
     });
     assert(account.id);
@@ -46,7 +40,7 @@ describe('Postgres HA integration', () => {
     await Account.deleteOne({ _id: account.id });
   });
 
-  it('can use transactions', { skip: () => !pgAvailable }, async () => {
+  it('can use transactions', async () => {
     const { transaction } = require('../../src/db/postgres');
     const result = await transaction(async (client) => {
       const res = await client.query('SELECT 1 as num');
