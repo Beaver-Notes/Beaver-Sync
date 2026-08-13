@@ -140,7 +140,25 @@ async function adminRoutes(app) {
       createdAt: d.createdAt,
     }));
 
-    return reply.send({ workspaceId, devices: flat });
+    const sessions = accountIds.length > 0
+      ? (await Session.find(
+          { accountId: { $in: accountIds }, workspaceId },
+          { idHash: 1, accountId: 1, deviceLabel: 1, deviceId: 1, ipSubnet: 1, lastSeenAt: 1, revoked: 1, createdAt: 1 }
+        ).lean())
+      : [];
+
+    const flatSessions = sessions.map(s => ({
+      userId: s.accountId,
+      idHash: s.idHash,
+      deviceLabel: s.deviceLabel,
+      deviceId: s.deviceId,
+      ipSubnet: s.ipSubnet,
+      lastSeenAt: s.lastSeenAt,
+      revoked: Boolean(s.revoked),
+      createdAt: s.createdAt,
+    }));
+
+    return reply.send({ workspaceId, devices: flat, sessions: flatSessions });
   });
 
   app.delete('/sessions/:hash', {
