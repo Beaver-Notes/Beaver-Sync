@@ -461,16 +461,30 @@ async function workspaceRoutes(app) {
       return reply.status(404).send({ error: 'not_found', message: 'Member not found in this workspace.' });
     }
 
-    if (target.role === 'owner' && req.userId !== targetUserId) {
+    // Only the current workspace owner may grant the owner role. This keeps an
+    // admin from creating a second owner that could never be demoted.
+    if (role === 'owner' && actorMembership.role !== 'owner') {
+      return reply.status(403).send({ error: 'forbidden', message: 'Only the current workspace owner can grant the owner role.' });
+    }
+
+    // No one but the current owner may modify the owner row.
+    if (target.role === 'owner' && targetUserId !== req.userId) {
       return reply.status(403).send({ error: 'forbidden', message: 'Only the workspace owner can modify the owner row.' });
     }
 
-    if (targetUserId === req.userId && role === 'owner' && actorMembership.role !== 'owner') {
-      return reply.status(400).send({ error: 'cannot_promote_self', message: 'Only the current workspace owner can hold the owner role.' });
-    }
-
+    // Self-demotion is only meaningful as part of a transfer, and transfers
+    // happen automatically when the owner promotes someone else below.
     if (targetUserId === req.userId && role !== 'owner') {
       return reply.status(400).send({ error: 'cannot_demote_self', message: 'You cannot change your own role away from owner.' });
+    }
+
+    // Single-owner invariant: promoting someone else to owner transfers the
+    // role, so the current owner steps down to admin.
+    if (role === 'owner' && targetUserId !== req.userId) {
+      await WorkspaceMember.updateOne(
+        { workspaceId, accountId: req.userId },
+        { $set: { role: 'admin' } }
+      );
     }
 
     const result = await WorkspaceMember.updateOne(

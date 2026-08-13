@@ -391,11 +391,38 @@ test('PATCH member role rejects admin self-promotion to owner', async (t) => {
     headers: { ...authHeader(admin), 'content-type': 'application/json' },
     payload: { role: 'owner' },
   });
-  assert.equal(res.statusCode, 400);
-  assert.equal(res.json().error, 'cannot_promote_self');
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
 
   const row = await models.WorkspaceMember.findOne({ workspaceId: ws.id, accountId: admin.id }).lean();
   assert.equal(row.role, 'admin');
+});
+
+test('PATCH member role rejects an admin promoting a third party to owner', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const owner = await register('pro');
+  await seedOrg('org-patch-admin-grant', owner.id, 'free');
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-patch-admin-grant', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+
+  const admin = await register('free');
+  const editor = await register('free');
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: admin.id, role: 'admin', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: editor.id, role: 'editor', createdAt: new Date() });
+
+  const res = await app.inject({
+    method: 'PATCH',
+    url: `/workspaces/${ws.id}/members/${editor.id}`,
+    headers: { ...authHeader(admin), 'content-type': 'application/json' },
+    payload: { role: 'owner' },
+  });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
+
+  const row = await models.WorkspaceMember.findOne({ workspaceId: ws.id, accountId: editor.id }).lean();
+  assert.equal(row.role, 'editor');
 });
 
 test('PATCH member role rejects an admin demoting the owner', async (t) => {
@@ -446,4 +473,13 @@ test('PATCH member role allows owner to promote an admin to owner', async (t) =>
 
   const row = await models.WorkspaceMember.findOne({ workspaceId: ws.id, accountId: admin.id }).lean();
   assert.equal(row.role, 'owner');
+
+  // Single-owner invariant: the transferring owner is demoted to admin, so
+  // exactly one owner remains and the workspace is never left with two owners
+  // that could not demote each other.
+  const oldOwnerRow = await models.WorkspaceMember.findOne({ workspaceId: ws.id, accountId: owner.id }).lean();
+  assert.equal(oldOwnerRow.role, 'admin');
+  const owners = await models.WorkspaceMember.find({ workspaceId: ws.id, role: 'owner' }).lean();
+  assert.equal(owners.length, 1);
+  assert.equal(owners[0].accountId, admin.id);
 });
