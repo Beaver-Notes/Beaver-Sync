@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS commits (
 CREATE TABLE IF NOT EXISTS subscriptions (
   id                 TEXT PRIMARY KEY,
   account_id         TEXT NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
-  plan               TEXT NOT NULL CHECK(plan IN ('free', 'basic', 'pro', 'team', 'enterprise')),
+  plan               TEXT NOT NULL CHECK(plan IN ('free', 'starter', 'pro', 'team', 'enterprise')),
   status             TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'grace_period', 'expired')),
   provider           TEXT CHECK(provider IN ('stripe', 'apple', 'google')),
   renews_at          TEXT,
@@ -155,7 +155,7 @@ CREATE INDEX IF NOT EXISTS idx_org_members_account ON org_members(account_id);
 CREATE TABLE IF NOT EXISTS org_subscriptions (
   id TEXT PRIMARY KEY,
   org_id TEXT NOT NULL UNIQUE REFERENCES organizations(id) ON DELETE CASCADE,
-  plan TEXT NOT NULL CHECK(plan IN ('free', 'basic', 'pro', 'team', 'enterprise')),
+  plan TEXT NOT NULL CHECK(plan IN ('free', 'starter', 'pro', 'team', 'enterprise')),
   status TEXT DEFAULT 'active' CHECK(status IN ('active', 'grace_period', 'expired')),
   seats INTEGER DEFAULT 1,
   provider TEXT CHECK(provider IN ('stripe', 'apple', 'google')),

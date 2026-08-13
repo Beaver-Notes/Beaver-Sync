@@ -2,11 +2,11 @@
 
 const crypto = require('crypto');
 const { query, transaction } = require('../db');
+const { getQuotaBytes } = require('../lib/plans');
 
 const MAX_BATCH_SIZE = 200;
 const MAX_PULL_PAGE_SIZE = 500;
 const BATCH_INSERT_CHUNK = 500;
-const TEAM_WORKSPACE_QUOTA = 50 * 1024 * 1024 * 1024;
 
 const roomPattern = /^workspace:([a-zA-Z0-9-]+):note:([a-zA-Z0-9-]+)$/;
 const UPDATE_IDENTITY_SEP = '\u0000';
@@ -165,13 +165,15 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
     if (quota && acceptedBytes > 0 && quota.subscription) {
       let result;
       if (quota.workspaceId && ['team', 'enterprise'].includes(quota.subscription.plan)) {
+        const quotaBytes = getQuotaBytes(quota.subscription.plan, quota.seats);
         result = await client.query(`UPDATE workspaces SET storage_used_bytes = storage_used_bytes + $1
           WHERE id = $2 AND ($3 = 'enterprise' OR storage_used_bytes + $1 <= $4)`,
-          [acceptedBytes, quota.workspaceId, quota.subscription.plan, TEAM_WORKSPACE_QUOTA]);
+          [acceptedBytes, quota.workspaceId, quota.subscription.plan, quotaBytes]);
       } else if (quota.subscription.plan !== 'enterprise') {
+        const quotaBytes = getQuotaBytes(quota.subscription.plan);
         result = await client.query(`UPDATE subscriptions SET storage_used_bytes = storage_used_bytes + $1
-          WHERE account_id = $2 AND storage_used_bytes + $1 <= storage_quota_bytes`,
-          [acceptedBytes, quota.accountId]);
+          WHERE account_id = $2 AND storage_used_bytes + $1 <= $3`,
+          [acceptedBytes, quota.accountId, quotaBytes]);
       }
       if (result && result.rowCount !== 1) {
         const error = new Error('Storage quota exceeded');

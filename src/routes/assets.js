@@ -111,7 +111,6 @@ async function storeAssetBatch(req, assets) {
 
 async function assetRoutes(app) {
   await app.register(require('../middleware/auth'));
-  await app.register(require('../middleware/subscription'));
 
   const protect = {
     preHandler: [app.authenticate],

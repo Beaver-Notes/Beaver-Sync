@@ -303,7 +303,8 @@ test('pull filters each device independently when timestamps are interleaved', a
 test('reserves quota atomically when concurrent pushes race for the last byte', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
-  await query('UPDATE subscriptions SET plan = $1, storage_quota_bytes = 1, storage_used_bytes = 0 WHERE account_id = $2', ['pro', 'account-1']);
+  const proQuota = 50 * 1024 ** 3;
+  await query('UPDATE subscriptions SET plan = $1, storage_quota_bytes = $2, storage_used_bytes = $3 WHERE account_id = $4', ['pro', proQuota, proQuota - 1, 'account-1']);
   const session = await createSession('account-1', { headers: { 'x-device-id': 'device-a' } });
   const makePayload = (noteId) => ({ workspaceId: 'workspace-1', notes: [{ noteId, updates: [{ key: `${noteId}~~device-a~~${noteId === 'quota-a' ? 60 : 61}~~1.yjs.json`, data: 'eA==', deviceId: 'device-a', sequence: 1, ts: noteId === 'quota-a' ? 60 : 61 }] }] });
   const responses = await Promise.all([
@@ -311,15 +312,15 @@ test('reserves quota atomically when concurrent pushes race for the last byte', 
     request(app, session, '/yjs/push-batch', makePayload('quota-b')),
   ]);
   assert.deepEqual(responses.map((response) => response.statusCode).sort(), [201, 507]);
-  assert.equal((await query('SELECT storage_used_bytes AS bytes FROM subscriptions WHERE account_id = $1', ['account-1'])).rows[0].bytes, 1);
+  assert.equal((await query('SELECT storage_used_bytes AS bytes FROM subscriptions WHERE account_id = $1', ['account-1'])).rows[0].bytes, proQuota);
   assert.equal((await query('SELECT COUNT(*)::int AS count FROM yjs_doc_updates WHERE note_id LIKE $1', ['quota-%'])).rows[0].count, 1);
-  await query('UPDATE subscriptions SET storage_quota_bytes = 1000000 WHERE account_id = $1', ['account-1']);
+  await query('UPDATE subscriptions SET storage_quota_bytes = 1000000, storage_used_bytes = 0 WHERE account_id = $1', ['account-1']);
 });
 
 test('binds a device header to its session and enforces the account device limit', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
-  await query('UPDATE subscriptions SET plan = $1, storage_quota_bytes = 1000000 WHERE account_id = $2', ['basic', 'account-1']);
+  await query('UPDATE subscriptions SET plan = $1, storage_quota_bytes = 1000000 WHERE account_id = $2', ['starter', 'account-1']);
   const boundSession = await createSession('account-1', { headers: { 'x-device-id': 'bound-device' } });
   const mismatch = await request(app, boundSession, '/yjs/push-batch', {
     workspaceId: 'workspace-1', notes: [{ noteId: 'device-mismatch', updates: [{ key: 'device-mismatch~~other-device~~70~~1.yjs.json', data: 'eA==', deviceId: 'other-device', sequence: 1, ts: 70 }] }],

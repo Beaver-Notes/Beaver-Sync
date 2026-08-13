@@ -138,6 +138,7 @@ async function buildApp() {
   // Compression handled by reverse proxy (NPM/Cloudflare)
 
   await app.register(require('./middleware/security'));
+  await app.register(require('./middleware/subscription'));
 
   await app.register(require('./routes/auth'),        { prefix: '/auth' });
   await app.register(require('./routes/passkey'),     { prefix: '/auth' });

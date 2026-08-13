@@ -1,8 +1,9 @@
 'use strict';
 
 const r2 = require('../services/r2');
-const { CommitMeta, Subscription, Workspace, CompactionLock } = require('../models');
+const { CommitMeta, Subscription, Workspace, CompactionLock, OrgSubscription } = require('../models');
 const mlkem = require('../lib/mlkem');
+const { getQuotaBytes } = require('../lib/plans');
 
 const COMPACT_LOCK_TTL_MS = 5 * 60 * 1000;
 const SNAPSHOT_BODY_LIMIT_BYTES = parseInt(process.env.SNAPSHOT_BODY_LIMIT_BYTES ?? '10485760', 10);
@@ -11,7 +12,6 @@ const COMMIT_ID_PATTERN = /^\d+-[a-zA-Z0-9_-]+-\d+$/;
 
 async function snapshotRoutes(app) {
   await app.register(require('../middleware/auth'));
-  await app.register(require('../middleware/subscription'));
 
   const protect = {
     preHandler: [app.authenticate],
@@ -116,18 +116,20 @@ async function snapshotRoutes(app) {
       const workspaceId = req.headers['x-workspace-id'];
 
       if (workspaceId && typeof workspaceId === 'string' && subscription && (subscription.plan === 'team' || subscription.plan === 'enterprise')) {
-        const ws = await Workspace.findById(workspaceId, { storageUsedBytes: 1 }).lean();
+        const ws = await Workspace.findById(workspaceId, { storageUsedBytes: 1, orgId: 1 }).lean();
         if (!ws) {
           return reply.status(404).send({ error: 'not_found', message: 'Workspace not found.' });
         }
         if (subscription.plan === 'team') {
+          const orgSub = ws.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
+          const quotaBytes = getQuotaBytes('team', orgSub?.seats ?? 1);
           const projectedUsage = ws.storageUsedBytes - (existingSnapshot?.sizeBytes ?? 0) + body.length;
-          if (projectedUsage > 50 * 1024 * 1024 * 1024) {
+          if (projectedUsage > quotaBytes) {
             return reply.status(507).send({
               error: 'storage_quota_exceeded',
               message: 'Snapshot would exceed workspace storage quota.',
               storageUsedBytes: ws.storageUsedBytes,
-              storageQuotaBytes: 50 * 1024 * 1024 * 1024,
+              storageQuotaBytes: quotaBytes,
             });
           }
         }

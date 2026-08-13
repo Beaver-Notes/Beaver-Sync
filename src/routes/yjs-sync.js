@@ -2,7 +2,7 @@
 
 const { z } = require('zod');
 const persistence = require('../persistence/yjs');
-const { Device, WorkspaceMember } = require('../models');
+const { Device, WorkspaceMember, Workspace, OrgSubscription } = require('../models');
 const { audit } = require('../lib/audit');
 
 const MAX_UPDATES_PER_PUSH = 200;
@@ -127,7 +127,6 @@ function summarizeStoredBatch(result) {
 
 async function yjsSyncRoutes(app) {
   await app.register(require('../middleware/auth'));
-  await app.register(require('../middleware/subscription'));
 
   const protect = { preHandler: [app.authenticate] };
   const protectWrite = { preHandler: [app.authenticate, app.requireActiveSync, app.requirePaidWrite, app.checkDeviceLimit] };
@@ -171,12 +170,22 @@ async function yjsSyncRoutes(app) {
       })),
     }));
     req.body = parsed.data;
+    let seats;
+    if (['team', 'enterprise'].includes(req.subscription?.plan)) {
+      let orgSub = req.orgSubscription;
+      if (!orgSub) {
+        const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
+        if (ws?.orgId) orgSub = await OrgSubscription.findOne({ orgId: ws.orgId }).lean();
+      }
+      seats = orgSub?.seats;
+    }
     let result;
     try {
       result = await persistence.storeNotesBatch(workspaceId, storedNotes, {
         accountId: req.userId,
         workspaceId: req.workspaceId || null,
         subscription: req.subscription,
+        seats,
       });
     } catch (error) {
       if (error.code === 'storage_quota_exceeded') {

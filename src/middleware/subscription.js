@@ -1,11 +1,9 @@
 'use strict';
 
 const fp = require('fastify-plugin');
-const { Subscription, Workspace, WorkspaceMember } = require('../models');
-const { isFreePlan } = require('../lib/plans');
+const { Subscription, Workspace, WorkspaceMember, OrgSubscription } = require('../models');
+const { getQuotaBytes, getDeviceLimit, isFreePlan } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
-
-const TEAM_WORKSPACE_QUOTA = 50 * 1024 * 1024 * 1024;
 
 async function subscriptionPlugin(app) {
   app.decorate('requireActiveSync', async function (req, reply) {
@@ -23,6 +21,11 @@ async function subscriptionPlugin(app) {
       });
       sub = await Subscription.findOne({ accountId: req.userId }).lean();
     }
+
+    const orgSub = await OrgSubscription.findOne({
+      orgId: req.body?.orgId ?? req.params?.orgId ?? null,
+    }).lean();
+    req.orgSubscription = orgSub || null;
 
     if (sub.status === 'expired') {
       return reply.status(402).send({
@@ -56,8 +59,11 @@ async function subscriptionPlugin(app) {
 
     const incomingBytes = args[0] ?? req.body?.sizeBytes ?? parseInt(req.headers['content-length'] ?? '0', 10);
 
+    const orgSub = req.orgSubscription;
+    const effectivePlan = orgSub?.plan || sub.plan;
+
     const workspaceId = req.body?.workspaceId;
-    if (workspaceId && typeof workspaceId === 'string' && (sub.plan === 'team' || sub.plan === 'enterprise')) {
+    if (workspaceId && typeof workspaceId === 'string' && orgSub) {
       const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
       if (!membership) {
         return reply.status(403).send({ error: 'forbidden', message: 'Not a member of this workspace.' });
@@ -73,19 +79,21 @@ async function subscriptionPlugin(app) {
         return reply.status(404).send({ error: 'not_found', message: 'Workspace not found.' });
       }
 
-      if (sub.plan === 'enterprise') {
+      if (effectivePlan === 'enterprise') {
         req.workspaceId = workspaceId;
         return;
       }
 
+      const quotaBytes = getQuotaBytes(effectivePlan, orgSub.seats);
       const projectedUsage = ws.storageUsedBytes + incomingBytes;
-      if (projectedUsage > TEAM_WORKSPACE_QUOTA) {
+      if (projectedUsage > quotaBytes) {
         const usedMB = (ws.storageUsedBytes / 1_048_576).toFixed(1);
+        const quotaMB = (quotaBytes / 1_048_576).toFixed(0);
         return reply.status(507).send({
           error: 'storage_quota_exceeded',
-          message: `Workspace storage full: ${usedMB} MB used of 51200 MB.`,
+          message: `Workspace storage full: ${usedMB} MB used of ${quotaMB} MB.`,
           storageUsedBytes: ws.storageUsedBytes,
-          storageQuotaBytes: TEAM_WORKSPACE_QUOTA,
+          storageQuotaBytes: quotaBytes,
           upgradeUrl: 'https://beaver.app/sync',
         });
       }
@@ -94,9 +102,9 @@ async function subscriptionPlugin(app) {
       return;
     }
 
-    if (sub.plan === 'enterprise') return;
+    if (effectivePlan === 'enterprise') return;
 
-    const quotaBytes = sub.storageQuotaBytes;
+    const quotaBytes = getQuotaBytes(effectivePlan, orgSub?.seats);
     if (quotaBytes <= 0) return;
 
     const projectedUsage = sub.storageUsedBytes + incomingBytes;
@@ -120,9 +128,8 @@ async function subscriptionPlugin(app) {
     const sub = req.subscription;
     if (!sub) return;
 
-    const DEVICE_LIMITS = { basic: 5 };
-    const MAX_DEVICES = DEVICE_LIMITS[sub.plan];
-    if (MAX_DEVICES === undefined) return;
+    const MAX_DEVICES = getDeviceLimit(sub.plan);
+    if (MAX_DEVICES === null || MAX_DEVICES === undefined) return;
 
     const { Device } = require('../models');
     const deviceId = req.headers['x-device-id'];
@@ -134,17 +141,14 @@ async function subscriptionPlugin(app) {
       });
     }
 
-    const existingDevice = await Device.findOne({
-      accountId: req.userId,
-      deviceId,
-    }).lean();
+    const existingDevice = await Device.findOne({ accountId: req.userId, deviceId }).lean();
 
     if (!existingDevice) {
       const deviceCount = await Device.countDocuments({ accountId: req.userId });
       if (deviceCount >= MAX_DEVICES) {
         return reply.status(403).send({
           error: 'device_limit_reached',
-          message: 'Your plan supports up to 5 devices. Remove a device or upgrade.',
+          message: `Your plan supports up to ${MAX_DEVICES} devices. Remove a device or upgrade.`,
           upgradeUrl: 'https://beaver.app/sync',
         });
       }
