@@ -62,7 +62,7 @@ function resetStubs() {
   models.CompactionLock.deleteOne = async () => ({ deletedCount: 1 });
   models.Subscription.findOne = () => chain({
     accountId: '507f1f77bcf86cd799439011',
-    plan: 'basic',
+    plan: 'starter',
     status: 'active',
     storageUsedBytes: 0,
     storageQuotaBytes: 4 * 1024 * 1024 * 1024,

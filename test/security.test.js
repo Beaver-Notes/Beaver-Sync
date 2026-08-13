@@ -85,13 +85,13 @@ function resetStubs() {
 
   models.Subscription.findOne = () => chain({
     accountId: 'user-a',
-    plan: 'basic',
+    plan: 'starter',
     status: 'active',
     storageUsedBytes: 0,
     storageQuotaBytes: 4 * 1024 * 1024 * 1024,
   });
   models.Subscription.updateOne = async () => ({ modifiedCount: 1 });
-  models.Subscription.findOneAndUpdate = async () => ({ id: 'sub-id', accountId: 'user-a', plan: 'basic', status: 'active' });
+  models.Subscription.findOneAndUpdate = async () => ({ id: 'sub-id', accountId: 'user-a', plan: 'starter', status: 'active' });
   models.Subscription.deleteOne = async () => ({ deletedCount: 1 });
 
   models.CommitMeta.find = () => chain([]);

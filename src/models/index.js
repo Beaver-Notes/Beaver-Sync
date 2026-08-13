@@ -466,7 +466,7 @@ function createModel(table, pkField) {
 
 const Account = createModel('accounts');
 const Session = createModel('sessions', 'id_hash');
-const CommitMeta = createModel('commits');
+const CommitMeta = createModel('commits', 'commit_id');
 const Device = createModel('devices');
 const Subscription = createModel('subscriptions');
 const Credential = createModel('credentials');

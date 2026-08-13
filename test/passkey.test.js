@@ -102,7 +102,7 @@ function resetStubs() {
   models.Session.create = async () => ({ id: 'sess-id' });
   models.Subscription.findOne = () => chain({
     accountId: '507f1f77bcf86cd799439011',
-    plan: 'basic',
+    plan: 'starter',
     status: 'active',
     storageUsedBytes: 0,
     storageQuotaBytes: 4 * 1024 * 1024 * 1024,
