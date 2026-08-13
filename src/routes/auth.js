@@ -285,7 +285,7 @@ async function authRoutes(app) {
       }
     }
 
-    const { token, workspaceId } = req.body ?? {};
+    const { token, workspaceId, noteId } = req.body ?? {};
     if (!token || typeof token !== 'string' || token.length < 32) {
       return reply.status(400).send({
         error: 'invalid_request',
@@ -320,6 +320,26 @@ async function authRoutes(app) {
       }
 
       return reply.send({ userId: result.userId, role: membership.role });
+    }
+
+    if (noteId) {
+      if (typeof noteId !== 'string' || noteId.length === 0) {
+        return reply.status(400).send({
+          error: 'invalid_request',
+          message: 'Invalid noteId.',
+        });
+      }
+
+      const { NoteInvitation } = require('../models');
+      const collab = await NoteInvitation.findOne({ noteId, userId: result.userId }).lean();
+      if (!collab) {
+        return reply.status(403).send({
+          error: 'forbidden',
+          message: 'Not a collaborator on this note.',
+        });
+      }
+
+      return reply.send({ userId: result.userId, role: collab.role === 'viewer' ? 'viewer' : 'editor' });
     }
 
     return reply.send({ userId: result.userId });

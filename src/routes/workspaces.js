@@ -259,6 +259,16 @@ async function workspaceRoutes(app) {
       return reply.status(409).send({ error: 'already_member', message: 'User is already a member of this workspace.' });
     }
 
+    const { Subscription } = require('../models');
+    const targetSub = await Subscription.findOne({ accountId: target.id }).lean();
+    const targetPlan = targetSub?.plan || 'free';
+    if (targetPlan === 'free') {
+      return reply.status(403).send({
+        error: 'plan_upgrade_required',
+        message: 'Free accounts can only be note collaborators, not workspace members.',
+      });
+    }
+
     const rawToken = crypto.randomBytes(32).toString('base64url');
     const tokenHash = hashToken(rawToken);
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
@@ -275,7 +285,13 @@ async function workspaceRoutes(app) {
     });
 
     const inviter = await Account.findById(req.userId, { username: 1 }).lean();
-    sendWorkspaceInviteEmail(app, target.id, { inviterName: inviter?.username || 'Someone' });
+    const wsName = await Workspace.findById(workspaceId, { nameEncrypted: 1 }).lean();
+    sendWorkspaceInviteEmail(app, target.id, {
+      inviterName: inviter?.username || 'Someone',
+      workspaceName: wsName?.nameEncrypted || 'a workspace',
+      inviteUrl: `${process.env.INVITE_URL_SCHEME ?? 'beaver-notes://'}join/${rawToken}`,
+      expiresIn: '7 days',
+    });
 
     app.log.info({ workspaceId, invitedUser: target.id, byUser: req.userId }, 'Workspace invite created');
     audit(req, 'member_added', { workspaceId, targetUserId: target.id, role: inviteRole });
@@ -359,6 +375,15 @@ async function workspaceRoutes(app) {
     const joiner = await Account.findById(req.userId, { kemPublicKey: 1 }).lean();
     if (!joiner || !joiner.kemPublicKey) {
       return reply.status(403).send({ error: 'keypair_required', message: 'Set up end-to-end encryption before joining.' });
+    }
+
+    const { Subscription } = require('../models');
+    const joinerSub = await Subscription.findOne({ accountId: req.userId }).lean();
+    if ((joinerSub?.plan || 'free') === 'free') {
+      return reply.status(403).send({
+        error: 'plan_upgrade_required',
+        message: 'Free accounts can only be note collaborators, not workspace members.',
+      });
     }
 
     await WorkspaceMember.create({ workspaceId: invite.workspaceId, accountId: req.userId, role: invite.role, createdAt: new Date() });

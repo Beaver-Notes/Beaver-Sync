@@ -39,6 +39,21 @@ async function register(plan) {
   return account;
 }
 
+async function registerWithEmail(plan, email) {
+  const account = await models.Account.create({
+    emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY)
+      .update(email).digest('hex'),
+    emailEncrypted: 'e',
+    passwordHash: '$2b$12$test',
+    kdfSalt: crypto.randomBytes(32).toString('hex'),
+  });
+  await models.Subscription.create({
+    accountId: account.id, plan, status: 'active',
+    storageQuotaBytes: plan === 'free' ? 0 : 1024, storageUsedBytes: 0, createdAt: new Date(),
+  });
+  return account;
+}
+
 async function seedOrg(orgId, ownerId, plan) {
   await models.Organization.create({ id: orgId, nameEncrypted: 'e', slug: `slug-${orgId}`, createdAt: new Date() });
   await models.OrgMember.create({ orgId, accountId: ownerId, role: 'owner', createdAt: new Date() });
@@ -97,6 +112,77 @@ test('member invite with guest role is rejected', async (t) => {
 
   assert.equal(res.statusCode, 400);
   assert.equal(res.json().error, 'invalid_role');
+});
+
+test('member invite for a free-plan user is rejected', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const owner = await register('pro');
+  await seedOrg('org-free-invite', owner.id, 'pro');
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-free-invite', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+
+  await registerWithEmail('free', 'free-invite@example.com');
+  const res = await app.inject({
+    method: 'POST', url: `/workspaces/${ws.id}/members`,
+    headers: { authorization: `Bearer ${signToken(owner.id)}`, 'content-type': 'application/json' },
+    payload: { email: 'free-invite@example.com', role: 'viewer' },
+  });
+
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'plan_upgrade_required');
+});
+
+test('free-plan user cannot join a workspace via invite', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const owner = await register('pro');
+  await seedOrg('org-free-join', owner.id, 'pro');
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-free-join', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+
+  const rawToken = crypto.randomBytes(32).toString('base64url');
+  const tokenHash = crypto.createHmac('sha256', process.env.SESSION_HMAC_KEY).update(rawToken).digest('hex');
+  await models.WorkspaceInvite.create({
+    tokenHash, workspaceId: ws.id, role: 'viewer', requireApproval: 0,
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), maxUses: 0, usedCount: 0, createdAt: new Date(),
+  });
+
+  const freeJoiner = await register('free');
+  await models.Account.updateOne({ _id: freeJoiner.id }, { $set: { kemPublicKey: 'free-joiner-pub' } });
+  const res = await app.inject({
+    method: 'POST', url: `/workspaces/join/${rawToken}`,
+    headers: { authorization: `Bearer ${signToken(freeJoiner.id)}` },
+  });
+
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'plan_upgrade_required');
+});
+
+test('paid user can join a workspace via invite', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const owner = await register('pro');
+  await seedOrg('org-paid-join', owner.id, 'pro');
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-paid-join', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+
+  const rawToken = crypto.randomBytes(32).toString('base64url');
+  const tokenHash = crypto.createHmac('sha256', process.env.SESSION_HMAC_KEY).update(rawToken).digest('hex');
+  await models.WorkspaceInvite.create({
+    tokenHash, workspaceId: ws.id, role: 'viewer', requireApproval: 0,
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), maxUses: 0, usedCount: 0, createdAt: new Date(),
+  });
+
+  const paidJoiner = await register('pro');
+  await models.Account.updateOne({ _id: paidJoiner.id }, { $set: { kemPublicKey: 'paid-joiner-pub' } });
+  const res = await app.inject({
+    method: 'POST', url: `/workspaces/join/${rawToken}`,
+    headers: { authorization: `Bearer ${signToken(paidJoiner.id)}` },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().role, 'viewer');
 });
 
 test('workspace audit logs require an enterprise plan', async (t) => {

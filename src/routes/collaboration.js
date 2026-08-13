@@ -266,8 +266,24 @@ async function collaborationRoutes(app) {
     const role = req.body.role === 'viewer' ? 'viewer' : 'editor';
     await NoteInvitation.create({ noteId, userId: target.id, invitedBy: req.userId, role, createdAt: new Date() });
 
+    const rawToken = crypto.randomBytes(32).toString('base64url');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    await NoteInviteLink.create({
+      tokenHash,
+      noteId,
+      role,
+      createdBy: req.userId,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      createdAt: new Date(),
+    });
+
     const inviter = await Account.findById(req.userId, { username: 1 }).lean();
-    sendNoteInviteEmail(app, target.id, { inviterName: inviter?.username || 'Someone' });
+    sendNoteInviteEmail(app, target.id, {
+      inviterName: inviter?.username || 'Someone',
+      noteTitle: noteId, // title is encrypted server-side; pass noteId as a stable label
+      inviteUrl: `${process.env.INVITE_URL_SCHEME ?? 'beaver-notes://'}join/${rawToken}`,
+      expiresIn: '7 days',
+    });
 
     app.log.info({ noteId, invitedUser: target.id, byUser: req.userId }, 'User invited to note');
 

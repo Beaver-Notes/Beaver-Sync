@@ -40,10 +40,13 @@ async function startHocuspocus() {
       }
 
       // /auth/verify-session validates membership when workspaceId is provided (returns role)
+      const body = { token, workspaceId };
+      if (noteId) body.noteId = noteId;
+
       const response = await fetch(`${AUTH_BACKEND_URL}/auth/verify-session`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ token, workspaceId }),
+        body: JSON.stringify(body),
       });
 
       if (response.status === 403) {

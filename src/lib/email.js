@@ -79,6 +79,11 @@ async function sendWithAlias(app, accountId, subject, html) {
     return;
   }
 
+  if (process.env.EMAIL_ENABLED === "false") {
+    app.log.debug("EMAIL_ENABLED=false - skipping email send");
+    return;
+  }
+
   try {
     const { Account } = require("../models");
     const account = await Account.findById(accountId, {
