@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember, OrgKey, OrgInvite } = require('../models');
 const { requireOrgMember, requireOrgAdmin, requireOrgOwner } = require('../middleware/org');
 
-const VALID_PLANS = new Set(['free', 'basic', 'pro', 'team', 'enterprise']);
+const VALID_PLANS = new Set(['free', 'starter', 'pro', 'team', 'enterprise']);
 
 async function organizationRoutes(app) {
   await app.register(require('../middleware/auth'));

@@ -1,9 +1,11 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember } = require('../models');
+const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember, Subscription, OrgSubscription } = require('../models');
 const { audit } = require('../lib/audit');
 const { sendWorkspaceInviteEmail } = require('../email');
+const { isFreePlan } = require('../lib/plans');
+const { isEnterpriseMode } = require('../lib/license');
 
 const BODY_LIMIT = parseInt(process.env.WORKSPACE_BODY_LIMIT_BYTES ?? '8192', 10);
 
@@ -56,6 +58,23 @@ async function workspaceRoutes(app) {
     for (const r of recipients) {
       if (!r || typeof r.userId !== 'string' || typeof r.wrappedKey !== 'string' || !r.wrappedKey) {
         return reply.status(400).send({ error: 'validation_error', message: 'Each recipient needs userId and wrappedKey.' });
+      }
+    }
+
+    if (!isEnterpriseMode()) {
+      const sub = await Subscription.findOne({ accountId: req.userId }).lean();
+      const orgSub = orgId ? await OrgSubscription.findOne({ orgId }).lean() : null;
+      const plan = orgSub?.plan || sub?.plan || 'free';
+
+      if (isFreePlan(plan)) {
+        return reply.status(403).send({ error: 'plan_upgrade_required', message: 'Cloud workspaces require a paid plan.' });
+      }
+
+      if (plan === 'starter' || plan === 'pro') {
+        const owned = await Workspace.countDocuments({ ownerId: req.userId });
+        if (owned >= 1) {
+          return reply.status(403).send({ error: 'workspace_limit_reached', message: 'Your plan includes one personal workspace.' });
+        }
       }
     }
 
@@ -210,6 +229,11 @@ async function workspaceRoutes(app) {
     }
 
     const inviteRole = role === 'viewer' ? 'viewer' : role === 'guest' ? 'guest' : 'editor';
+
+    if (inviteRole === 'guest') {
+      return reply.status(400).send({ error: 'invalid_role', message: 'The guest role is no longer supported. Use per-note collaboration instead.' });
+    }
+
     const requireApproval = body.requireApproval ? 1 : 0;
 
     let target = null;

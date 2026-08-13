@@ -191,6 +191,15 @@ async function adminRoutes(app) {
     ...protect,
   }, async (req, reply) => {
     const workspaceId = req.params.id;
+
+    if (!isEnterpriseMode()) {
+      const { Subscription } = require('../models');
+      const sub = await Subscription.findOne({ accountId: req.userId }).lean();
+      if (!sub || sub.plan !== 'enterprise') {
+        return reply.status(403).send({ error: 'forbidden', message: 'Audit logs require an Enterprise plan.' });
+      }
+    }
+
     const ownerCheck = await requirePlanAndOwner(app, req, reply, workspaceId);
     if (!ownerCheck) return;
 
