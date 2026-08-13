@@ -122,6 +122,49 @@ test('GET /plans resolves the org plan from a workspaceId in the query', async (
   assert.equal(res.json().plan, 'team');
 });
 
+test('GET /plans does not leak another org plan to a non-member', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const otherOwner = await register('free');
+  await seedOrg('org-leak-b', otherOwner.id, 'team');
+
+  const caller = await register('starter');
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/plans?orgId=org-leak-b',
+    headers: authHeader(caller),
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.plan, 'starter');
+  assert.equal(body.flags.teamWorkspaces, false);
+  assert.equal(body.quotaBytes, 10 * 1024 ** 3);
+});
+
+test('GET /plans resolves the org plan for a workspace member who is not an org member', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const owner = await register('pro');
+  await seedOrg('org-ws-member', owner.id, 'team');
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-ws-member', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+
+  const member = await register('free');
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: member.id, role: 'editor', createdAt: new Date() });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: `/plans?workspaceId=${ws.id}`,
+    headers: authHeader(member),
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().plan, 'team');
+  assert.equal(res.json().seats, 1);
+});
+
 test('member-lookup finds a user by username', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());

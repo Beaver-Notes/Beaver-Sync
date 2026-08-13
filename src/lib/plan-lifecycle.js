@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { Subscription, Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember } = require('../models');
 const { getQuotaBytes, getHistoryDays } = require('./plans');
+const { isOrgParticipant } = require('./plan-resolution');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -59,13 +60,16 @@ function historyCutoffTs(plan, now = Date.now()) {
 }
 
 // Resolves the effective plan for an account (org subscription wins when the
-// workspace belongs to a team/enterprise org) and returns the history cutoff.
+// workspace belongs to a team/enterprise org AND the account participates in
+// that org) and returns the history cutoff. A note collaborator who is not a
+// workspace/org member must never inherit the org's window — their personal
+// plan (free → 0 days) governs instead.
 async function historyCutoffForAccount(accountId, workspaceId = null) {
   const sub = await Subscription.findOne({ accountId }).lean();
   let plan = sub?.plan || 'free';
   if (workspaceId) {
     const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
-    if (ws?.orgId) {
+    if (ws?.orgId && (await isOrgParticipant(ws.orgId, accountId))) {
       const orgSub = await OrgSubscription.findOne({ orgId: ws.orgId }).lean();
       if (orgSub?.plan) plan = orgSub.plan;
     }

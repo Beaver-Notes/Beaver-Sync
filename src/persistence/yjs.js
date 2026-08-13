@@ -163,14 +163,17 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
     }
 
     if (quota && acceptedBytes > 0 && quota.subscription) {
+      // quota.plan carries the org-first effective plan (team-org members are
+      // charged against the pooled org quota even with a personal plan).
+      const plan = quota.plan || quota.subscription.plan;
       let result;
-      if (quota.workspaceId && ['team', 'enterprise'].includes(quota.subscription.plan)) {
-        const quotaBytes = getQuotaBytes(quota.subscription.plan, quota.seats);
+      if (quota.workspaceId && ['team', 'enterprise'].includes(plan)) {
+        const quotaBytes = getQuotaBytes(plan, quota.seats);
         result = await client.query(`UPDATE workspaces SET storage_used_bytes = storage_used_bytes + $1
           WHERE id = $2 AND ($3 = 'enterprise' OR storage_used_bytes + $1 <= $4)`,
-          [acceptedBytes, quota.workspaceId, quota.subscription.plan, quotaBytes]);
-      } else if (quota.subscription.plan !== 'enterprise') {
-        const quotaBytes = getQuotaBytes(quota.subscription.plan);
+          [acceptedBytes, quota.workspaceId, plan, quotaBytes]);
+      } else if (plan !== 'enterprise') {
+        const quotaBytes = getQuotaBytes(plan);
         result = await client.query(`UPDATE subscriptions SET storage_used_bytes = storage_used_bytes + $1
           WHERE account_id = $2 AND storage_used_bytes + $1 <= $3`,
           [acceptedBytes, quota.accountId, quotaBytes]);

@@ -26,6 +26,7 @@ process.env.EMAIL_HMAC_KEY = process.env.EMAIL_HMAC_KEY || 'test-email-hmac-key-
 
 const { VALID_PLANS } = require(path.join(repoRoot, 'src', 'lib', 'plans'));
 const { Account, Subscription } = require(path.join(repoRoot, 'src', 'models'));
+const { ensurePaidProvisioning } = require(path.join(repoRoot, 'src', 'lib', 'plan-lifecycle'));
 const crypto = require('node:crypto');
 const bcrypt = require('bcrypt');
 const { close } = require(path.join(repoRoot, 'src', 'db'));
@@ -47,13 +48,20 @@ function createEmailHash(raw) {
 
 (async () => {
   const emailHash = createEmailHash(email);
-  const existing = await Account.findOne({ emailHmac: emailHash }).lean();
-  if (existing) {
-    console.log(`Account for ${email} already exists (id ${existing.id}); not re-seeding.`);
+  let account = await Account.findOne({ emailHmac: emailHash }).lean();
+
+  if (account) {
+    // Idempotent: re-run provisions the org + personal workspace if the
+    // account exists but was seeded before provisioning was added.
+    const provisioning = await ensurePaidProvisioning(account.id);
+    console.log(`Account for ${email} already exists (id ${account.id}); not re-seeding.`);
+    if (provisioning.orgId) {
+      console.log(`Provisioned org ${provisioning.orgId} + workspace ${provisioning.workspaceId}.`);
+    }
     process.exit(0);
   }
 
-  const account = await Account.create({
+  account = await Account.create({
     emailHmac: emailHash,
     emailEncrypted: 'e',
     passwordHash: await bcrypt.hash(password, 12),
@@ -68,7 +76,13 @@ function createEmailHash(raw) {
     storageUsedBytes: 0,
   });
 
-  console.log(`Created account ${account.id} as ${plan}`);
+  // Paid tiers get their org + personal workspace provisioned so a seeded
+  // team/enterprise account can actually create workspaces and /plans reports
+  // the org tier (free accounts are collaborator-only and get no org).
+  const provisioning = await ensurePaidProvisioning(account.id);
+
+  console.log(`Created account ${account.id} as ${plan}`
+    + (provisioning.orgId ? ` (org ${provisioning.orgId}, workspace ${provisioning.workspaceId})` : ''));
   process.exit(0);
 })().catch((err) => {
   console.error(err);

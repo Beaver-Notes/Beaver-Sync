@@ -1,9 +1,10 @@
 'use strict';
 
 const r2 = require('../services/r2');
-const { CommitMeta, Subscription, Workspace, CompactionLock, OrgSubscription } = require('../models');
+const { CommitMeta, Subscription, Workspace, CompactionLock } = require('../models');
 const mlkem = require('../lib/mlkem');
 const { getQuotaBytes } = require('../lib/plans');
+const { resolveEffectivePlan } = require('../lib/plan-resolution');
 
 const COMPACT_LOCK_TTL_MS = 5 * 60 * 1000;
 const SNAPSHOT_BODY_LIMIT_BYTES = parseInt(process.env.SNAPSHOT_BODY_LIMIT_BYTES ?? '10485760', 10);
@@ -112,17 +113,16 @@ async function snapshotRoutes(app) {
       }
 
       const existingSnapshot = await r2.stat(r2.snapshotKey(userId));
-      const subscription = await Subscription.findOne({ accountId: userId }).lean();
+      const { plan: effectivePlan, seats, sub: subscription } = await resolveEffectivePlan(req);
       const workspaceId = req.headers['x-workspace-id'];
 
-      if (workspaceId && typeof workspaceId === 'string' && subscription && (subscription.plan === 'team' || subscription.plan === 'enterprise')) {
+      if (workspaceId && typeof workspaceId === 'string' && ['team', 'enterprise'].includes(effectivePlan)) {
         const ws = await Workspace.findById(workspaceId, { storageUsedBytes: 1, orgId: 1 }).lean();
         if (!ws) {
           return reply.status(404).send({ error: 'not_found', message: 'Workspace not found.' });
         }
-        if (subscription.plan === 'team') {
-          const orgSub = ws.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
-          const quotaBytes = getQuotaBytes('team', orgSub?.seats ?? 1);
+        if (effectivePlan === 'team') {
+          const quotaBytes = getQuotaBytes('team', seats);
           const projectedUsage = ws.storageUsedBytes - (existingSnapshot?.sizeBytes ?? 0) + body.length;
           if (projectedUsage > quotaBytes) {
             return reply.status(507).send({
@@ -134,18 +134,19 @@ async function snapshotRoutes(app) {
           }
         }
         req.workspaceId = workspaceId;
-      } else if (subscription && subscription.plan !== 'enterprise') {
+      } else if (effectivePlan !== 'enterprise') {
+        const quotaBytes = getQuotaBytes(effectivePlan, seats);
         const projectedUsage =
-          subscription.storageUsedBytes -
+          (subscription?.storageUsedBytes ?? 0) -
           (existingSnapshot?.sizeBytes ?? 0) +
           body.length;
 
-        if (projectedUsage > subscription.storageQuotaBytes) {
+        if (projectedUsage > quotaBytes) {
           return reply.status(507).send({
             error: 'storage_quota_exceeded',
             message: 'Snapshot would exceed your storage quota.',
-            storageUsedBytes: subscription.storageUsedBytes,
-            storageQuotaBytes: subscription.storageQuotaBytes,
+            storageUsedBytes: subscription?.storageUsedBytes ?? 0,
+            storageQuotaBytes: quotaBytes,
           });
         }
       }

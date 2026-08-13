@@ -1,11 +1,12 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember, Subscription, OrgSubscription } = require('../models');
+const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember, Subscription } = require('../models');
 const { audit } = require('../lib/audit');
 const { sendWorkspaceInviteEmail } = require('../email');
-const { isFreePlan } = require('../lib/plans');
+const { isFreePlan, resolvePlanForAccount } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
+const { resolveOrgSubscription } = require('../lib/plan-resolution');
 
 const BODY_LIMIT = parseInt(process.env.WORKSPACE_BODY_LIMIT_BYTES ?? '8192', 10);
 
@@ -63,15 +64,17 @@ async function workspaceRoutes(app) {
 
     if (!isEnterpriseMode()) {
       const sub = await Subscription.findOne({ accountId: req.userId }).lean();
-      const orgSub = orgId ? await OrgSubscription.findOne({ orgId }).lean() : null;
-      const plan = orgSub?.plan || sub?.plan || 'free';
+      const orgSub = orgId ? await resolveOrgSubscription(orgId, req.userId) : null;
+      const plan = resolvePlanForAccount({ orgSub, sub });
 
       if (isFreePlan(plan)) {
         return reply.status(403).send({ error: 'plan_upgrade_required', message: 'Cloud workspaces require a paid plan.' });
       }
 
       if (plan === 'starter' || plan === 'pro') {
-        const owned = await Workspace.countDocuments({ ownerId: req.userId });
+        // Count per-org: a shared team workspace the user owns in another org
+        // must not block provisioning their personal workspace here.
+        const owned = await Workspace.countDocuments({ ownerId: req.userId, orgId });
         if (owned >= 1) {
           return reply.status(403).send({ error: 'workspace_limit_reached', message: 'Your plan includes one personal workspace.' });
         }
@@ -260,13 +263,15 @@ async function workspaceRoutes(app) {
     }
 
     const { Subscription } = require('../models');
-    const targetSub = await Subscription.findOne({ accountId: target.id }).lean();
-    const targetPlan = targetSub?.plan || 'free';
-    if (targetPlan === 'free') {
-      return reply.status(403).send({
-        error: 'plan_upgrade_required',
-        message: 'Free accounts can only be note collaborators, not workspace members.',
-      });
+    if (!isEnterpriseMode()) {
+      const targetSub = await Subscription.findOne({ accountId: target.id }).lean();
+      const targetPlan = targetSub?.plan || 'free';
+      if (targetPlan === 'free') {
+        return reply.status(403).send({
+          error: 'plan_upgrade_required',
+          message: 'Free accounts can only be note collaborators, not workspace members.',
+        });
+      }
     }
 
     const rawToken = crypto.randomBytes(32).toString('base64url');
@@ -378,12 +383,14 @@ async function workspaceRoutes(app) {
     }
 
     const { Subscription } = require('../models');
-    const joinerSub = await Subscription.findOne({ accountId: req.userId }).lean();
-    if ((joinerSub?.plan || 'free') === 'free') {
-      return reply.status(403).send({
-        error: 'plan_upgrade_required',
-        message: 'Free accounts can only be note collaborators, not workspace members.',
-      });
+    if (!isEnterpriseMode()) {
+      const joinerSub = await Subscription.findOne({ accountId: req.userId }).lean();
+      if ((joinerSub?.plan || 'free') === 'free') {
+        return reply.status(403).send({
+          error: 'plan_upgrade_required',
+          message: 'Free accounts can only be note collaborators, not workspace members.',
+        });
+      }
     }
 
     await WorkspaceMember.create({ workspaceId: invite.workspaceId, accountId: req.userId, role: invite.role, createdAt: new Date() });

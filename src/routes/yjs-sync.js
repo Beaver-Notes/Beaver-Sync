@@ -2,9 +2,10 @@
 
 const { z } = require('zod');
 const persistence = require('../persistence/yjs');
-const { Device, WorkspaceMember, Workspace, OrgSubscription } = require('../models');
+const { Device, WorkspaceMember } = require('../models');
 const { audit } = require('../lib/audit');
 const { historyCutoffForAccount } = require('../lib/plan-lifecycle');
+const { resolveEffectivePlan } = require('../lib/plan-resolution');
 
 const MAX_UPDATES_PER_PUSH = 200;
 const MAX_UPDATES_PER_PULL = 500;
@@ -171,21 +172,14 @@ async function yjsSyncRoutes(app) {
       })),
     }));
     req.body = parsed.data;
-    let seats;
-    if (['team', 'enterprise'].includes(req.subscription?.plan)) {
-      let orgSub = req.orgSubscription;
-      if (!orgSub) {
-        const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
-        if (ws?.orgId) orgSub = await OrgSubscription.findOne({ orgId: ws.orgId }).lean();
-      }
-      seats = orgSub?.seats;
-    }
+    const { plan: effectivePlan, seats } = await resolveEffectivePlan(req);
     let result;
     try {
       result = await persistence.storeNotesBatch(workspaceId, storedNotes, {
         accountId: req.userId,
         workspaceId: req.workspaceId || null,
         subscription: req.subscription,
+        plan: effectivePlan,
         seats,
       });
     } catch (error) {

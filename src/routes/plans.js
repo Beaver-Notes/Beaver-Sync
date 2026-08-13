@@ -2,6 +2,7 @@
 
 const { getQuotaBytes, getHistoryDays, getDeviceLimit, getFlags } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
+const { resolveEffectivePlan } = require('../lib/plan-resolution');
 
 async function plansRoutes(app) {
   await app.register(require('../middleware/auth'));
@@ -19,16 +20,15 @@ async function plansRoutes(app) {
       });
     }
 
-    const sub = req.subscription;
-    const orgSub = req.orgSubscription;
-    const plan = orgSub?.plan || sub?.plan || 'free';
+    const { plan, seats, orgSub } = await resolveEffectivePlan(req);
 
     return reply.send({
       plan,
       flags: getFlags(plan),
-      quotaBytes: getQuotaBytes(plan, orgSub?.seats),
+      quotaBytes: getQuotaBytes(plan, seats),
       historyDays: getHistoryDays(plan),
       deviceLimit: getDeviceLimit(plan),
+      seats: orgSub?.seats ?? null,
     });
   });
 }

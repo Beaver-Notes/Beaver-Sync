@@ -1,9 +1,10 @@
 'use strict';
 
 const fp = require('fastify-plugin');
-const { Subscription, Workspace, WorkspaceMember, OrgSubscription } = require('../models');
+const { Subscription, Workspace, WorkspaceMember } = require('../models');
 const { getQuotaBytes, getDeviceLimit, isFreePlan, resolvePlanForAccount } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
+const { resolveOrgSubscription } = require('../lib/plan-resolution');
 
 async function subscriptionPlugin(app) {
   app.decorate('requireActiveSync', async function (req, reply) {
@@ -23,12 +24,17 @@ async function subscriptionPlugin(app) {
     }
 
     let orgId = req.body?.orgId ?? req.params?.orgId ?? req.query?.orgId ?? null;
-    const workspaceId = req.body?.workspaceId ?? req.params?.workspaceId ?? req.query?.workspaceId ?? null;
+    const workspaceId =
+      req.body?.workspaceId ??
+      req.params?.workspaceId ??
+      req.query?.workspaceId ??
+      req.headers?.['x-workspace-id'] ??
+      null;
     if (!orgId && workspaceId && typeof workspaceId === 'string') {
       const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
       if (ws) orgId = ws.orgId;
     }
-    const orgSub = orgId ? await OrgSubscription.findOne({ orgId }).lean() : null;
+    const orgSub = orgId ? await resolveOrgSubscription(orgId, req.userId) : null;
     req.orgSubscription = orgSub || null;
 
     if (sub.status === 'expired') {

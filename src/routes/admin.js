@@ -3,6 +3,7 @@
 const { Workspace, WorkspaceMember, Device, Session, AuditLog } = require('../models');
 const mlkem = require('../lib/mlkem');
 const { isEnterpriseMode } = require('../lib/license');
+const { resolvePlanForAccount } = require('../lib/plans');
 
 const BODY_LIMIT = parseInt(process.env.ADMIN_BODY_LIMIT_BYTES ?? '4096', 10);
 
@@ -28,7 +29,7 @@ async function requirePlanAndOwner(app, req, reply, workspaceId) {
     const { Subscription, OrgSubscription } = require('../models');
     sub = await Subscription.findOne({ accountId: req.userId }).lean();
     const orgSub = ws.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
-    const effectivePlan = orgSub?.plan || sub?.plan;
+    const effectivePlan = resolvePlanForAccount({ orgSub, sub });
     if (!effectivePlan || (effectivePlan !== 'team' && effectivePlan !== 'enterprise')) {
       return reply.status(403).send({ error: 'forbidden', message: 'Admin routes require a Team or Enterprise plan.' });
     }
@@ -200,7 +201,7 @@ async function adminRoutes(app) {
 
       const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
       const orgSub = ws?.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
-      const isEnterprise = sub?.plan === 'enterprise' || orgSub?.plan === 'enterprise';
+      const isEnterprise = resolvePlanForAccount({ orgSub, sub }) === 'enterprise';
 
       if (!isEnterprise) {
         return reply.status(403).send({ error: 'forbidden', message: 'Audit logs require an Enterprise plan.' });

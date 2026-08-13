@@ -96,6 +96,22 @@ test('starter plan blocked when already owning one workspace', async (t) => {
   assert.equal(res.json().error, 'workspace_limit_reached');
 });
 
+test('starter plan workspace count is per-org', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const account = await register('starter');
+  await seedOrg('org-count-a', account.id, 'starter');
+  await models.Workspace.create({ nameEncrypted: 'e', ownerId: account.id, orgId: 'org-count-a', createdAt: new Date() });
+
+  await seedOrg('org-count-b', account.id, 'starter');
+  const res = await workspaceInject(app, account, {
+    nameEncrypted: 'e',
+    recipients: [{ userId: account.id, wrappedKey: 'w' }],
+    orgId: 'org-count-b',
+  });
+  assert.equal(res.statusCode, 201);
+});
+
 test('member invite with guest role is rejected', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
