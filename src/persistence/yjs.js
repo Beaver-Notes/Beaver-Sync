@@ -317,9 +317,8 @@ async function loadUpdatesSince(workspaceId, noteId, sinceTs) {
 async function loadAllUpdates(workspaceId, noteId, sinceTs = 0) {
   let historyClamp = '';
   const params = [workspaceId, noteId];
-  let paramIdx = 3;
   if (sinceTs > 0) {
-    historyClamp = ` AND created_at >= $${paramIdx++}`;
+    historyClamp = ' AND created_at >= $3';
     params.push(new Date(sinceTs).toISOString());
   }
   const { rows } = await query(`
