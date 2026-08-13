@@ -25,21 +25,35 @@ flowchart LR
 
 ## Features
 
-| Feature | Free | Basic ($4/mo) | Pro ($9/mo) | Team ($12/seat/mo) | Enterprise |
+| Feature | Free | Starter | Pro | Team | Enterprise |
 |---|---|---|---|---|---|
-| Version history | ✗ | 30 days | ✓ | ✓ | ✓ |
-| Encrypted cloud sync | BYO Cloud | ✓ | ✓ | ✓ | ✓ |
-| Cloud storage | ✗ | 4 GB | 10 GB | 50 GB | Unlimited |
-| End-to-end encryption | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Quantum-resistant encryption | (only for Beaver Sync) | ✓ | ✓ | ✓ | ✓ |
-| Real-time multiplayer editing | (editor only on invite) | ✓ | ✓ | ✓ | ✓ |
+| Notes & editor | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Sync container | Folder only | Personal workspace | Personal workspace | Personal + shared team workspaces | Personal + shared team workspaces |
+| Receive shared notes | ✓ (as note collaborator) | ✓ | ✓ | ✓ | ✓ |
+| Invite / share notes | ✗ | ✓ | ✓ | ✓ | ✓ |
+| Collaborators (page-scoped) | ✗ | ✗ | ✗ | ✓ | ✓ |
 | Team workspaces & permissions | ✗ | ✗ | ✗ | ✓ | ✓ |
-| Guest access | ✗ | ✗ | ✗ | ✓ | ✓ |
 | Admin dashboard | ✗ | ✗ | ✗ | ✓ | ✓ |
 | Audit logs | ✗ | ✗ | ✗ | ✗ | ✓ |
 | SSO / SAML | ✗ | ✗ | ✗ | ✗ | ✓ |
-| GDPR data export & deletion | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Self-hosted | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Cloud storage | 0 | 10 GB | 50 GB | 100 GB + 25 GB × seats | Contractual |
+| Version history | ✗ | 30 days | 1 year | 1 year | Contractual |
 | Device limit | Unlimited | 5 | Unlimited | Unlimited | Unlimited |
+
+## Local testing (production mode)
+
+Run the backend exactly like production (fly.io) locally:
+
+```bash
+PLAN_OVERRIDE=team docker compose -f docker-compose.test.yml up -d
+```
+
+- `PLAN_OVERRIDE` forces every account to the given tier (free|starter|pro|team|enterprise).
+- `EMAIL_ENABLED=false` disables all Resend sends in this environment.
+- Seed a tier-specific account: `npm run seed:tier -- team tester@example.com`
+- Frontend: point `VITE_BEAVER_SYNC_API_URL=http://localhost:3000` and
+  `VITE_BEAVER_SYNC_WS_URL=ws://localhost:8080` (defaults already).
 
 ## Quick Start (Development)
 
