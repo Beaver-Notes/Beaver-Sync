@@ -85,6 +85,43 @@ test('GET /plans requires authentication', async (t) => {
   assert.equal(res.statusCode, 401);
 });
 
+test('GET /plans resolves the org plan when an orgId is supplied', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const account = await register('free');
+  await seedOrg('org-plans-1', account.id, 'team');
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/plans?orgId=org-plans-1',
+    headers: authHeader(account),
+  });
+  assert.equal(res.statusCode, 200);
+  const body = res.json();
+  assert.equal(body.plan, 'team');
+  assert.equal(body.quotaBytes, 100 * 1024 ** 3 + 25 * 1024 ** 3);
+  assert.equal(body.flags.teamWorkspaces, true);
+});
+
+test('GET /plans resolves the org plan from a workspaceId in the query', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const owner = await register('pro');
+  await seedOrg('org-plans-2', owner.id, 'team');
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-plans-2', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: `/plans?workspaceId=${ws.id}`,
+    headers: authHeader(owner),
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().plan, 'team');
+});
+
 test('member-lookup finds a user by username', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
@@ -291,4 +328,79 @@ test('PATCH member role returns 404 for a non-member target', async (t) => {
   });
   assert.equal(res.statusCode, 404);
   assert.equal(res.json().error, 'not_found');
+});
+
+test('PATCH member role rejects admin self-promotion to owner', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const owner = await register('pro');
+  await seedOrg('org-patch-6', owner.id, 'free');
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-patch-6', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+
+  const admin = await register('free');
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: admin.id, role: 'admin', createdAt: new Date() });
+
+  const res = await app.inject({
+    method: 'PATCH',
+    url: `/workspaces/${ws.id}/members/${admin.id}`,
+    headers: { ...authHeader(admin), 'content-type': 'application/json' },
+    payload: { role: 'owner' },
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json().error, 'cannot_promote_self');
+
+  const row = await models.WorkspaceMember.findOne({ workspaceId: ws.id, accountId: admin.id }).lean();
+  assert.equal(row.role, 'admin');
+});
+
+test('PATCH member role rejects an admin demoting the owner', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const owner = await register('pro');
+  await seedOrg('org-patch-7', owner.id, 'free');
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-patch-7', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+
+  const admin = await register('free');
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: admin.id, role: 'admin', createdAt: new Date() });
+
+  const res = await app.inject({
+    method: 'PATCH',
+    url: `/workspaces/${ws.id}/members/${owner.id}`,
+    headers: { ...authHeader(admin), 'content-type': 'application/json' },
+    payload: { role: 'admin' },
+  });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
+
+  const row = await models.WorkspaceMember.findOne({ workspaceId: ws.id, accountId: owner.id }).lean();
+  assert.equal(row.role, 'owner');
+});
+
+test('PATCH member role allows owner to promote an admin to owner', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const owner = await register('pro');
+  await seedOrg('org-patch-8', owner.id, 'free');
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-patch-8', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+
+  const admin = await register('free');
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: admin.id, role: 'admin', createdAt: new Date() });
+
+  const res = await app.inject({
+    method: 'PATCH',
+    url: `/workspaces/${ws.id}/members/${admin.id}`,
+    headers: { ...authHeader(owner), 'content-type': 'application/json' },
+    payload: { role: 'owner' },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().updated, true);
+
+  const row = await models.WorkspaceMember.findOne({ workspaceId: ws.id, accountId: admin.id }).lean();
+  assert.equal(row.role, 'owner');
 });

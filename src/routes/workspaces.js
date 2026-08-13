@@ -412,8 +412,9 @@ async function workspaceRoutes(app) {
     const workspaceId = req.params.id;
     const targetUserId = req.params.uid;
 
+    let actorMembership;
     try {
-      await requireMember(app, req.userId, workspaceId, new Set(['owner', 'admin']));
+      actorMembership = await requireMember(app, req.userId, workspaceId, new Set(['owner', 'admin']));
     } catch (err) {
       return reply.status(err.statusCode).send({ error: err.code, message: err.message });
     }
@@ -421,6 +422,19 @@ async function workspaceRoutes(app) {
     const { role } = req.body ?? {};
     if (!['owner', 'admin', 'editor', 'viewer'].includes(role)) {
       return reply.status(400).send({ error: 'invalid_role', message: 'Valid roles: owner, admin, editor, viewer.' });
+    }
+
+    const target = await WorkspaceMember.findOne({ workspaceId, accountId: targetUserId }).lean();
+    if (!target) {
+      return reply.status(404).send({ error: 'not_found', message: 'Member not found in this workspace.' });
+    }
+
+    if (target.role === 'owner' && req.userId !== targetUserId) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Only the workspace owner can modify the owner row.' });
+    }
+
+    if (targetUserId === req.userId && role === 'owner' && actorMembership.role !== 'owner') {
+      return reply.status(400).send({ error: 'cannot_promote_self', message: 'Only the current workspace owner can hold the owner role.' });
     }
 
     if (targetUserId === req.userId && role !== 'owner') {

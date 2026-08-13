@@ -22,8 +22,8 @@ async function subscriptionPlugin(app) {
       sub = await Subscription.findOne({ accountId: req.userId }).lean();
     }
 
-    let orgId = req.body?.orgId ?? req.params?.orgId ?? null;
-    const workspaceId = req.body?.workspaceId ?? req.params?.workspaceId ?? null;
+    let orgId = req.body?.orgId ?? req.params?.orgId ?? req.query?.orgId ?? null;
+    const workspaceId = req.body?.workspaceId ?? req.params?.workspaceId ?? req.query?.workspaceId ?? null;
     if (!orgId && workspaceId && typeof workspaceId === 'string') {
       const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
       if (ws) orgId = ws.orgId;
