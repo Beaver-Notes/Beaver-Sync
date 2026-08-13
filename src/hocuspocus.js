@@ -84,11 +84,23 @@ async function startHocuspocus() {
       const { workspaceId, noteId } = parsed;
 
       try {
+        // Plan history window: free collaborators get nothing older than now,
+        // starter 30d, pro/team 365d, enterprise unlimited. `historyCutoffForAccount`
+        // is membership-aware so a note collaborator who is not a workspace member
+        // never inherits the org's window.
+        const { historyCutoffForAccount } = require('./lib/plan-lifecycle');
+        let cutoffTs = 0;
+        if (context?.userId) {
+          const resolved = await historyCutoffForAccount(context.userId, workspaceId);
+          cutoffTs = resolved.cutoffTs || 0;
+        }
+
         await relayStoredUpdates({
           connection,
           persistence,
           workspaceId,
           noteId,
+          cutoffTs,
           log: (msg) => console.log(`[hocuspocus] ${msg}`),
         });
       } catch (err) {

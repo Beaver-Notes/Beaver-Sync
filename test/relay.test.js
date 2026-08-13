@@ -131,3 +131,48 @@ test('does not log when there is nothing to relay', async () => {
 
   assert.equal(calls.length, 0);
 });
+
+test('passes the plan history cutoffTs through to loadAllUpdates', async () => {
+  const connection = fakeConnection();
+  let receivedCutoff = null;
+  const persistence = {
+    loadAllUpdates: async (_ws, _noteId, cutoffTs) => {
+      receivedCutoff = cutoffTs;
+      return [];
+    },
+  };
+
+  const relayed = await relayStoredUpdates({
+    connection,
+    persistence,
+    workspaceId: 'ws-1',
+    noteId: 'note-1',
+    cutoffTs: 1786000000000,
+    log: () => {},
+  });
+
+  assert.equal(receivedCutoff, 1786000000000);
+  assert.equal(relayed, 0);
+  assert.equal(connection.sent.length, 0);
+});
+
+test('defaults the cutoff to 0 (no history window) when omitted', async () => {
+  const connection = fakeConnection();
+  let receivedCutoff = null;
+  const persistence = {
+    loadAllUpdates: async (_ws, _noteId, cutoffTs) => {
+      receivedCutoff = cutoffTs;
+      return [];
+    },
+  };
+
+  await relayStoredUpdates({
+    connection,
+    persistence,
+    workspaceId: 'ws-1',
+    noteId: 'note-1',
+    log: () => {},
+  });
+
+  assert.equal(receivedCutoff, 0);
+});

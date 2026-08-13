@@ -314,13 +314,20 @@ async function loadUpdatesSince(workspaceId, noteId, sinceTs) {
   }));
 }
 
-async function loadAllUpdates(workspaceId, noteId) {
+async function loadAllUpdates(workspaceId, noteId, sinceTs = 0) {
+  let historyClamp = '';
+  const params = [workspaceId, noteId];
+  let paramIdx = 3;
+  if (sinceTs > 0) {
+    historyClamp = ` AND created_at >= $${paramIdx++}`;
+    params.push(new Date(sinceTs).toISOString());
+  }
   const { rows } = await query(`
     SELECT update_data, update_encrypted, device_id, clock, ts
     FROM yjs_doc_updates
-    WHERE workspace_id = $1 AND note_id = $2
+    WHERE workspace_id = $1 AND note_id = $2${historyClamp}
     ORDER BY ts ASC, clock ASC
-  `, [workspaceId, noteId]);
+  `, params);
 
   return rows.map((row) => ({
     data: row.update_data,

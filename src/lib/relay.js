@@ -7,10 +7,15 @@ const { OutgoingMessage } = require('@hocuspocus/server');
  * real-time client as Yjs sync-update messages. The server never decrypts:
  * it only forwards the stored bytes, and the client decrypts on receipt.
  *
+ * `cutoffTs` is the plan history-window lower bound (epoch ms). Updates older
+ * than the cutoff are not served to the joiner (free = now → nothing older
+ * than now; starter 30d; pro/team 365d; enterprise unlimited → 0/omitted).
+ * Pass 0 for no window.
+ *
  * Returns the number of updates sent.
  */
-async function relayStoredUpdates({ connection, persistence, workspaceId, noteId, log = console }) {
-  const updates = await persistence.loadAllUpdates(workspaceId, noteId);
+async function relayStoredUpdates({ connection, persistence, workspaceId, noteId, cutoffTs = 0, log = console }) {
+  const updates = await persistence.loadAllUpdates(workspaceId, noteId, cutoffTs);
 
   let relayed = 0;
   for (const update of updates) {
