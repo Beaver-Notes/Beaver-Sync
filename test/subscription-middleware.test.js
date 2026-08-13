@@ -126,6 +126,23 @@ test('checkDeviceLimit uses the org plan first (team is unlimited)', async (t) =
   assert.equal(reply._sent, undefined);
 });
 
+test('PLAN_OVERRIDE makes a free personal sub pass requirePaidWrite', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const prevOverride = process.env.PLAN_OVERRIDE;
+  process.env.PLAN_OVERRIDE = 'team';
+  try {
+    const req = { userId: 'any', subscription: { plan: 'free' }, orgSubscription: null };
+    const reply = { status: () => ({ send: (body) => { reply._sent = body; } }) };
+    await app.requirePaidWrite(req, reply);
+    assert.equal(reply._sent, undefined);
+  } finally {
+    if (prevOverride === undefined) delete process.env.PLAN_OVERRIDE;
+    else process.env.PLAN_OVERRIDE = prevOverride;
+  }
+});
+
 test('requireActiveSync resolves the org from a workspaceId in the body', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 
 const {
   getPlan, getQuotaBytes, getHistoryDays, getDeviceLimit,
-  getFlags, isPaidPlan, isFreePlan, VALID_PLANS,
+  getFlags, isPaidPlan, isFreePlan, VALID_PLANS, resolvePlanForAccount,
 } = require('../src/lib/plans');
 
 const GB = 1024 ** 3;
@@ -63,4 +63,16 @@ test('isPaidPlan / isFreePlan', () => {
   assert.ok(isPaidPlan('starter'));
   assert.ok(isPaidPlan('team'));
   assert.ok(!isPaidPlan('nonsense'));
+});
+
+test('PLAN_OVERRIDE resolves the effective plan', () => {
+  process.env.PLAN_OVERRIDE = 'team';
+  assert.equal(resolvePlanForAccount({ orgSub: { plan: 'free' }, sub: { plan: 'free' } }), 'team');
+  delete process.env.PLAN_OVERRIDE;
+});
+
+test('resolvePlanForAccount prefers org plan without override', () => {
+  assert.equal(resolvePlanForAccount({ orgSub: { plan: 'team' }, sub: { plan: 'pro' } }), 'team');
+  assert.equal(resolvePlanForAccount({ orgSub: null, sub: { plan: 'starter' } }), 'starter');
+  assert.equal(resolvePlanForAccount({ orgSub: null, sub: null }), 'free');
 });

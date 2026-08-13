@@ -2,7 +2,7 @@
 
 const fp = require('fastify-plugin');
 const { Subscription, Workspace, WorkspaceMember, OrgSubscription } = require('../models');
-const { getQuotaBytes, getDeviceLimit, isFreePlan } = require('../lib/plans');
+const { getQuotaBytes, getDeviceLimit, isFreePlan, resolvePlanForAccount } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
 
 async function subscriptionPlugin(app) {
@@ -46,7 +46,7 @@ async function subscriptionPlugin(app) {
     if (isEnterpriseMode()) return;
 
     const sub = req.subscription;
-    const plan = req.orgSubscription?.plan || sub?.plan;
+    const plan = resolvePlanForAccount({ orgSub: req.orgSubscription, sub });
     if (!sub || isFreePlan(plan)) {
       return reply.status(402).send({
         error: 'plan_upgrade_required',
@@ -65,7 +65,7 @@ async function subscriptionPlugin(app) {
     const incomingBytes = args[0] ?? req.body?.sizeBytes ?? parseInt(req.headers['content-length'] ?? '0', 10);
 
     const orgSub = req.orgSubscription;
-    const effectivePlan = orgSub?.plan || sub.plan;
+    const effectivePlan = resolvePlanForAccount({ orgSub, sub });
 
     const workspaceId = req.body?.workspaceId;
     if (workspaceId && typeof workspaceId === 'string' && orgSub) {
@@ -133,7 +133,7 @@ async function subscriptionPlugin(app) {
     const sub = req.subscription;
     if (!sub) return;
 
-    const MAX_DEVICES = getDeviceLimit(req.orgSubscription?.plan || sub.plan);
+    const MAX_DEVICES = getDeviceLimit(resolvePlanForAccount({ orgSub: req.orgSubscription, sub }));
     if (MAX_DEVICES === null || MAX_DEVICES === undefined) return;
 
     const { Device } = require('../models');

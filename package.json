@@ -8,6 +8,7 @@
     "watch": "node src/server.js",
     "dev": "nodemon src/server.js",
     "generate-keys": "bash scripts/generate-keys.sh",
+    "seed:tier": "node scripts/seed-test-tier.mjs",
     "lint": "eslint src/",
     "test": "node --test --test-concurrency=1",
     "test:integration": "node --test --test-concurrency=1 test/remote-bootstrap.integration.test.js",

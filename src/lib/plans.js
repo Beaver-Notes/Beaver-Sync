@@ -88,7 +88,14 @@ function isPaidPlan(plan) {
   return VALID_PLANS.has(plan) && plan !== 'free';
 }
 
+function resolvePlanForAccount({ orgSub, sub } = {}) {
+  if (process.env.PLAN_OVERRIDE && VALID_PLANS.has(process.env.PLAN_OVERRIDE)) {
+    return process.env.PLAN_OVERRIDE;
+  }
+  return orgSub?.plan || sub?.plan || 'free';
+}
+
 module.exports = {
   PLANS, VALID_PLANS, getPlan, getQuotaBytes, getHistoryDays,
-  getDeviceLimit, getFlags, isFreePlan, isPaidPlan,
+  getDeviceLimit, getFlags, isFreePlan, isPaidPlan, resolvePlanForAccount,
 };
