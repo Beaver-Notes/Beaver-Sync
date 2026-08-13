@@ -217,3 +217,53 @@ test('workspace audit logs require an enterprise plan', async (t) => {
   assert.equal(res.statusCode, 403);
   assert.equal(res.json().error, 'forbidden');
 });
+
+test('free plan cannot invite collaborators to a note (share-notes gating)', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const owner = await register('free');
+  await registerWithEmail('pro', 'paid-target@example.com');
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/collaboration/invite/note-share-free',
+    headers: { authorization: `Bearer ${signToken(owner.id)}`, 'content-type': 'application/json' },
+    payload: { email: 'paid-target@example.com' },
+  });
+
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'plan_upgrade_required');
+});
+
+test('free plan cannot create a note invite link (share-notes gating)', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const owner = await register('free');
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/collaboration/links/note-share-link-free',
+    headers: { authorization: `Bearer ${signToken(owner.id)}`, 'content-type': 'application/json' },
+    payload: { role: 'editor' },
+  });
+
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'plan_upgrade_required');
+});
+
+test('paid plan can invite collaborators to a note', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const owner = await register('pro');
+  const target = await registerWithEmail('free', 'free-collab@example.com');
+  await models.Account.updateOne({ _id: target.id }, { $set: { kemPublicKey: 'a'.repeat(1184 * 2) } });
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/collaboration/invite/note-share-paid',
+    headers: { authorization: `Bearer ${signToken(owner.id)}`, 'content-type': 'application/json' },
+    payload: { email: 'free-collab@example.com' },
+  });
+
+  assert.equal(res.statusCode, 201);
+});

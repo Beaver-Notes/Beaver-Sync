@@ -6,8 +6,26 @@ const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models'
 const { query } = require('../db');
 const { validatePublicKey } = require('../lib/recipient-wrap');
 const { sendNoteInviteEmail } = require('../email');
+const { isFreePlan } = require('../lib/plans');
+const { isEnterpriseMode } = require('../lib/license');
+const { resolveEffectivePlan } = require('../lib/plan-resolution');
 
 const BODY_LIMIT = parseInt(process.env.COLLAB_BODY_LIMIT_BYTES ?? '4096', 10);
+
+// Outbound note shares/invites require a paid plan (spec: free users can
+// receive shared notes as collaborators but cannot invite/share outbound).
+async function requirePaidSharePlan(req, reply) {
+  if (isEnterpriseMode()) return true;
+  const { plan } = await resolveEffectivePlan(req);
+  if (isFreePlan(plan)) {
+    reply.status(403).send({
+      error: 'plan_upgrade_required',
+      message: 'Sharing notes requires a paid plan.',
+    });
+    return false;
+  }
+  return true;
+}
 
 function generateToken() {
   return crypto.randomBytes(32).toString('hex');
@@ -228,6 +246,8 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
+    if (!(await requirePaidSharePlan(req, reply))) return;
+
     const { username, email } = req.body ?? {};
     if ((!username || typeof username !== 'string') && (!email || typeof email !== 'string')) {
       return reply.status(400).send({ error: 'validation_error', message: 'Provide username or email of the user to invite.' });
@@ -355,6 +375,8 @@ async function collaborationRoutes(app) {
   app.post('/links/:noteId', { preHandler: [app.authenticate] }, async (req, reply) => {
     const { noteId } = req.params;
     const { role = 'editor', requireApproval = false, expiresIn } = req.body;
+
+    if (!(await requirePaidSharePlan(req, reply))) return;
 
     if (!['editor', 'viewer'].includes(role)) {
       return reply.status(400).send({ error: 'validation_error', message: 'Role must be editor or viewer.' });
