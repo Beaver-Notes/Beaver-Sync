@@ -18,18 +18,20 @@ const rateLimit = {
 };
 
 async function requirePlanAndOwner(app, req, reply, workspaceId) {
-  let sub = null;
-  if (!isEnterpriseMode()) {
-    const { Subscription } = require('../models');
-    sub = await Subscription.findOne({ accountId: req.userId }).lean();
-    if (!sub || (sub.plan !== 'team' && sub.plan !== 'enterprise')) {
-      return reply.status(403).send({ error: 'forbidden', message: 'Admin routes require a Team or Enterprise plan.' });
-    }
-  }
-
-  const ws = await Workspace.findById(workspaceId, { nameEncrypted: 1 }).lean();
+  const ws = await Workspace.findById(workspaceId, { nameEncrypted: 1, orgId: 1 }).lean();
   if (!ws) {
     return reply.status(404).send({ error: 'not_found', message: 'Workspace not found.' });
+  }
+
+  let sub = null;
+  if (!isEnterpriseMode()) {
+    const { Subscription, OrgSubscription } = require('../models');
+    sub = await Subscription.findOne({ accountId: req.userId }).lean();
+    const orgSub = ws.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
+    const effectivePlan = orgSub?.plan || sub?.plan;
+    if (!effectivePlan || (effectivePlan !== 'team' && effectivePlan !== 'enterprise')) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Admin routes require a Team or Enterprise plan.' });
+    }
   }
 
   const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
@@ -193,9 +195,14 @@ async function adminRoutes(app) {
     const workspaceId = req.params.id;
 
     if (!isEnterpriseMode()) {
-      const { Subscription } = require('../models');
+      const { Subscription, OrgSubscription } = require('../models');
       const sub = await Subscription.findOne({ accountId: req.userId }).lean();
-      if (!sub || sub.plan !== 'enterprise') {
+
+      const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
+      const orgSub = ws?.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
+      const isEnterprise = sub?.plan === 'enterprise' || orgSub?.plan === 'enterprise';
+
+      if (!isEnterprise) {
         return reply.status(403).send({ error: 'forbidden', message: 'Audit logs require an Enterprise plan.' });
       }
     }

@@ -226,7 +226,7 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
 CREATE TABLE IF NOT EXISTS workspace_members (
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  role         TEXT NOT NULL CHECK(role IN ('owner', 'editor', 'viewer', 'guest')),
+  role         TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'editor', 'viewer')),
   created_at   TEXT NOT NULL,
   PRIMARY KEY (workspace_id, account_id)
 );
@@ -234,7 +234,7 @@ CREATE TABLE IF NOT EXISTS workspace_members (
 CREATE TABLE IF NOT EXISTS workspace_invites (
   token_hash       TEXT PRIMARY KEY,
   workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  role             TEXT NOT NULL CHECK(role IN ('editor', 'viewer', 'guest')),
+  role             TEXT NOT NULL CHECK(role IN ('editor', 'viewer')),
   require_approval INTEGER NOT NULL DEFAULT 0,
   expires_at       TEXT NOT NULL,
   max_uses         INTEGER NOT NULL DEFAULT 0,

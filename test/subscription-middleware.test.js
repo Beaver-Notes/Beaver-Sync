@@ -95,3 +95,47 @@ test('checkDeviceLimit enforces starter limit of 5', async (t) => {
   await app.checkDeviceLimit(req, reply);
   assert.equal(reply._sent.error, 'device_limit_reached');
 });
+
+test('requirePaidWrite allows a free personal sub when the org is paid', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const req = {
+    userId: 'any',
+    subscription: { plan: 'free' },
+    orgSubscription: { plan: 'team', seats: 5 },
+  };
+  const reply = { status: () => ({ send: (body) => { reply._sent = body; } }) };
+  await app.requirePaidWrite(req, reply);
+  assert.equal(reply._sent, undefined);
+});
+
+test('checkDeviceLimit uses the org plan first (team is unlimited)', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const account = await makeAccountWithPlan('starter', 'team', 5);
+
+  for (let i = 0; i < 6; i++) {
+    await models.Device.create({ accountId: account.id, deviceId: `dev-${i}`, lastSeen: new Date(), createdAt: new Date() });
+  }
+
+  const sub = await models.Subscription.findOne({ accountId: account.id }).lean();
+  const req = { userId: account.id, subscription: sub, orgSubscription: { plan: 'team', seats: 5 }, headers: { 'x-device-id': 'new-device' } };
+  const reply = { status: () => ({ send: (body) => { reply._sent = body; } }) };
+  await app.checkDeviceLimit(req, reply);
+  assert.equal(reply._sent, undefined);
+});
+
+test('requireActiveSync resolves the org from a workspaceId in the body', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+  const account = await makeAccountWithPlan('free', 'team', 5);
+
+  const orgMember = await models.OrgMember.findOne({ accountId: account.id }).lean();
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: account.id, orgId: orgMember.orgId, createdAt: new Date() });
+
+  const req = { userId: account.id, body: { workspaceId: ws.id } };
+  const reply = { status: () => ({ send: () => {} }) };
+  await app.requireActiveSync(req, reply);
+  assert.equal(req.orgSubscription?.plan, 'team');
+});

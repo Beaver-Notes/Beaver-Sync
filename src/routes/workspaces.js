@@ -368,6 +368,76 @@ async function workspaceRoutes(app) {
 
     return reply.send({ workspaceId: invite.workspaceId, role: invite.role });
   });
+
+  app.get('/:id/member-lookup', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const workspaceId = req.params.id;
+    const { email, username } = req.query ?? {};
+
+    try {
+      await requireMember(app, req.userId, workspaceId, new Set(['owner', 'admin', 'editor']));
+    } catch (err) {
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+    }
+
+    let target = null;
+    if (username && typeof username === 'string') {
+      const normalized = username.trim().toLowerCase();
+      target = await Account.findOne({ username: normalized }).lean();
+    } else if (email && typeof email === 'string') {
+      const { createEmailHash } = require('../lib/crypto');
+      target = await Account.findOne({ emailHmac: createEmailHash(email.trim().toLowerCase()) }).lean();
+    }
+
+    if (!target) {
+      return reply.send({ found: false });
+    }
+
+    const existing = await WorkspaceMember.findOne({ workspaceId, accountId: target.id }).lean();
+
+    return reply.send({
+      found: true,
+      accountId: target.id,
+      hasKemPublicKey: Boolean(target.kemPublicKey),
+      alreadyMember: Boolean(existing),
+    });
+  });
+
+  app.patch('/:id/members/:uid', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const workspaceId = req.params.id;
+    const targetUserId = req.params.uid;
+
+    try {
+      await requireMember(app, req.userId, workspaceId, new Set(['owner', 'admin']));
+    } catch (err) {
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+    }
+
+    const { role } = req.body ?? {};
+    if (!['owner', 'admin', 'editor', 'viewer'].includes(role)) {
+      return reply.status(400).send({ error: 'invalid_role', message: 'Valid roles: owner, admin, editor, viewer.' });
+    }
+
+    if (targetUserId === req.userId && role !== 'owner') {
+      return reply.status(400).send({ error: 'cannot_demote_self', message: 'You cannot change your own role away from owner.' });
+    }
+
+    const result = await WorkspaceMember.updateOne(
+      { workspaceId, accountId: targetUserId },
+      { $set: { role } }
+    );
+    if (result.modifiedCount === 0) {
+      return reply.status(404).send({ error: 'not_found', message: 'Member not found in this workspace.' });
+    }
+
+    app.log.info({ workspaceId, targetUserId, role, byUser: req.userId }, 'Workspace member role changed');
+    return reply.send({ updated: true });
+  });
 }
 
 module.exports = workspaceRoutes;

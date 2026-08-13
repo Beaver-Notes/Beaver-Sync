@@ -22,9 +22,13 @@ async function subscriptionPlugin(app) {
       sub = await Subscription.findOne({ accountId: req.userId }).lean();
     }
 
-    const orgSub = await OrgSubscription.findOne({
-      orgId: req.body?.orgId ?? req.params?.orgId ?? null,
-    }).lean();
+    let orgId = req.body?.orgId ?? req.params?.orgId ?? null;
+    const workspaceId = req.body?.workspaceId ?? req.params?.workspaceId ?? null;
+    if (!orgId && workspaceId && typeof workspaceId === 'string') {
+      const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
+      if (ws) orgId = ws.orgId;
+    }
+    const orgSub = orgId ? await OrgSubscription.findOne({ orgId }).lean() : null;
     req.orgSubscription = orgSub || null;
 
     if (sub.status === 'expired') {
@@ -42,7 +46,8 @@ async function subscriptionPlugin(app) {
     if (isEnterpriseMode()) return;
 
     const sub = req.subscription;
-    if (!sub || isFreePlan(sub.plan)) {
+    const plan = req.orgSubscription?.plan || sub?.plan;
+    if (!sub || isFreePlan(plan)) {
       return reply.status(402).send({
         error: 'plan_upgrade_required',
         message: 'Cloud sync requires a paid plan. Upgrade to start syncing.',
@@ -128,7 +133,7 @@ async function subscriptionPlugin(app) {
     const sub = req.subscription;
     if (!sub) return;
 
-    const MAX_DEVICES = getDeviceLimit(sub.plan);
+    const MAX_DEVICES = getDeviceLimit(req.orgSubscription?.plan || sub.plan);
     if (MAX_DEVICES === null || MAX_DEVICES === undefined) return;
 
     const { Device } = require('../models');
