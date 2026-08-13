@@ -316,17 +316,23 @@ async function authRoutes(app) {
       const { WorkspaceMember } = require('../models');
       const membership = await WorkspaceMember.findOne({ workspaceId, accountId: result.userId }).lean();
 
-      if (!membership) {
+      if (!membership && noteId === undefined) {
+        // No noteId fallback available — nothing else can authorize this caller.
         return reply.status(403).send({
           error: 'forbidden',
           message: 'Not a member of this workspace.',
         });
       }
 
-      return reply.send({ userId: result.userId, role: membership.role });
+      if (membership) {
+        return reply.send({ userId: result.userId, role: membership.role });
+      }
+
+      // Not a workspace member, but a noteId was supplied (hocuspocus always
+      // sends both). Fall through to the note-collaborator check below.
     }
 
-    if (noteId) {
+    if (noteId !== undefined) {
       if (typeof noteId !== 'string' || noteId.length === 0) {
         return reply.status(400).send({
           error: 'invalid_request',
