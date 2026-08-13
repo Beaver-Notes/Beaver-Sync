@@ -4,6 +4,7 @@ const { z } = require('zod');
 const persistence = require('../persistence/yjs');
 const { Device, WorkspaceMember, Workspace, OrgSubscription } = require('../models');
 const { audit } = require('../lib/audit');
+const { historyCutoffForAccount } = require('../lib/plan-lifecycle');
 
 const MAX_UPDATES_PER_PUSH = 200;
 const MAX_UPDATES_PER_PULL = 500;
@@ -209,8 +210,10 @@ async function yjsSyncRoutes(app) {
     const { workspaceId, notes } = parsed.data;
     if (!await requireWorkspaceRole(req, reply, workspaceId, false)) return;
 
+    const { cutoffTs } = await historyCutoffForAccount(req.userId, workspaceId);
+
     const entries = await Promise.all(notes.map(async ({ noteId, checkpoint, limit }) => {
-      const page = await persistence.loadUpdatesAfter(workspaceId, noteId, checkpoint, Math.min(limit, MAX_UPDATES_PER_PULL));
+      const page = await persistence.loadUpdatesAfter(workspaceId, noteId, checkpoint, Math.min(limit, MAX_UPDATES_PER_PULL), cutoffTs);
       return [noteId, {
         updates: page.updates.map((update) => formatUpdate(noteId, update)),
         nextCheckpoint: page.nextCheckpoint,

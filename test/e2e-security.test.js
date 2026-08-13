@@ -152,23 +152,30 @@ test('slug collision: second org create with the same slug returns 409 slug_take
 
 test('registration stores empty encrypted names for personal org and workspace', async () => {
   const { pk } = await makeKeypair();
-  const res = await app.inject({
-    method: 'POST',
-    url: '/auth/register',
-    headers: { 'content-type': 'application/json' },
-    payload: {
-      email: 'reg-e2e@example.com',
-      password: 'correct horse battery staple',
-      kemPublicKey: pk,
-    },
-  });
-  assert.equal(res.statusCode, 201);
-  const { organization, workspace } = res.json();
-  assert.equal(organization.nameEncrypted, '');
-  assert.equal(workspace.nameEncrypted, '');
+  const previousMode = process.env.ENTERPRISE_MODE;
+  process.env.ENTERPRISE_MODE = 'true';
+  try {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/auth/register',
+      headers: { 'content-type': 'application/json' },
+      payload: {
+        email: 'reg-e2e@example.com',
+        password: 'correct horse battery staple',
+        kemPublicKey: pk,
+      },
+    });
+    assert.equal(res.statusCode, 201);
+    const { organization, workspace } = res.json();
+    assert.ok(organization, 'paid registration should provision a personal org');
+    assert.equal(organization.nameEncrypted, '');
+    assert.equal(workspace.nameEncrypted, '');
 
-  const org = (await query('SELECT name_encrypted FROM organizations WHERE id = $1', [organization.id])).rows[0];
-  assert.equal(org.name_encrypted, '');
-  const personalWs = (await query('SELECT name_encrypted FROM workspaces WHERE id = $1', [workspace.id])).rows[0];
-  assert.equal(personalWs.name_encrypted, '');
+    const org = (await query('SELECT name_encrypted FROM organizations WHERE id = $1', [organization.id])).rows[0];
+    assert.equal(org.name_encrypted, '');
+    const personalWs = (await query('SELECT name_encrypted FROM workspaces WHERE id = $1', [workspace.id])).rows[0];
+    assert.equal(personalWs.name_encrypted, '');
+  } finally {
+    process.env.ENTERPRISE_MODE = previousMode;
+  }
 });

@@ -6,6 +6,7 @@ const r2 = require('../services/r2');
 const mlkem = require('../lib/mlkem');
 const { createNoteHash } = require('../lib/crypto');
 const { audit } = require('../lib/audit');
+const { historyCutoffTs } = require('../lib/plan-lifecycle');
 const { query } = require('../db');
 
 const COMMIT_BODY_LIMIT_BYTES = parseInt(process.env.COMMIT_BODY_LIMIT_BYTES ?? '1048576', 10);
@@ -94,9 +95,15 @@ async function commitRoutes(app) {
       clock: { $gt: clock },
     }));
 
+    const sub = await Subscription.findOne({ accountId: req.userId }).lean();
+    const cutoffTs = historyCutoffTs(sub?.plan || 'free');
+
+    const baseFilter = { accountId: req.userId };
+    if (cutoffTs > 0) baseFilter.createdAt = { $gte: new Date(cutoffTs).toISOString() };
+
     const query = orClauses.length > 0
-      ? { $or: orClauses }
-      : { accountId: req.userId };
+      ? { ...baseFilter, $or: orClauses }
+      : baseFilter;
 
     const commits = await CommitMeta
       .find(query, { commitId: 1, deviceId: 1, clock: 1, ts: 1 })
@@ -251,6 +258,12 @@ async function commitRoutes(app) {
     if (before) {
       sql += ` AND commits.created_at < $${paramIndex++}`;
       params.push(before.toISOString());
+    }
+    const sub = await Subscription.findOne({ accountId: req.userId }).lean();
+    const cutoffTs = historyCutoffTs(sub?.plan || 'free');
+    if (cutoffTs > 0) {
+      sql += ` AND commits.created_at >= $${paramIndex++}`;
+      params.push(new Date(cutoffTs).toISOString());
     }
     sql += ` ORDER BY commits.created_at DESC LIMIT $${paramIndex}`;
     params.push(limit);

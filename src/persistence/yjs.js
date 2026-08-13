@@ -240,7 +240,7 @@ async function getDocumentSyncState(workspaceId, noteId) {
   };
 }
 
-async function loadUpdatesAfter(workspaceId, noteId, checkpoint, limit) {
+async function loadUpdatesAfter(workspaceId, noteId, checkpoint, limit, sinceTs = 0) {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PULL_PAGE_SIZE) {
     throw new RangeError(`pull page size must be between 1 and ${MAX_PULL_PAGE_SIZE}`);
   }
@@ -254,13 +254,18 @@ async function loadUpdatesAfter(workspaceId, noteId, checkpoint, limit) {
     paramIdx += 3;
   }
   const before = conditions.length ? `AND NOT (${conditions.join(' OR ')})` : '';
+  let historyClamp = '';
+  if (sinceTs > 0) {
+    historyClamp = ` AND created_at >= $${paramIdx++}`;
+    params.push(new Date(sinceTs).toISOString());
+  }
   params.push(limit + 1);
 
   const { rows } = await query(`
     SELECT update_data, update_encrypted, device_id, clock, ts
     FROM yjs_doc_updates
     WHERE workspace_id = $1 AND note_id = $2
-      ${before}
+      ${before}${historyClamp}
     ORDER BY ts ASC, clock ASC, device_id ASC LIMIT $${paramIdx}
   `, params);
 

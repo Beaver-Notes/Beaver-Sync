@@ -104,23 +104,27 @@ async function authRoutes(app) {
     const storageQuotaBytes = isEnterpriseMode() ? getQuotaBytes('enterprise') : 0;
     await Subscription.create({ accountId: account.id, plan, status: 'active', storageQuotaBytes, createdAt: new Date() });
 
-    const orgId = require('crypto').randomUUID();
-    const orgName = account.username || email.split('@')[0];
-    const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    let orgId = null;
+    let defaultWorkspace = null;
+    if (plan !== 'free') {
+      orgId = require('crypto').randomUUID();
+      const orgName = account.username || email.split('@')[0];
+      const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
 
-    await Organization.create({ id: orgId, nameEncrypted: '', slug, createdAt: new Date() });
-    await OrgMember.create({ orgId, accountId: account.id, role: 'owner', createdAt: new Date() });
-    await OrgSubscription.create({ id: require('crypto').randomUUID(), orgId, plan, status: 'active', seats: 1, storageQuotaBytes, createdAt: new Date() });
+      await Organization.create({ id: orgId, nameEncrypted: '', slug, createdAt: new Date() });
+      await OrgMember.create({ orgId, accountId: account.id, role: 'owner', createdAt: new Date() });
+      await OrgSubscription.create({ id: require('crypto').randomUUID(), orgId, plan, status: 'active', seats: 1, storageQuotaBytes, createdAt: new Date() });
 
-    const defaultWorkspace = await Workspace.create({ nameEncrypted: '', ownerId: account.id, orgId, createdAt: new Date() });
-    await WorkspaceMember.create({ workspaceId: defaultWorkspace.id, accountId: account.id, role: 'owner', createdAt: new Date() });
+      defaultWorkspace = await Workspace.create({ nameEncrypted: '', ownerId: account.id, orgId, createdAt: new Date() });
+      await WorkspaceMember.create({ workspaceId: defaultWorkspace.id, accountId: account.id, role: 'owner', createdAt: new Date() });
 
-    // Initialize sync state for the new workspace so /sync/state doesn't 404
-    const { query } = require('../db');
-    await query(
-      'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-      [defaultWorkspace.id, 'empty', 0, new Date().toISOString()]
-    );
+      // Initialize sync state for the new workspace so /sync/state doesn't 404
+      const { query } = require('../db');
+      await query(
+        'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+        [defaultWorkspace.id, 'empty', 0, new Date().toISOString()]
+      );
+    }
 
     const token = await createSession(account.id, req);
 
@@ -138,16 +142,16 @@ async function authRoutes(app) {
         kdfSalt: account.kdfSalt,
         kemPublicKey: account.kemPublicKey || null,
       },
-      organization: {
+      organization: orgId ? {
         id: orgId,
         nameEncrypted: '',
         role: 'owner',
-      },
-      workspace: {
+      } : null,
+      workspace: defaultWorkspace ? {
         id: defaultWorkspace.id,
         nameEncrypted: '',
         role: 'owner',
-      },
+      } : null,
     });
   });
 
