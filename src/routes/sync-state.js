@@ -26,7 +26,7 @@ const CompleteSchema = WorkspaceSchema.extend({
       noteIds.add(document.noteId);
     }
   }),
-  assets: z.array(z.string().min(1).max(512)).max(500).default([]),
+  assets: z.array(z.string().min(1).max(512)).max(5000).default([]),
 });
 
 function snapshotKeyFor(workspaceId, noteId, generation) {

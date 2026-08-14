@@ -230,6 +230,26 @@ test('an expired completion claim is rejected and leaves the workspace initializ
   assert.equal((await query('SELECT status FROM sync_workspace_state WHERE workspace_id = $1', ['sync-workspace'])).rows[0].status, 'initializing');
 });
 
+test('completion accepts more than 500 asset keys (seed path may upload >500 assets)', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
+  const assets = Array.from({ length: 501 }, (_, i) => `assets--note-${i}--file.png`);
+
+  // None of these exist in storage, so the route must return asset_missing —
+  // NOT validation_error. A validation_error means the schema still caps at 500.
+  const response = await request(app, 'POST', '/sync/initialize/complete', users.owner, {
+    workspaceId: 'sync-workspace',
+    token: claim.json().token,
+    generation: 1,
+    documents: [],
+    assets,
+  });
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.json().error, 'asset_missing');
+});
+
 test('a completion database failure rolls back document rows and initialization', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
