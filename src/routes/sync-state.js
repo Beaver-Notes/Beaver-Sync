@@ -7,6 +7,25 @@ const { requireWorkspaceMember, requireWorkspaceOwner } = require('../middleware
 
 const CLAIM_TTL_MS = 5 * 60 * 1000;
 
+const VERIFY_CONCURRENCY = 8;
+
+// Runs `fn` over `items` with bounded concurrency, preserving order.
+async function mapWithConcurrency(items, concurrency, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = [];
+  for (let w = 0; w < concurrency; w++) {
+    workers.push((async () => {
+      while (cursor < items.length) {
+        const index = cursor++;
+        results[index] = await fn(items[index], index);
+      }
+    })());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
 const WorkspaceSchema = z.object({ workspaceId: z.string().min(1) });
 const CompleteSchema = WorkspaceSchema.extend({
   token: z.string().min(1),
@@ -26,7 +45,7 @@ const CompleteSchema = WorkspaceSchema.extend({
       noteIds.add(document.noteId);
     }
   }),
-  assets: z.array(z.string().min(1).max(512)).max(5000).default([]),
+  assets: z.array(z.string().min(1).max(512)).default([]),
 });
 
 function snapshotKeyFor(workspaceId, noteId, generation) {
@@ -151,9 +170,11 @@ async function syncStateRoutes(app) {
       const error = await verifyObject(storage, document.snapshotKey, 'snapshot_missing');
       if (error) return reply.status(400).send({ error });
     }
-    for (const asset of assets) {
+    const assetErrors = await mapWithConcurrency(assets, VERIFY_CONCURRENCY, async (asset) => {
       const assetKey = storage?.assetKey ? storage.assetKey(req.userId, asset) : asset;
-      const error = await verifyObject(storage, assetKey, 'asset_missing');
+      return verifyObject(storage, assetKey, 'asset_missing');
+    });
+    for (const error of assetErrors) {
       if (error) return reply.status(400).send({ error });
     }
 

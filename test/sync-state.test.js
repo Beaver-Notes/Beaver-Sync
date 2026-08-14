@@ -250,6 +250,24 @@ test('completion accepts more than 500 asset keys (seed path may upload >500 ass
   assert.equal(response.json().error, 'asset_missing');
 });
 
+test('completion has no asset-count cap; a much larger key set is still verified', async (t) => {
+  const app = await buildApp();
+  t.after(() => app.close());
+
+  const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
+  const assets = Array.from({ length: 2000 }, (_, i) => `assets--note-${i}--file.png`);
+
+  const response = await request(app, 'POST', '/sync/initialize/complete', users.owner, {
+    workspaceId: 'sync-workspace',
+    token: claim.json().token,
+    generation: 1,
+    documents: [],
+    assets,
+  });
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.json().error, 'asset_missing');
+});
+
 test('a completion database failure rolls back document rows and initialization', async (t) => {
   const app = await buildApp();
   t.after(() => app.close());
