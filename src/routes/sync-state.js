@@ -36,6 +36,7 @@ const CompleteSchema = WorkspaceSchema.extend({
     snapshotKey: z.string().min(1),
     checkpointTs: z.number().int().nonnegative().optional().default(0),
     checkpointSequence: z.number().int().nonnegative().optional().default(0),
+    snapshotTs: z.number().int().nonnegative().optional().default(0),
   }).strict()).max(5000).superRefine((documents, ctx) => {
     const noteIds = new Set();
     for (const document of documents) {
@@ -78,6 +79,7 @@ function documentState(row) {
     snapshotKey: row.snapshot_key,
     checkpointTs: row.checkpoint_ts,
     checkpointSequence: row.checkpoint_sequence,
+    snapshotTs: row.snapshot_ts ?? 0,
   };
 }
 
@@ -86,7 +88,7 @@ async function readState(workspaceId) {
   const state = rows[0];
   if (!state) return null;
   const { rows: docRows } = await query(`
-    SELECT note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence
+    SELECT note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, snapshot_ts
     FROM sync_document_state WHERE workspace_id = $1 ORDER BY note_id
   `, [workspaceId]);
   const documents = docRows.map(documentState);
@@ -191,18 +193,19 @@ async function syncStateRoutes(app) {
 
       const upsertSql = `
         INSERT INTO sync_document_state
-          (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+          (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, snapshot_ts, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT(workspace_id, note_id) DO UPDATE SET
           snapshot_generation = excluded.snapshot_generation,
           snapshot_key = excluded.snapshot_key,
           checkpoint_ts = excluded.checkpoint_ts,
           checkpoint_sequence = excluded.checkpoint_sequence,
+          snapshot_ts = excluded.snapshot_ts,
           updated_at = excluded.updated_at
       `;
       for (const document of documents) {
         await client.query(upsertSql, [workspaceId, document.noteId, document.snapshotGeneration, document.snapshotKey ?? null,
-          document.checkpointTs, document.checkpointSequence, now]);
+          document.checkpointTs, document.checkpointSequence, document.snapshotTs ?? 0, now]);
       }
       await client.query(`
         UPDATE sync_workspace_state
@@ -324,6 +327,51 @@ async function syncStateRoutes(app) {
       await client.query('DELETE FROM vault_key_params WHERE workspace_id = $1', [workspaceId]);
     });
     return reply.send({ ok: true, workspaceId, status: 'empty' });
+  });
+
+  app.post('/snapshot-download-urls', protect, async (req, reply) => {
+    const parsed = z.object({
+      workspaceId: z.string().min(1),
+      noteIds: z.array(z.string().min(1).max(256)).min(1).max(500),
+    }).strict().safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    const { workspaceId, noteIds } = parsed.data;
+    await requireWorkspaceMember(req, reply, workspaceId);
+    if (reply.sent) return;
+
+    const storage = getObjectStorage();
+    if (!storage || typeof storage.presignGet !== 'function') {
+      return reply.status(503).send({ error: 'storage_unavailable' });
+    }
+
+    const { rows } = await query(`
+      SELECT note_id, snapshot_generation, snapshot_key, snapshot_ts
+      FROM sync_document_state
+      WHERE workspace_id = $1 AND note_id = ANY($2)
+        AND snapshot_key IS NOT NULL AND snapshot_key != ''
+    `, [workspaceId, noteIds]);
+
+    const generation = rows[0]?.snapshot_generation ?? 0;
+    const urls = {};
+    const presignPromises = [];
+    const noteIdsToSign = [];
+
+    for (const row of rows) {
+      noteIdsToSign.push(row.note_id);
+      presignPromises.push(storage.presignGet(row.snapshot_key, 600));
+    }
+
+    const presignedUrls = await Promise.all(presignPromises);
+    for (let i = 0; i < noteIdsToSign.length; i++) {
+      const row = rows.find(r => r.note_id === noteIdsToSign[i]);
+      urls[noteIdsToSign[i]] = {
+        url: presignedUrls[i],
+        key: row.snapshot_key,
+        snapshotTs: row.snapshot_ts ?? 0,
+      };
+    }
+
+    return reply.send({ urls, generation });
   });
 }
 
