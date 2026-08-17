@@ -5,7 +5,7 @@ const { z } = require('zod');
 const { query, transaction } = require('../db');
 const { requireWorkspaceMember, requireWorkspaceOwner } = require('../middleware/org');
 
-const CLAIM_TTL_MS = 5 * 60 * 1000;
+const CLAIM_TTL_MS = 30 * 60 * 1000;
 
 const VERIFY_CONCURRENCY = 8;
 
