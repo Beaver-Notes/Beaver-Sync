@@ -8,6 +8,105 @@ const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 
 const ROOM_PATTERN = /^workspace:([a-zA-Z0-9-]+):note:([a-zA-Z0-9-]+)$/;
 
+/**
+ * Start a Postgres LISTEN client that receives sync notifications from the
+ * Fastify push-batch route and broadcasts them as stateless JSON messages
+ * to all Hocuspocus connections in the matching workspace.
+ *
+ * This is how Device B learns about Device A's pushes without waiting for
+ * the 30-second pull timer.  The notification payload is:
+ *   { workspaceId, noteIds, excludeDeviceId }
+ *
+ * Connections whose context.workspaceId matches AND whose deviceId differs
+ * from excludeDeviceId receive a stateless message:
+ *   { type: 'notification', noteIds, timestamp }
+ *
+ * The client then triggers an immediate HTTP pull to fetch the encrypted
+ * updates from yjs_doc_updates.
+ */
+async function startSyncNotificationListener(server) {
+  let pool;
+  try {
+    // The db/postgres module may not be loaded yet in standalone Hocuspocus
+    // mode.  Lazy-require so the module is optional.
+    const postgres = require('./db/postgres');
+    pool = postgres.getPool();
+  } catch {
+    console.warn('[hocuspocus] Postgres pool unavailable — sync notifications disabled');
+    return;
+  }
+
+  let client;
+  let reconnectAttempts = 0;
+  const MAX_DELAY = 30_000;
+
+  async function listen() {
+    if (client) return;
+    try {
+      client = await pool.connect();
+      await client.query('LISTEN sync_notifications');
+      reconnectAttempts = 0;
+      console.log('[hocuspocus] Listening for sync notifications on Postgres');
+
+      client.on('notification', (msg) => {
+        try {
+          const { workspaceId, noteIds, excludeDeviceId } = JSON.parse(msg.payload);
+          if (!workspaceId) return;
+
+          let notified = 0;
+          // server.connections is a Map<string, Connection[]> keyed by documentName.
+          // Each connection has a context.workspaceId set by onAuthenticate.
+          for (const [, connections] of server.connections) {
+            for (const conn of connections) {
+              const ctx = conn.context ?? {};
+              if (ctx.workspaceId !== workspaceId) continue;
+              // Don't notify the device that just pushed — they already know.
+              if (excludeDeviceId && ctx.deviceId === excludeDeviceId) continue;
+              try {
+                conn.sendStateless(JSON.stringify({
+                  type: 'notification',
+                  noteIds,
+                  timestamp: Date.now(),
+                }));
+                notified++;
+              } catch {
+                // client may have disconnected between notification dispatch
+              }
+            }
+          }
+          if (notified > 0) {
+            console.log(`[hocuspocus] Notified ${notified} client(s) in workspace ${workspaceId} about ${noteIds.length} note(s)`);
+          }
+        } catch (err) {
+          console.warn('[hocuspocus] Failed to process sync notification:', err.message);
+        }
+      });
+
+      const teardown = () => {
+        if (client) {
+          client.release(true);
+          client = null;
+        }
+        scheduleReconnect();
+      };
+      client.on('error', teardown);
+      client.on('end', teardown);
+    } catch (err) {
+      console.warn('[hocuspocus] Failed to start sync notification listener:', err.message);
+      if (client) { client.release(true); client = null; }
+      scheduleReconnect();
+    }
+  }
+
+  function scheduleReconnect() {
+    const delay = Math.min(5000 * 2 ** reconnectAttempts, MAX_DELAY);
+    reconnectAttempts++;
+    setTimeout(() => { listen().catch(() => {}); }, delay);
+  }
+
+  await listen();
+}
+
 async function startHocuspocus() {
   const { initErrorMonitoring } = require('./lib/error-monitoring');
   initErrorMonitoring(process.env.GLITCHTIP_DSN ?? process.env.HOCUSPOCUS_GLITCHTIP_DSN);
@@ -101,6 +200,12 @@ async function startHocuspocus() {
   });
 
   await server.listen();
+
+  // Start listening for sync notifications from the Fastify push-batch route.
+  // This allows clients to be notified in real-time when other devices push
+  // encrypted updates, triggering an immediate HTTP pull.
+  await startSyncNotificationListener(server);
+
   return server;
 }
 

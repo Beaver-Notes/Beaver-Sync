@@ -6,6 +6,7 @@ const { Device, WorkspaceMember } = require('../models');
 const { audit } = require('../lib/audit');
 const { historyCutoffForAccount } = require('../lib/plan-lifecycle');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
+const { getPool } = require('../db/postgres');
 
 const MAX_UPDATES_PER_PUSH = 200;
 const MAX_UPDATES_PER_PULL = 500;
@@ -193,6 +194,27 @@ async function yjsSyncRoutes(app) {
     const deviceLabel = String(req.headers['x-device-label'] ?? 'Unknown Device').slice(0, 128);
     await Device.findOneAndUpdate({ accountId: req.userId, deviceId }, { label: deviceLabel, lastSeen: new Date() }, { upsert: true, new: true });
     audit(req, 'yjs_push_batch', { accepted, duplicate, deviceId, workspaceId, noteCount: notes.length });
+
+    // Notify other connected clients via Postgres LISTEN/NOTIFY so they
+    // can trigger an immediate HTTP pull instead of waiting for the next
+    // 30-second timer tick.  The notification is lightweight — just the
+    // workspace ID and affected note IDs.  Hocuspocus subscribes to
+    // 'sync_notifications' and broadcasts a stateless JSON message to
+    // matching connections.
+    if (accepted > 0) {
+      try {
+        const pool = getPool();
+        const noteIds = notes.map((n) => n.noteId);
+        await pool.query('SELECT pg_notify($1, $2)', [
+          'sync_notifications',
+          JSON.stringify({ workspaceId, noteIds, excludeDeviceId: deviceId }),
+        ]);
+      } catch {
+        // Notification failure is non-fatal — the 30-second pull timer
+        // will pick up changes eventually.
+      }
+    }
+
     const response = { accepted, duplicate, sizeBytes, checkpoint };
     if (notes.length > 1) response.checkpoints = result.checkpoints;
     return reply.status(201).send(response);
