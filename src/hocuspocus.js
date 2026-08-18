@@ -54,13 +54,14 @@ async function startSyncNotificationListener(server) {
           if (!workspaceId) return;
 
           let notified = 0;
-          // server.connections is a Map<string, Connection[]> keyed by documentName.
-          // Each connection has a context.workspaceId set by onAuthenticate.
-          for (const [, connections] of server.connections) {
-            for (const conn of connections) {
+          // In Hocuspocus v4, documents live on server.hocuspocus.documents.
+          // Each Document has a .connections Map<Connection, Context>.
+          const hocuspocus = server.hocuspocus;
+          if (!hocuspocus?.documents) return;
+          for (const [, doc] of hocuspocus.documents) {
+            for (const [conn] of doc.connections) {
               const ctx = conn.context ?? {};
               if (ctx.workspaceId !== workspaceId) continue;
-              // Don't notify the device that just pushed — they already know.
               if (excludeDeviceId && ctx.deviceId === excludeDeviceId) continue;
               try {
                 conn.sendStateless(JSON.stringify({
@@ -182,7 +183,7 @@ async function startHocuspocus() {
       // relay is handled by Hocuspocus broadcasting to connected clients.
     },
 
-    async onChange({ document: _document, documentName, update, connection }) {
+    async onChange({ document, documentName, update, connection }) {
       // We do NOT persist raw Yjs updates from Hocuspocus.  Persistence
       // is handled exclusively by the HTTP sync engine (push-batch).
       //
@@ -195,20 +196,19 @@ async function startHocuspocus() {
       const [, workspaceId, noteId] = match;
 
       try {
-        for (const [, connections] of server.connections) {
-          for (const conn of connections) {
-            const ctx = conn.context ?? {};
-            if (ctx.workspaceId !== workspaceId) continue;
-            if (ctx.noteId === noteId) continue; // same room — already getting relay
-            try {
-              conn.sendStateless(JSON.stringify({
-                type: 'notification',
-                noteIds: [noteId],
-                timestamp: Date.now(),
-              }));
-            } catch {
-              // client may have disconnected
-            }
+        if (!document?.connections) return;
+        for (const [conn] of document.connections) {
+          const ctx = conn.context ?? {};
+          if (ctx.workspaceId !== workspaceId) continue;
+          if (ctx.noteId === noteId) continue;
+          try {
+            conn.sendStateless(JSON.stringify({
+              type: 'notification',
+              noteIds: [noteId],
+              timestamp: Date.now(),
+            }));
+          } catch {
+            // client may have disconnected
           }
         }
       } catch {
