@@ -183,15 +183,37 @@ async function startHocuspocus() {
     },
 
     async onChange({ document: _document, documentName, update, connection }) {
-      // Intentionally a no-op: we do NOT persist raw Yjs updates from
-      // Hocuspocus to yjs_doc_updates.  Persistence is handled exclusively
-      // by the HTTP sync engine (push-batch), which stores sync-key-encrypted
-      // envelopes.  This keeps the storage format uniform and ensures the
-      // server never persists plaintext.
+      // We do NOT persist raw Yjs updates from Hocuspocus.  Persistence
+      // is handled exclusively by the HTTP sync engine (push-batch).
       //
-      // Real-time relay still works: Hocuspocus broadcasts the update to
-      // other connected clients in memory (server sees plaintext transiently
-      // during relay but never writes it to disk).
+      // Hocuspocus already relays updates to other clients IN THE SAME
+      // NOTE ROOM.  But clients viewing different notes in the same
+      // workspace won't receive the update.  Notify them so they can
+      // pull the change via HTTP when they open that note later.
+      const match = ROOM_PATTERN.exec(documentName);
+      if (!match) return;
+      const [, workspaceId, noteId] = match;
+
+      try {
+        for (const [, connections] of server.connections) {
+          for (const conn of connections) {
+            const ctx = conn.context ?? {};
+            if (ctx.workspaceId !== workspaceId) continue;
+            if (ctx.noteId === noteId) continue; // same room — already getting relay
+            try {
+              conn.sendStateless(JSON.stringify({
+                type: 'notification',
+                noteIds: [noteId],
+                timestamp: Date.now(),
+              }));
+            } catch {
+              // client may have disconnected
+            }
+          }
+        }
+      } catch {
+        // iteration failure is non-fatal
+      }
     },
 
     async onListen({ port }) {
