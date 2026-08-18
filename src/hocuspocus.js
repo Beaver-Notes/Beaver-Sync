@@ -1,18 +1,12 @@
 'use strict';
 
 const { Server } = require('@hocuspocus/server');
-const { relayStoredUpdates } = require('./lib/relay');
 
 const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.internal:3000';
 const HOCUSPOCUS_PORT = parseInt(process.env.HOCUSPOCUS_PORT ?? '8080', 10);
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
-const YJS_PERSISTENCE_ENABLED = process.env.YJS_PERSISTENCE_ENABLED !== 'false';
 
 const ROOM_PATTERN = /^workspace:([a-zA-Z0-9-]+):note:([a-zA-Z0-9-]+)$/;
-
-const persistence = YJS_PERSISTENCE_ENABLED
-  ? require('./persistence/yjs')
-  : null;
 
 async function startHocuspocus() {
   const { initErrorMonitoring } = require('./lib/error-monitoring');
@@ -76,71 +70,29 @@ async function startHocuspocus() {
         // client may have disconnected before we could send
       }
 
-      if (!persistence) return;
-
-      const parsed = persistence.parseRoomName(documentName);
-      if (!parsed) return;
-
-      const { workspaceId, noteId } = parsed;
-
-      try {
-        // Plan history window: free collaborators get nothing older than now,
-        // starter 30d, pro/team 365d, enterprise unlimited. `historyCutoffForAccount`
-        // is membership-aware so a note collaborator who is not a workspace member
-        // never inherits the org's window.
-        const { historyCutoffForAccount } = require('./lib/plan-lifecycle');
-        let cutoffTs = 0;
-        if (context?.userId) {
-          const resolved = await historyCutoffForAccount(context.userId, workspaceId);
-          cutoffTs = resolved.cutoffTs || 0;
-        }
-
-        await relayStoredUpdates({
-          connection,
-          persistence,
-          workspaceId,
-          noteId,
-          cutoffTs,
-          log: (msg) => console.log(`[hocuspocus] ${msg}`),
-        });
-      } catch (err) {
-        console.warn(
-          `[hocuspocus] Failed to relay stored updates for ${documentName}:`,
-          err.message,
-        );
-      }
+      // Catch-up is handled by the HTTP sync engine (pull-batch), which
+      // returns sync-key-encrypted envelopes from yjs_doc_updates.  We
+      // intentionally do NOT relay stored updates here because the stored
+      // data may be in a different encryption format than what the client
+      // expects.  The client pulls via HTTP after connecting.
     },
 
     async onLoadDocument() {
-      // Server never reconstructs documents — updates are opaque and relayed
-      // to new joiners via the connected hook. No-op by design.
+      // No-op: the server never reconstructs documents.  Catch-up is
+      // handled by the HTTP sync engine (pull-batch), and real-time
+      // relay is handled by Hocuspocus broadcasting to connected clients.
     },
 
     async onChange({ document: _document, documentName, update, connection }) {
-      if (!persistence) return;
-
-      const parsed = persistence.parseRoomName(documentName);
-      if (!parsed) return;
-
-      const { workspaceId, noteId } = parsed;
-      const context = connection?.context ?? {};
-      const userId = context.userId ?? 'unknown';
-
-      try {
-        await persistence.storeUpdate(
-          workspaceId,
-          noteId,
-          update instanceof Uint8Array ? update : new Uint8Array(update),
-          connection?.socketId ?? userId,
-          Date.now(),
-          true,
-        );
-      } catch (err) {
-        console.warn(
-          `[hocuspocus] Failed to persist update for ${documentName}:`,
-          err.message,
-        );
-      }
+      // Intentionally a no-op: we do NOT persist raw Yjs updates from
+      // Hocuspocus to yjs_doc_updates.  Persistence is handled exclusively
+      // by the HTTP sync engine (push-batch), which stores sync-key-encrypted
+      // envelopes.  This keeps the storage format uniform and ensures the
+      // server never persists plaintext.
+      //
+      // Real-time relay still works: Hocuspocus broadcasts the update to
+      // other connected clients in memory (server sees plaintext transiently
+      // during relay but never writes it to disk).
     },
 
     async onListen({ port }) {
