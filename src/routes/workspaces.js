@@ -498,6 +498,77 @@ async function workspaceRoutes(app) {
     app.log.info({ workspaceId, targetUserId, role, byUser: req.userId }, 'Workspace member role changed');
     return reply.send({ updated: true });
   });
+
+  app.get('/:id/members', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const workspaceId = req.params.id;
+    try {
+      await requireMember(app, req.userId, workspaceId);
+    } catch (err) {
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+    }
+
+    const members = await WorkspaceMember.find({ workspaceId }).lean();
+    const memberIds = members.map((m) => m.accountId);
+
+    const { WorkspaceKey } = require('../models');
+    const keys = await WorkspaceKey.find({ workspaceId, userId: { $in: memberIds } }).lean();
+    const keySet = new Set(keys.map((k) => k.userId));
+
+    const accounts = await Account.find({ _id: { $in: memberIds } }, { username: 1, displayName: 1, kemPublicKey: 1 }).lean();
+    const accountMap = {};
+    for (const a of accounts) accountMap[a._id] = a;
+
+    return reply.send({
+      members: members.map((m) => ({
+        userId: m.accountId,
+        role: m.role,
+        hasWrappedKey: keySet.has(m.accountId),
+        hasKeyPair: !!accountMap[m.accountId]?.kemPublicKey,
+        username: accountMap[m.accountId]?.username ?? null,
+        displayName: accountMap[m.accountId]?.displayName ?? null,
+      })),
+    });
+  });
+
+  app.post('/:id/keys', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const workspaceId = req.params.id;
+    try {
+      await requireMember(app, req.userId, workspaceId, new Set(['owner', 'admin']));
+    } catch (err) {
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+    }
+
+    const { userId, wrappedKey } = req.body ?? {};
+    if (!userId || typeof userId !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'userId is required.' });
+    }
+    if (!wrappedKey || typeof wrappedKey !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'wrappedKey is required.' });
+    }
+
+    const target = await WorkspaceMember.findOne({ workspaceId, accountId: userId }).lean();
+    if (!target) {
+      return reply.status(404).send({ error: 'not_found', message: 'Target is not a workspace member.' });
+    }
+
+    const { WorkspaceKey } = require('../models');
+    await WorkspaceKey.findOneAndUpdate(
+      { workspaceId, userId },
+      { $set: { wrappedKey } },
+      { upsert: true }
+    );
+
+    app.log.info({ workspaceId, targetUserId: userId, byUser: req.userId }, 'Workspace key provisioned for member');
+    audit(req, 'workspace_key_provisioned', { workspaceId, targetUserId: userId });
+
+    return reply.status(201).send({ provisioned: true });
+  });
 }
 
 module.exports = workspaceRoutes;
