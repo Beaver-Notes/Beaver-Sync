@@ -8,6 +8,78 @@ const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 
 const ROOM_PATTERN = /^workspace:([a-zA-Z0-9-]+):note:([a-zA-Z0-9-]+)$/;
 
+// In-memory awareness store per note room
+// Key: "workspaceId:noteId", Value: Map<clientId, awarenessState>
+const awarenessStore = new Map();
+
+function getAwarenessKey(workspaceId, noteId) {
+  return `${workspaceId}:${noteId}`;
+}
+
+function broadcastAwareness(server, workspaceId, noteId, senderClientId, state) {
+  const key = getAwarenessKey(workspaceId, noteId);
+  const roomAwareness = awarenessStore.get(key);
+  if (!roomAwareness) return;
+
+  const message = JSON.stringify({
+    type: 'awareness',
+    clientId: senderClientId,
+    state,
+    timestamp: Date.now(),
+  });
+
+  for (const [clientId, conn] of roomAwareness) {
+    if (clientId === senderClientId) continue;
+    try {
+      conn.sendStateless(message);
+    } catch {
+      // Client may have disconnected
+      roomAwareness.delete(clientId);
+    }
+  }
+}
+
+function addAwarenessClient(workspaceId, noteId, clientId, connection) {
+  const key = getAwarenessKey(workspaceId, noteId);
+  if (!awarenessStore.has(key)) {
+    awarenessStore.set(key, new Map());
+  }
+  awarenessStore.get(key).set(clientId, connection);
+  
+  // Send current awareness state to new client
+  const roomAwareness = awarenessStore.get(key);
+  const states = [];
+  for (const [id, conn] of roomAwareness) {
+    if (id === clientId) continue;
+    const ctx = conn.context ?? {};
+    if (ctx.awarenessState) {
+      states.push({ clientId: id, state: ctx.awarenessState });
+    }
+  }
+  if (states.length > 0) {
+    try {
+      connection.sendStateless(JSON.stringify({
+        type: 'awareness-sync',
+        states,
+        timestamp: Date.now(),
+      }));
+    } catch {
+      // Client may have disconnected
+    }
+  }
+}
+
+function removeAwarenessClient(workspaceId, noteId, clientId) {
+  const key = getAwarenessKey(workspaceId, noteId);
+  const roomAwareness = awarenessStore.get(key);
+  if (roomAwareness) {
+    roomAwareness.delete(clientId);
+    if (roomAwareness.size === 0) {
+      awarenessStore.delete(key);
+    }
+  }
+}
+
 /**
  * Start a Postgres LISTEN client that receives sync notifications from the
  * Fastify push-batch route and broadcasts them as stateless JSON messages
@@ -170,11 +242,50 @@ async function startHocuspocus() {
         // client may have disconnected before we could send
       }
 
+      // Register client for awareness
+      const match = ROOM_PATTERN.exec(documentName);
+      if (match) {
+        const [, workspaceId, noteId] = match;
+        const clientId = context?.clientId ?? connection.id ?? Math.random().toString(36).slice(2);
+        connection.context = { ...connection.context, workspaceId, noteId, clientId };
+        addAwarenessClient(workspaceId, noteId, clientId, connection);
+      }
+
       // Catch-up is handled by the HTTP sync engine (pull-batch), which
       // returns sync-key-encrypted envelopes from yjs_doc_updates.  We
       // intentionally do NOT relay stored updates here because the stored
       // data may be in a different encryption format than what the client
       // expects.  The client pulls via HTTP after connecting.
+    },
+
+    async onClose({ documentName, connection, context }) {
+      // Clean up awareness on disconnect
+      const match = ROOM_PATTERN.exec(documentName);
+      if (match && context?.clientId) {
+        const [, workspaceId, noteId] = match;
+        removeAwarenessClient(workspaceId, noteId, context.clientId);
+      }
+    },
+
+    async onStatelessMessage({ documentName, connection, context, message }) {
+      // Handle awareness messages from clients
+      const match = ROOM_PATTERN.exec(documentName);
+      if (!match || !context?.clientId) return;
+      
+      const [, workspaceId, noteId] = match;
+      const clientId = context.clientId;
+      
+      try {
+        const parsed = JSON.parse(message);
+        if (parsed.type === 'awareness' && parsed.state) {
+          // Store awareness state in connection context
+          connection.context = { ...connection.context, awarenessState: parsed.state };
+          // Broadcast to other clients in the same note room
+          broadcastAwareness(server, workspaceId, noteId, clientId, parsed.state);
+        }
+      } catch {
+        // Ignore malformed messages
+      }
     },
 
     async onLoadDocument() {
