@@ -328,6 +328,7 @@ CREATE TABLE IF NOT EXISTS sync_document_state (
   note_id TEXT NOT NULL,
   snapshot_generation BIGINT NOT NULL DEFAULT 0,
   snapshot_key TEXT,
+  snapshot_ts BIGINT NOT NULL DEFAULT 0,
   checkpoint_ts BIGINT NOT NULL DEFAULT 0,
   checkpoint_sequence BIGINT NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
