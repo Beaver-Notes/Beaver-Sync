@@ -89,7 +89,14 @@ async function readState(workspaceId) {
   if (!state) return null;
   const { rows: docRows } = await query(`
     SELECT note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, snapshot_ts
-    FROM sync_document_state WHERE workspace_id = $1 ORDER BY note_id
+    FROM sync_document_state WHERE workspace_id = $1
+    UNION
+    SELECT DISTINCT note_id, 0, NULL, 0, 0, 0
+    FROM yjs_doc_updates WHERE workspace_id = $1
+      AND note_id NOT IN (
+        SELECT note_id FROM sync_document_state WHERE workspace_id = $1
+      )
+    ORDER BY note_id
   `, [workspaceId]);
   const documents = docRows.map(documentState);
   const { rows: vaultRows } = await query(`
