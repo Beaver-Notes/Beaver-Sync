@@ -258,19 +258,31 @@ async function accountRoutes(app) {
     await transaction(async (client) => {
       await client.query(`DELETE FROM audit_logs WHERE account_id_hash = $1`, [accountIdHash]);
 
+      // Capture owned org IDs BEFORE deleting org_members, since subsequent
+      // deletes reference org_members to find which orgs the account owns.
+      const { rows: ownedOrgs } = await client.query(
+        `SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'`,
+        [req.userId]
+      );
+      const ownedOrgIds = ownedOrgs.map(r => r.org_id);
+
       await client.query(`DELETE FROM org_members WHERE account_id = $1`, [req.userId]);
 
-      await client.query(`DELETE FROM org_subscriptions WHERE org_id IN (
-        SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'
-      )`, [req.userId]);
-
-      await client.query(`DELETE FROM workspaces WHERE org_id IN (
-        SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'
-      )`, [req.userId]);
-
-      await client.query(`DELETE FROM organizations WHERE id IN (
-        SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'
-      )`, [req.userId]);
+      if (ownedOrgIds.length > 0) {
+        const orgPlaceholders = ownedOrgIds.map((_, i) => `$${i + 1}`).join(', ');
+        await client.query(
+          `DELETE FROM org_subscriptions WHERE org_id IN (${orgPlaceholders})`,
+          ownedOrgIds
+        );
+        await client.query(
+          `DELETE FROM workspaces WHERE org_id IN (${orgPlaceholders})`,
+          ownedOrgIds
+        );
+        await client.query(
+          `DELETE FROM organizations WHERE id IN (${orgPlaceholders})`,
+          ownedOrgIds
+        );
+      }
 
       await client.query(`DELETE FROM accounts WHERE id = $1`, [req.userId]);
     });

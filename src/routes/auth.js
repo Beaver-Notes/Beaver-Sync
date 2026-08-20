@@ -23,7 +23,7 @@ function timingSafeEqualStr(a, b) {
   const aBuf = Buffer.from(String(a));
   const bBuf = Buffer.from(String(b));
   if (aBuf.length !== bBuf.length) {
-    return crypto.timingSafeEqual(aBuf, aBuf) && false;
+    return false;
   }
   return crypto.timingSafeEqual(aBuf, bBuf);
 }

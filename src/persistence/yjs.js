@@ -413,12 +413,13 @@ async function promoteDocumentSyncState(workspaceId, noteId, expectedGeneration,
 }
 
 async function deleteJournalRows(workspaceId, noteId, rows) {
-  await transaction(async (client) => {
-    for (const row of rows) {
-      await client.query(`DELETE FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = $2 AND device_id = $3 AND clock = $4`,
-        [workspaceId, noteId, row.deviceId, row.clock ?? row.sequence]);
-    }
-  });
+  if (!rows.length) return;
+  const conditions = rows.map((_, i) => `(device_id = $${i * 2 + 3} AND clock = $${i * 2 + 4})`);
+  const params = [workspaceId, noteId, ...rows.flatMap(row => [row.deviceId, row.clock ?? row.sequence])];
+  await query(
+    `DELETE FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = $2 AND (${conditions.join(' OR ')})`,
+    params
+  );
 }
 
 async function getUpdateCount(workspaceId, noteId) {

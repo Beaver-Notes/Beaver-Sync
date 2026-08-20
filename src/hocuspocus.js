@@ -118,7 +118,9 @@ async function startSyncNotificationListener(server) {
       client = await pool.connect();
       await client.query('LISTEN sync_notifications');
       reconnectAttempts = 0;
-      console.log('[hocuspocus] Listening for sync notifications on Postgres');
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('[hocuspocus] Listening for sync notifications on Postgres');
+      }
 
       client.on('notification', (msg) => {
         try {
@@ -147,7 +149,7 @@ async function startSyncNotificationListener(server) {
               }
             }
           }
-          if (notified > 0) {
+          if (notified > 0 && process.env.NODE_ENV !== 'production') {
             console.log(`[hocuspocus] Notified ${notified} client(s) in workspace ${workspaceId} about ${noteIds.length} note(s)`);
           }
         } catch (err) {
@@ -328,7 +330,9 @@ async function startHocuspocus() {
     },
 
     async onListen({ port }) {
-      console.log(`Hocuspocus server listening on port ${port}`);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`Hocuspocus server listening on port ${port}`);
+      }
     },
   });
 

@@ -77,29 +77,30 @@ async function requireWorkspaceRole(req, reply, workspaceId, write) {
 }
 
 function validateUpdateKey(noteId, update, headerDeviceId) {
+  const logVal = (v) => String(v).slice(0, 128);
   const match = SYNC_KEY_PATTERN.exec(update.key);
   if (!match) {
-    console.error('[validateUpdateKey] key regex failed for key:', update.key);
+    console.error('[validateUpdateKey] key regex failed for key:', logVal(update.key));
     return false;
   }
   if (match[1] !== noteId) {
-    console.error('[validateUpdateKey] noteId mismatch: key has', match[1], 'but body has', noteId);
+    console.error('[validateUpdateKey] noteId mismatch: key has', logVal(match[1]), 'but body has', logVal(noteId));
     return false;
   }
   if (match[2] !== update.deviceId) {
-    console.error('[validateUpdateKey] deviceId mismatch: key has', match[2], 'but update has', update.deviceId);
+    console.error('[validateUpdateKey] deviceId mismatch: key has', logVal(match[2]), 'but update has', logVal(update.deviceId));
     return false;
   }
   if (match[2] !== headerDeviceId) {
-    console.error('[validateUpdateKey] header deviceId mismatch: key has', match[2], 'but header has', headerDeviceId);
+    console.error('[validateUpdateKey] header deviceId mismatch: key has', logVal(match[2]), 'but header has', logVal(headerDeviceId));
     return false;
   }
   if (Number(match[3]) !== update.ts) {
-    console.error('[validateUpdateKey] ts mismatch: key has', match[3], 'but update has', update.ts);
+    console.error('[validateUpdateKey] ts mismatch: key has', logVal(match[3]), 'but update has', update.ts);
     return false;
   }
   if (Number(match[4]) !== update.sequence) {
-    console.error('[validateUpdateKey] seq mismatch: key has', match[4], 'but update has', update.sequence);
+    console.error('[validateUpdateKey] seq mismatch: key has', logVal(match[4]), 'but update has', update.sequence);
     return false;
   }
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(update.data)) {
@@ -228,8 +229,18 @@ async function yjsSyncRoutes(app) {
 
     const { cutoffTs } = await historyCutoffForAccount(req.userId, workspaceId);
 
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[pull-batch] ws=${workspaceId} notes=${notes.length} deviceId=${req.headers['x-device-id'] || 'none'}`);
+      for (const { noteId, checkpoint, limit } of notes) {
+        console.log(`[pull-batch]   note=${noteId} checkpoint=${JSON.stringify(checkpoint)} limit=${limit}`);
+      }
+    }
+
     const entries = await Promise.all(notes.map(async ({ noteId, checkpoint, limit }) => {
       const page = await persistence.loadUpdatesAfter(workspaceId, noteId, checkpoint, Math.min(limit, MAX_UPDATES_PER_PULL), cutoffTs);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[pull-batch]   -> ${noteId}: ${page.updates.length} updates, hasMore=${page.hasMore}`);
+      }
       return [noteId, {
         updates: page.updates.map((update) => formatUpdate(noteId, update)),
         nextCheckpoint: page.nextCheckpoint,

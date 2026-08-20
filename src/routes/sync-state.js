@@ -91,10 +91,11 @@ async function readState(workspaceId) {
     SELECT note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, snapshot_ts
     FROM sync_document_state WHERE workspace_id = $1
     UNION
-    SELECT DISTINCT note_id, 0, NULL, 0, 0, 0
-    FROM yjs_doc_updates WHERE workspace_id = $1
-      AND note_id NOT IN (
-        SELECT note_id FROM sync_document_state WHERE workspace_id = $1
+    SELECT note_id, 0, NULL, 0, 0, 0
+    FROM yjs_doc_updates u WHERE workspace_id = $1
+      AND NOT EXISTS (
+        SELECT 1 FROM sync_document_state s
+        WHERE s.workspace_id = $1 AND s.note_id = u.note_id
       )
     ORDER BY note_id
   `, [workspaceId]);
