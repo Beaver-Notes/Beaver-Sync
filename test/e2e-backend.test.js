@@ -99,12 +99,12 @@ test('stores recipient envelopes and returns only the caller\u2019s own', async 
   const aliceGet = await get(aliceSession, '/collaboration/keys/note-1');
   assert.equal(aliceGet.statusCode, 200);
   assert.equal(aliceGet.json().noteHasKey, true);
-  const parsed = JSON.parse(aliceGet.json().wrappedKey);
+  const parsed = JSON.parse(aliceGet.json().wrappedKeys[0].wrappedKey);
   assert.equal(parsed.kemCt, aliceEnv.kemCt);
 
   const bobGet = await get(bobSession, '/collaboration/keys/note-1');
   assert.equal(bobGet.json().noteHasKey, true);
-  assert.equal(JSON.parse(bobGet.json().wrappedKey).kemCt, bobEnv.kemCt);
+  assert.equal(JSON.parse(bobGet.json().wrappedKeys[0].wrappedKey).kemCt, bobEnv.kemCt);
 });
 
 test('GET /keys/:noteId reports noteHasKey for fresh notes and late joiners', async () => {
@@ -117,7 +117,7 @@ test('GET /keys/:noteId reports noteHasKey for fresh notes and late joiners', as
   fresh = await get(aliceSession, '/collaboration/keys/note-fresh');
   assert.equal(fresh.statusCode, 200);
   assert.equal(fresh.json().noteHasKey, false);
-  assert.equal(fresh.json().wrappedKey, null);
+  assert.deepEqual(fresh.json().wrappedKeys, []);
 
   // Seed an envelope for alice only.
   const secret = Buffer.from('b'.repeat(64), 'hex');
@@ -134,7 +134,7 @@ test('GET /keys/:noteId reports noteHasKey for fresh notes and late joiners', as
   const bobGet = await get(bobSession, '/collaboration/keys/note-fresh');
   assert.equal(bobGet.statusCode, 200);
   assert.equal(bobGet.json().noteHasKey, true);
-  assert.equal(bobGet.json().wrappedKey, null);
+  assert.deepEqual(bobGet.json().wrappedKeys, []);
 
   // Non-collaborators are still denied.
   const outsider = await makeKeypair();
@@ -160,11 +160,11 @@ test('storeRecipients is idempotent and refuses to rotate an existing note key',
   // Bob's attempted overwrite did not land — still no envelope for bob.
   const bobGet = await get(bobSession, '/collaboration/keys/note-fresh');
   assert.equal(bobGet.json().noteHasKey, true);
-  assert.equal(bobGet.json().wrappedKey, null);
+  assert.deepEqual(bobGet.json().wrappedKeys, []);
 
   // Alice's original envelope is untouched.
   const aliceGet = await get(aliceSession, '/collaboration/keys/note-fresh');
-  assert.equal(JSON.parse(aliceGet.json().wrappedKey).kemCt, originalAliceKemCt);
+  assert.equal(JSON.parse(aliceGet.json().wrappedKeys[0].wrappedKey).kemCt, originalAliceKemCt);
 });
 
 test('singular recipient refuses to overwrite an existing note key', async () => {
@@ -183,11 +183,11 @@ test('singular recipient refuses to overwrite an existing note key', async () =>
   // Bob's attempted overwrite did not land — still no envelope for bob.
   const bobGet = await get(bobSession, '/collaboration/keys/note-fresh');
   assert.equal(bobGet.json().noteHasKey, true);
-  assert.equal(bobGet.json().wrappedKey, null);
+  assert.deepEqual(bobGet.json().wrappedKeys, []);
 
   // Alice's original envelope is untouched.
   const aliceGet = await get(aliceSession, '/collaboration/keys/note-fresh');
-  assert.equal(JSON.parse(aliceGet.json().wrappedKey).kemCt, originalAliceKemCt);
+  assert.equal(JSON.parse(aliceGet.json().wrappedKeys[0].wrappedKey).kemCt, originalAliceKemCt);
 });
 
 test('comments are stored encrypted with mentions filtered to collaborators', async () => {
