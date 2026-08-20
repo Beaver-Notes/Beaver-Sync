@@ -207,6 +207,79 @@ async function collaborationRoutes(app) {
     });
   });
 
+  // Queue a request for an existing online device of the same account to
+  // re-wrap the note's content key for a newly-linked device. The caller must
+  // be a collaborator on the note; the request is scoped to their own account
+  // (user_id = req.userId) so only their devices will poll and fulfill it.
+  app.post('/keys/:noteId/distribute-request', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const noteId = req.params.noteId;
+    const parsed = NoteIdSchema.safeParse(noteId);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
+    }
+
+    const { targetDeviceId } = req.body ?? {};
+    if (!targetDeviceId || typeof targetDeviceId !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'targetDeviceId required.' });
+    }
+
+    const membership = await requireCollaborator(reply, noteId, req.userId);
+    if (!membership) return;
+
+    await query(
+      `INSERT INTO key_distribution_requests (note_id, user_id, target_device_id, requested_at)
+       VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+      [noteId, req.userId, targetDeviceId, new Date().toISOString()]
+    );
+    return reply.send({ ok: true });
+  });
+
+  // List pending key-distribution requests for the caller's own account.
+  app.get('/keys/distribute-requests', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const rows = await query(
+      `SELECT note_id, user_id, target_device_id, requested_at FROM key_distribution_requests WHERE user_id = $1`,
+      [req.userId]
+    );
+    return reply.send({
+      requests: rows.rows.map((r) => ({
+        noteId: r.note_id,
+        userId: r.user_id,
+        targetDeviceId: r.target_device_id,
+        requestedAt: r.requested_at,
+      })),
+    });
+  });
+
+  // Clear a pending key-distribution request once a device has fulfilled it.
+  app.delete('/keys/distribute-requests/:noteId/:targetDeviceId', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const parsed = NoteIdSchema.safeParse(req.params.noteId);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
+    }
+    const { targetDeviceId } = req.params;
+    if (!targetDeviceId || typeof targetDeviceId !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'targetDeviceId required.' });
+    }
+
+    const membership = await requireCollaborator(reply, req.params.noteId, req.userId);
+    if (!membership) return;
+
+    await query(
+      `DELETE FROM key_distribution_requests WHERE note_id=$1 AND user_id=$2 AND target_device_id=$3`,
+      [req.params.noteId, req.userId, targetDeviceId]
+    );
+    return reply.send({ ok: true });
+  });
+
   app.post('/keys/:noteId/recipient', {
     ...baseRateLimit,
     ...protect,

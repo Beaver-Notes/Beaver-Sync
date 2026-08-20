@@ -141,6 +141,16 @@ CREATE TABLE IF NOT EXISTS org_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_note_keys_user ON note_keys(user_id);
+
+CREATE TABLE IF NOT EXISTS key_distribution_requests (
+  note_id          TEXT NOT NULL,
+  user_id          TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  target_device_id TEXT NOT NULL,
+  requested_at     TEXT NOT NULL,
+  PRIMARY KEY (note_id, user_id, target_device_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_distribution_requests_user ON key_distribution_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_keys_user ON workspace_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_org_keys_user ON org_keys(user_id);
 
