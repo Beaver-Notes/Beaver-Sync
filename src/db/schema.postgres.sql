@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   email_hmac            TEXT NOT NULL UNIQUE,
   email_encrypted       TEXT,
   kem_public_key        TEXT,
+  device_keys           JSONB NOT NULL DEFAULT '[]'::jsonb,
   password_hash         TEXT,
   recovery_key_hash     TEXT,
   failed_login_attempts BIGINT NOT NULL DEFAULT 0,

@@ -35,7 +35,7 @@ async function accountRoutes(app) {
     },
   }, async (req, reply) => {
     const [account, sub, devices, memberships] = await Promise.all([
-      Account.findById(req.userId, { username: 1, emailHmac: 1, emailEncrypted: 1, createdAt: 1 }).lean(),
+      Account.findById(req.userId, { username: 1, emailHmac: 1, emailEncrypted: 1, createdAt: 1, kemPublicKey: 1, deviceKeys: 1 }).lean(),
       Subscription.findOne({ accountId: req.userId }).lean(),
       Device.find({ accountId: req.userId }).sort({ lastSeen: -1 }).lean(),
       OrgMember.find({ account_id: req.userId }).lean(),
@@ -104,11 +104,13 @@ async function accountRoutes(app) {
 
     return reply.send({
       user: {
-        id:        account.id,
-        username:  account.username ?? null,
-        emailHash: account.emailHmac,
+        id:          account.id,
+        username:    account.username ?? null,
+        emailHash:   account.emailHmac,
         email,
-        createdAt: account.createdAt,
+        createdAt:   account.createdAt,
+        kemPublicKey: account.kemPublicKey ?? null,
+        deviceKeys:   Array.isArray(account.deviceKeys) ? account.deviceKeys : [],
       },
       organizations,
       subscription: subscription

@@ -258,13 +258,27 @@ async function authRoutes(app) {
     ...authRateLimit,
     preHandler: [app.authenticate],
   }, async (req, reply) => {
-    const { kemPublicKey } = req.body ?? {};
+    const { kemPublicKey, deviceId } = req.body ?? {};
     if (!kemPublicKey || typeof kemPublicKey !== 'string' || !validatePublicKey(kemPublicKey)) {
       return reply.status(400).send({ error: 'validation_error', message: 'A valid kemPublicKey is required.' });
     }
-    await Account.updateOne({ _id: req.userId }, { $set: { kemPublicKey } });
-    audit(req, 'kem_keypair_updated', {});
-    return reply.send({ ok: true });
+    const did = typeof deviceId === 'string' && deviceId ? deviceId : 'default';
+    const account = await Account.findById(req.userId);
+    const keys = Array.isArray(account?.deviceKeys) ? account.deviceKeys : [];
+    // Append-only per deviceId: drop any prior entry for this device, then
+    // append the new one. Never overwrite the whole array.
+    const without = keys.filter((d) => d.deviceId !== did);
+    const next = [
+      ...without,
+      { deviceId: did, publicKey: kemPublicKey, createdAt: new Date().toISOString() },
+    ];
+    const update = { deviceKeys: JSON.stringify(next) };
+    // kemPublicKey stays the legacy primary (first key) so single-key clients
+    // keep working; only seed it when not already present.
+    if (!account?.kemPublicKey) update.kemPublicKey = kemPublicKey;
+    await Account.updateOne({ _id: req.userId }, { $set: update });
+    audit(req, 'kem_keypair_updated', { deviceId: did });
+    return reply.send({ ok: true, deviceId: did, deviceCount: next.length });
   });
 
   app.post('/verify-session', {
