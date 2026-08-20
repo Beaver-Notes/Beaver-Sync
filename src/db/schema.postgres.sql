@@ -118,9 +118,10 @@ CREATE TABLE IF NOT EXISTS compaction_locks (
 CREATE TABLE IF NOT EXISTS note_keys (
   note_id     TEXT NOT NULL,
   user_id     TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id   TEXT NOT NULL DEFAULT 'default',
   wrapped_key TEXT NOT NULL,
   created_at  TEXT NOT NULL,
-  PRIMARY KEY (note_id, user_id)
+  PRIMARY KEY (note_id, user_id, device_id)
 );
 
 CREATE TABLE IF NOT EXISTS workspace_keys (

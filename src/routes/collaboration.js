@@ -127,19 +127,48 @@ async function collaborationRoutes(app) {
       outcome = { existing: true, stored: 0 };
     } else {
       const now = new Date().toISOString();
-      const rows = recipients.map((r) => [noteId, r.userId, r.wrappedKey, now]);
+      const rows = recipients.map((r) => [noteId, r.userId, r.deviceId || 'default', r.wrappedKey, now]);
       const placeholders = rows
-        .map((_, i) => `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`)
+        .map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`)
         .join(', ');
       await query(`
-        INSERT INTO note_keys (note_id, user_id, wrapped_key, created_at)
+        INSERT INTO note_keys (note_id, user_id, device_id, wrapped_key, created_at)
         VALUES ${placeholders}
-        ON CONFLICT(note_id, user_id) DO UPDATE SET wrapped_key = excluded.wrapped_key
+        ON CONFLICT(note_id, user_id, device_id) DO UPDATE SET wrapped_key = excluded.wrapped_key
       `, rows.flat());
       outcome = { existing: false, stored: recipients.length };
     }
 
     return reply.send({ noteId, stored: outcome.stored, noteHasKey: true, existing: outcome.existing });
+  });
+
+  // Bootstrap a note's collaboration context by registering the caller as the
+  // owner collaborator (when the note has no collaborators yet) and returning
+  // the key envelope status. Mirrors the GET handler's response shape so a
+  // fresh note reports { noteHasKey: false } rather than 403/404.
+  app.post('/keys/:noteId', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const noteId = req.params.noteId;
+    const parsed = NoteIdSchema.safeParse(noteId);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
+    }
+
+    const membership = await requireCollaborator(reply, noteId, req.userId, { bootstrap: true });
+    if (!membership) return;
+
+    const noteHasKey = (await NoteKey.countDocuments({ noteId })) > 0;
+    if (!noteHasKey) {
+      return reply.send({ noteId, wrappedKey: null, noteHasKey: false });
+    }
+
+    const row = await NoteKey.findOne({ noteId, userId: req.userId }).lean();
+    if (!row) {
+      return reply.send({ noteId, wrappedKey: null, noteHasKey: true });
+    }
+    return reply.send({ noteId, wrappedKey: row.wrappedKey, noteHasKey: true });
   });
 
   app.get('/keys/:noteId', {
@@ -155,18 +184,27 @@ async function collaborationRoutes(app) {
     const membership = await requireCollaborator(reply, noteId, req.userId);
     if (!membership) return;
 
-    const noteHasKey = (await NoteKey.countDocuments({ noteId })) > 0;
-    if (!noteHasKey) {
-      return reply.send({ noteId, wrappedKey: null, noteHasKey: false });
+    const anyKey = await query('SELECT 1 FROM note_keys WHERE note_id = $1 LIMIT 1', [noteId]);
+    if (anyKey.rowCount === 0) {
+      // Fresh note: no envelopes at all. The frontend (later task) detects a
+      // fresh note via noteHasKey === false and provisions the first key.
+      return reply.send({ noteId, wrappedKeys: [], noteHasKey: false });
     }
 
-    const row = await NoteKey.findOne({ noteId, userId: req.userId }).lean();
-    if (!row) {
+    const envelopes = await query(
+      'SELECT device_id, wrapped_key FROM note_keys WHERE note_id = $1 AND user_id = $2',
+      [noteId, req.userId]
+    );
+    if (envelopes.rowCount === 0) {
       // Caller is a collaborator but has no envelope yet — late joiner. They
       // must be re-wrapped by an owner, not provision a fresh key.
-      return reply.send({ noteId, wrappedKey: null, noteHasKey: true });
+      return reply.send({ noteId, wrappedKeys: [], noteHasKey: true });
     }
-    return reply.send({ noteId, wrappedKey: row.wrappedKey, noteHasKey: true });
+    return reply.send({
+      noteId,
+      wrappedKeys: envelopes.rows.map((e) => ({ deviceId: e.device_id, wrappedKey: e.wrapped_key })),
+      noteHasKey: true,
+    });
   });
 
   app.post('/keys/:noteId/recipient', {
@@ -228,11 +266,17 @@ async function collaborationRoutes(app) {
     const invitations = await NoteInvitation.find({ noteId }).lean();
     const userIds = [...new Set(invitations.map((inv) => inv.userId))];
     const accounts = userIds.length > 0
-      ? await Account.find({ id: { $in: userIds } }, { id: 1, kemPublicKey: 1 }).lean()
+      ? await Account.find({ id: { $in: userIds } }, { id: 1, kemPublicKey: 1, deviceKeys: 1 }).lean()
       : [];
-    const collaborators = accounts
-      .filter((a) => a.kemPublicKey)
-      .map((a) => ({ userId: a.id, kemPublicKey: a.kemPublicKey }));
+    const collaborators = [];
+    for (const a of accounts.filter((x) => x.kemPublicKey)) {
+      const devices = (a.deviceKeys && a.deviceKeys.length)
+        ? a.deviceKeys
+        : [{ deviceId: 'default', publicKey: a.kemPublicKey }];
+      for (const d of devices) {
+        collaborators.push({ userId: a.id, deviceId: d.deviceId, kemPublicKey: d.publicKey });
+      }
+    }
     return reply.send({ noteId, collaborators });
   });
 
