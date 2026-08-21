@@ -49,9 +49,18 @@ async function workspaceRoutes(app) {
     ...rateLimit,
     ...protect,
   }, async (req, reply) => {
-    const { nameEncrypted, recipients, orgId } = req.body ?? {};
+    const { nameEncrypted, recipients, orgId, vaultWrappedKeys } = req.body ?? {};
     if (!nameEncrypted || typeof nameEncrypted !== 'string' || nameEncrypted.length > 8192) {
       return reply.status(400).send({ error: 'validation_error', message: 'Encrypted workspace name is required.' });
+    }
+    // Optional AEK-wrapped workspace key envelope; stored opaquely so members
+    // can recover the key from their vault passphrase alone.
+    let normalizedVaultWrappedKeys = null;
+    if (vaultWrappedKeys !== undefined && vaultWrappedKeys !== null) {
+      if (typeof vaultWrappedKeys !== 'string' || !vaultWrappedKeys || vaultWrappedKeys.length > 8192) {
+        return reply.status(400).send({ error: 'validation_error', message: 'vaultWrappedKeys must be a non-empty string.' });
+      }
+      normalizedVaultWrappedKeys = vaultWrappedKeys;
     }
     if (!Array.isArray(recipients) || recipients.length === 0 || !recipients.some((r) => r.userId === req.userId)) {
       return reply.status(400).send({ error: 'validation_error', message: 'recipients must include the owner.' });
@@ -90,7 +99,7 @@ async function workspaceRoutes(app) {
       return reply.status(403).send({ error: 'not_org_member' });
     }
 
-    const workspace = await Workspace.create({ nameEncrypted, ownerId: req.userId, orgId, createdAt: new Date() });
+    const workspace = await Workspace.create({ nameEncrypted, ownerId: req.userId, orgId, vaultWrappedKeys: normalizedVaultWrappedKeys, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: workspace.id, accountId: req.userId, role: 'owner', createdAt: new Date() });
 
     const { WorkspaceKey } = require('../models');
@@ -112,7 +121,7 @@ async function workspaceRoutes(app) {
     app.log.info({ workspaceId: workspace.id, userId: req.userId }, 'Workspace created');
     audit(req, 'workspace_created', { workspaceId: workspace.id });
 
-    return reply.status(201).send({ id: workspace.id, nameEncrypted, role: 'owner', createdAt: workspace.createdAt });
+    return reply.status(201).send({ id: workspace.id, nameEncrypted, role: 'owner', vaultWrappedKeys: normalizedVaultWrappedKeys, createdAt: workspace.createdAt });
   });
 
   app.get('/', {
@@ -127,7 +136,7 @@ async function workspaceRoutes(app) {
     for (const m of memberships) roleMap[m.workspaceId] = m.role;
 
     const wsDocs = await Workspace
-      .find({ _id: { $in: workspaceIds } }, { _id: 1, nameEncrypted: 1, ownerId: 1, orgId: 1, emoji: 1, color: 1, storageUsedBytes: 1, createdAt: 1 })
+      .find({ _id: { $in: workspaceIds } }, { _id: 1, nameEncrypted: 1, ownerId: 1, orgId: 1, emoji: 1, color: 1, storageUsedBytes: 1, vaultWrappedKeys: 1, createdAt: 1 })
       .lean();
 
     const { WorkspaceKey } = require('../models');
@@ -149,6 +158,7 @@ async function workspaceRoutes(app) {
         role: roleMap[ws.id],
         ownerId: ws.ownerId,
         storageUsedBytes: ws.storageUsedBytes,
+        vaultWrappedKeys: ws.vaultWrappedKeys ?? null,
         createdAt: ws.createdAt,
       });
     }

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   name_encrypted     TEXT NOT NULL,
   owner_id           TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   org_id             TEXT REFERENCES organizations(id),
+  vault_wrapped_keys TEXT,
   storage_used_bytes BIGINT NOT NULL DEFAULT 0 CHECK(storage_used_bytes >= 0),
   data_residency     TEXT NOT NULL DEFAULT 'auto' CHECK(data_residency IN ('auto', 'eu', 'us', 'asia', 'custom')),
   emoji              TEXT,
