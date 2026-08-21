@@ -94,7 +94,7 @@ services:
       STORAGE_FORCE_PATH_STYLE: ${STORAGE_FORCE_PATH_STYLE:-true}
       LEGACY_AUTH_ENABLED: ${LEGACY_AUTH_ENABLED:-true}
     ports:
-      - "127.0.0.1:4000:3000"
+      - "127.0.0.1:${API_PORT:-4000}:3000"
     volumes:
       - beaver_data:/app/keys
     networks:

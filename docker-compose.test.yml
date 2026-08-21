@@ -101,7 +101,7 @@ services:
       LEGACY_AUTH_ENABLED: ${LEGACY_AUTH_ENABLED:-true}
       ALLOWED_ORIGINS: ${TEST_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://${LAN_IP:-127.0.0.1}:5173}
     ports:
-      - "0.0.0.0:4000:3000"
+      - "0.0.0.0:${API_PORT:-4000}:3000"
     volumes:
       - beaver_data:/app/keys
     networks:

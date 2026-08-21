@@ -7,7 +7,7 @@
 3. Edit `.env` — set `COOKIE_SECRET`, `SESSION_HMAC_KEY`, `EMAIL_HMAC_KEY`, `NOTE_HMAC_KEY` (min 32 chars each)
 4. `bash scripts/generate-keys.sh`
 5. `docker compose up -d`
-6. Access at http://localhost:3000
+6. Access at http://localhost:4000
 
 The stack includes Postgres, MinIO (object storage), API, and Hocuspocus (WebSocket). Data persists in Docker volumes.
 
