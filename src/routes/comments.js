@@ -6,7 +6,7 @@ const { NoteComment, NoteInvitation } = require('../models');
 
 const BODY_LIMIT = parseInt(process.env.COMMENTS_BODY_LIMIT_BYTES ?? '8192', 10);
 
-const NoteIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9-]+$/);
+const NoteIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 const CommentIdSchema = z.string().uuid();
 
 const baseRateLimit = {

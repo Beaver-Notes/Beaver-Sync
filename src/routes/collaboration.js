@@ -35,7 +35,7 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-const NoteIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9-]+$/);
+const NoteIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 
 const baseRateLimit = {
   config: {
