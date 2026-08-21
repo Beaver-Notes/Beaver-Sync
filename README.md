@@ -52,7 +52,7 @@ PLAN_OVERRIDE=team docker compose -f docker-compose.test.yml up -d
 - `PLAN_OVERRIDE` forces every account to the given tier (free|starter|pro|team|enterprise).
 - `EMAIL_ENABLED=false` disables all Resend sends in this environment.
 - Seed a tier-specific account: `npm run seed:tier -- team tester@example.com`
-- Frontend: point `VITE_BEAVER_SYNC_API_URL=http://localhost:3000` and
+- Frontend: point `VITE_BEAVER_SYNC_API_URL=http://localhost:4000` and
   `VITE_BEAVER_SYNC_WS_URL=ws://localhost:8080` (defaults already).
 
 ## Quick Start (Development)
