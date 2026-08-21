@@ -6,7 +6,20 @@ const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.in
 const HOCUSPOCUS_PORT = parseInt(process.env.HOCUSPOCUS_PORT ?? '8080', 10);
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 
-const ROOM_PATTERN = /^workspace:([a-zA-Z0-9-]+):note:([a-zA-Z0-9-]+)$/;
+const ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):note:([a-zA-Z0-9_-]+)$/;
+const META_ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):meta$/;
+
+function parseRoomName(documentName) {
+  const noteMatch = ROOM_PATTERN.exec(documentName);
+  if (noteMatch) {
+    return { kind: 'note', workspaceId: noteMatch[1], noteId: noteMatch[2] };
+  }
+  const metaMatch = META_ROOM_PATTERN.exec(documentName);
+  if (metaMatch) {
+    return { kind: 'meta', workspaceId: metaMatch[1], noteId: null };
+  }
+  return null;
+}
 
 // In-memory awareness store per note room
 // Key: "workspaceId:noteId", Value: Map<clientId, awarenessState>
@@ -194,22 +207,22 @@ async function startHocuspocus() {
         throw new Error('Missing session token');
       }
 
-      const match = ROOM_PATTERN.exec(documentName);
-      if (!match) {
+      const room = parseRoomName(documentName);
+      if (!room) {
         throw new Error('Invalid room name format');
       }
 
-      const workspaceId = match[1];
-      const noteId = match[2];
+      const workspaceId = room.workspaceId;
 
       const headers = { 'Content-Type': 'application/json' };
       if (INTERNAL_API_SECRET) {
         headers['X-Internal-Secret'] = INTERNAL_API_SECRET;
       }
 
-      // /auth/verify-session validates membership when workspaceId is provided (returns role)
+      // /auth/verify-session validates membership when workspaceId is provided (returns role).
+      // Meta rooms carry no noteId — workspace membership is the whole check.
       const body = { token, workspaceId };
-      if (noteId) body.noteId = noteId;
+      if (room.noteId) body.noteId = room.noteId;
 
       const response = await fetch(`${AUTH_BACKEND_URL}/auth/verify-session`, {
         method: 'POST',
@@ -232,7 +245,7 @@ async function startHocuspocus() {
         connection.readOnly = true;
       }
 
-      return { userId, workspaceId, noteId, role, readOnly };
+      return { userId, workspaceId, noteId: room.noteId, role, readOnly };
     },
 
     async connected({ documentName, connection, context }) {
@@ -245,12 +258,16 @@ async function startHocuspocus() {
       }
 
       // Register client for awareness
-      const match = ROOM_PATTERN.exec(documentName);
-      if (match) {
-        const [, workspaceId, noteId] = match;
+      const room = parseRoomName(documentName);
+      if (room) {
         const clientId = context?.clientId ?? connection.id ?? Math.random().toString(36).slice(2);
-        connection.context = { ...connection.context, workspaceId, noteId, clientId };
-        addAwarenessClient(workspaceId, noteId, clientId, connection);
+        connection.context = {
+          ...connection.context,
+          workspaceId: room.workspaceId,
+          noteId: room.noteId,
+          clientId,
+        };
+        addAwarenessClient(room.workspaceId, room.noteId ?? 'meta', clientId, connection);
       }
 
       // Catch-up is handled by the HTTP sync engine (pull-batch), which
@@ -262,28 +279,26 @@ async function startHocuspocus() {
 
     async onClose({ documentName, connection, context }) {
       // Clean up awareness on disconnect
-      const match = ROOM_PATTERN.exec(documentName);
-      if (match && context?.clientId) {
-        const [, workspaceId, noteId] = match;
-        removeAwarenessClient(workspaceId, noteId, context.clientId);
+      const room = parseRoomName(documentName);
+      if (room && context?.clientId) {
+        removeAwarenessClient(room.workspaceId, room.noteId ?? 'meta', context.clientId);
       }
     },
 
     async onStatelessMessage({ documentName, connection, context, message }) {
       // Handle awareness messages from clients
-      const match = ROOM_PATTERN.exec(documentName);
-      if (!match || !context?.clientId) return;
-      
-      const [, workspaceId, noteId] = match;
+      const room = parseRoomName(documentName);
+      if (!room || !context?.clientId) return;
+
       const clientId = context.clientId;
-      
+
       try {
         const parsed = JSON.parse(message);
         if (parsed.type === 'awareness' && parsed.state) {
           // Store awareness state in connection context
           connection.context = { ...connection.context, awarenessState: parsed.state };
           // Broadcast to other clients in the same note room
-          broadcastAwareness(server, workspaceId, noteId, clientId, parsed.state);
+          broadcastAwareness(server, room.workspaceId, room.noteId ?? 'meta', clientId, parsed.state);
         }
       } catch {
         // Ignore malformed messages
@@ -304,9 +319,9 @@ async function startHocuspocus() {
       // NOTE ROOM.  But clients viewing different notes in the same
       // workspace won't receive the update.  Notify them so they can
       // pull the change via HTTP when they open that note later.
-      const match = ROOM_PATTERN.exec(documentName);
-      if (!match) return;
-      const [, workspaceId, noteId] = match;
+      const room = parseRoomName(documentName);
+      if (!room || room.kind !== 'note') return;
+      const { workspaceId, noteId } = room;
 
       try {
         if (!document?.connections) return;
@@ -346,7 +361,7 @@ async function startHocuspocus() {
   return server;
 }
 
-module.exports = { startHocuspocus };
+module.exports = { startHocuspocus, parseRoomName };
 
 if (require.main === module) {
   startHocuspocus().catch((err) => {

@@ -8,7 +8,8 @@ const MAX_BATCH_SIZE = 200;
 const MAX_PULL_PAGE_SIZE = 500;
 const BATCH_INSERT_CHUNK = 500;
 
-const roomPattern = /^workspace:([a-zA-Z0-9-]+):note:([a-zA-Z0-9-]+)$/;
+const ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):note:([a-zA-Z0-9_-]+)$/;
+const META_ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):meta$/;
 const UPDATE_IDENTITY_SEP = '\u0000';
 
 const UPDATE_INSERT_COLUMNS =
@@ -20,9 +21,15 @@ function identityOf(noteId, deviceId, clock) {
 }
 
 function parseRoomName(documentName) {
-  const match = roomPattern.exec(documentName);
-  if (!match) return null;
-  return { workspaceId: match[1], noteId: match[2] };
+  const noteMatch = ROOM_PATTERN.exec(documentName);
+  if (noteMatch) {
+    return { workspaceId: noteMatch[1], noteId: noteMatch[2] };
+  }
+  const metaMatch = META_ROOM_PATTERN.exec(documentName);
+  if (metaMatch) {
+    return { workspaceId: metaMatch[1], noteId: null };
+  }
+  return null;
 }
 
 function generateUpdateId() {
