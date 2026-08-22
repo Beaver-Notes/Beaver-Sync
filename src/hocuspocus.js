@@ -1,6 +1,12 @@
 'use strict';
 
-const { Server } = require('@hocuspocus/server');
+const http = require('http');
+const { WebSocketServer } = require('ws');
+const Y = require('yjs');
+const syncProtocol = require('y-protocols/sync');
+const awarenessProtocol = require('y-protocols/awareness');
+const encoding = require('lib0/encoding');
+const decoding = require('lib0/decoding');
 
 const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.internal:3000';
 const HOCUSPOCUS_PORT = parseInt(process.env.HOCUSPOCUS_PORT ?? '8080', 10);
@@ -8,6 +14,10 @@ const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 
 const ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):note:([a-zA-Z0-9_-]+)$/;
 const META_ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):meta$/;
+
+// y-websocket message types
+const MSG_SYNC = 0;
+const MSG_AWARENESS = 1;
 
 function parseRoomName(documentName) {
   const noteMatch = ROOM_PATTERN.exec(documentName);
@@ -21,99 +31,323 @@ function parseRoomName(documentName) {
   return null;
 }
 
-// In-memory awareness store per note room
-// Key: "workspaceId:noteId", Value: Map<clientId, awarenessState>
-const awarenessStore = new Map();
+// --- Per-room state ---
 
-function getAwarenessKey(workspaceId, noteId) {
-  return `${workspaceId}:${noteId}`;
-}
+/** @type {Map<string, { doc: Y.Doc, awareness: awarenessProtocol.Awareness, conns: Set<{ ws: import('ws').WebSocket, ctx: object }>, persistenceDirty: boolean }>} */
+const rooms = new Map();
 
-function broadcastAwareness(server, workspaceId, noteId, senderClientId, state) {
-  const key = getAwarenessKey(workspaceId, noteId);
-  const roomAwareness = awarenessStore.get(key);
-  if (!roomAwareness) return;
+function getOrCreateRoom(documentName) {
+  if (rooms.has(documentName)) return rooms.get(documentName);
 
-  const message = JSON.stringify({
-    type: 'awareness',
-    clientId: senderClientId,
-    state,
-    timestamp: Date.now(),
+  const doc = new Y.Doc();
+  const awareness = new awarenessProtocol.Awareness(doc);
+
+  /** @type {Set<{ ws: import('ws').WebSocket, ctx: object }>} */
+  const conns = new Set();
+  const room = { doc, awareness, conns };
+  rooms.set(documentName, room);
+
+  // Broadcast doc updates to other connections in the room
+  doc.on('update', (update, origin) => {
+    if (origin === 'persistence') return;
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MSG_SYNC);
+    syncProtocol.writeUpdate(encoder, update);
+    const msg = encoding.toUint8Array(encoder);
+    broadcastToRoom(documentName, msg, null);
   });
 
-  for (const [clientId, conn] of roomAwareness) {
-    if (clientId === senderClientId) continue;
+  // Broadcast awareness changes to other connections in the room
+  awareness.on('update', ({ added, updated, removed }, origin) => {
+    if (origin === 'persistence') return;
+    const changedClients = added.concat(updated).concat(removed);
+    if (changedClients.length === 0) return;
+    const update = awarenessProtocol.encodeAwarenessUpdate(awareness, changedClients);
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MSG_AWARENESS);
+    encoding.writeVarUint8Array(encoder, update);
+    const msg = encoding.toUint8Array(encoder);
+    broadcastToRoom(documentName, msg, null);
+  });
+
+  // Load persisted state from Postgres
+  loadRoomFromPersistence(documentName, doc);
+
+  return room;
+}
+
+async function loadRoomFromPersistence(documentName, doc) {
+  try {
+    const postgres = require('./db/postgres');
+    const pool = postgres.getPool();
+    const result = await pool.query(
+      'SELECT blob FROM yjs_documents WHERE doc_name = $1',
+      [documentName]
+    );
+    if (result.rows.length > 0) {
+      Y.applyUpdate(doc, result.rows[0].blob, 'persistence');
+    }
+  } catch {
+    // Postgres unavailable — proceed with empty doc
+  }
+}
+
+// Debounced persistence per room
+const persistTimers = new Map();
+
+/** @type {WeakMap<import('ws').WebSocket, Set<number>>} */
+const wsToClientIds = new Map();
+
+function schedulePersist(documentName) {
+  if (persistTimers.has(documentName)) return;
+  const timer = setTimeout(() => {
+    persistTimers.delete(documentName);
+    persistRoom(documentName);
+  }, 1000);
+  persistTimers.set(documentName, timer);
+}
+
+async function persistRoom(documentName) {
+  const room = rooms.get(documentName);
+  if (!room) return;
+  try {
+    const postgres = require('./db/postgres');
+    const pool = postgres.getPool();
+    const stateVector = Y.encodeStateVector(room.doc);
+    const blob = Y.encodeStateAsUpdate(room.doc);
+    await pool.query(
+      `INSERT INTO yjs_documents (doc_name, state_vector, blob, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (doc_name) DO UPDATE SET
+         state_vector = EXCLUDED.state_vector,
+         blob = EXCLUDED.blob,
+         updated_at = NOW()`,
+      [documentName, stateVector, blob]
+    );
+  } catch (err) {
+    console.error(`[hocuspocus] persist failed for ${documentName}:`, err.message);
+  }
+}
+
+function broadcastToRoom(documentName, msg, excludeWs) {
+  const room = rooms.get(documentName);
+  if (!room) return;
+  for (const conn of room.conns) {
+    if (conn.ws === excludeWs) continue;
+    if (conn.ws.readyState === 1) {
+      try { conn.ws.send(msg); } catch { /* ignore */ }
+    }
+  }
+}
+
+function sendText(ws, obj) {
+  if (ws.readyState === 1) {
+    try { ws.send(JSON.stringify(obj)); } catch { /* ignore */ }
+  }
+}
+
+// --- Authentication ---
+
+async function verifySession(token, workspaceId, noteId) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (INTERNAL_API_SECRET) {
+    headers['X-Internal-Secret'] = INTERNAL_API_SECRET;
+  }
+  const body = { token, workspaceId };
+  if (noteId) body.noteId = noteId;
+
+  const response = await fetch(`${AUTH_BACKEND_URL}/auth/verify-session`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (response.status === 403) {
+    throw new Error('Not a member of this workspace');
+  }
+  if (!response.ok) {
+    throw new Error('Invalid or expired session token');
+  }
+
+  return response.json();
+}
+
+// --- Connection handling ---
+
+function handleUpgrade(req, socket, head) {
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const token = url.searchParams.get('token');
+  const documentName = url.pathname.replace(/^\//, '');
+
+  if (!token) {
+    socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  const room = parseRoomName(documentName);
+  if (!room) {
+    socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+
+  // Authenticate before upgrading
+  const workspaceId = room.workspaceId;
+  verifySession(token, workspaceId, room.noteId)
+    .then(({ userId, role }) => {
+      const readOnly = role === 'viewer' || role === 'guest';
+
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.isAlive = true;
+        ws.on('pong', () => { ws.isAlive = true; });
+
+        const ctx = {
+          userId,
+          workspaceId,
+          noteId: room.noteId,
+          role,
+          readOnly,
+          clientId: Math.random().toString(36).slice(2),
+        };
+        ws._hocuspocusCtx = ctx;
+        ws._hocuspocusDocumentName = documentName;
+
+        wss.emit('connection', ws, req);
+        handleConnection(ws, documentName, ctx);
+      });
+    })
+    .catch((err) => {
+      console.warn('[hocuspocus] Auth failed:', err.message);
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+    });
+}
+
+function handleConnection(ws, documentName, ctx) {
+  const room = getOrCreateRoom(documentName);
+  const conn = { ws, ctx };
+
+  room.conns.add(conn);
+
+  // Send auth info
+  sendText(ws, { type: 'auth', readOnly: ctx.readOnly, role: ctx.role });
+
+  // Send full awareness state to new connection
+  const awarenessStates = room.awareness.getStates();
+  if (awarenessStates.size > 0) {
+    const clients = Array.from(awarenessStates.keys());
+    const update = awarenessProtocol.encodeAwarenessUpdate(room.awareness, clients, awarenessStates);
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, MSG_AWARENESS);
+    encoding.writeVarUint8Array(encoder, update);
+    try { ws.send(encoding.toUint8Array(encoder)); } catch { /* ignore */ }
+  }
+
+  ws.on('message', (rawData) => {
     try {
-      conn.sendStateless(message);
-    } catch {
-      // Client may have disconnected
-      roomAwareness.delete(clientId);
+      const data = new Uint8Array(rawData);
+      const decoder = decoding.createDecoder(data);
+      const messageType = decoding.readVarUint(decoder);
+
+      switch (messageType) {
+        case MSG_SYNC:
+          handleSyncMessage(decoder, room, conn, documentName);
+          break;
+        case MSG_AWARENESS:
+          handleAwarenessMessage(decoder, room, conn);
+          break;
+        default:
+          // ignore unknown message types
+          break;
+      }
+    } catch (err) {
+      console.warn('[hocuspocus] Error handling message:', err.message);
+    }
+  });
+
+  ws.on('close', () => {
+    room.conns.delete(conn);
+
+    // Remove awareness state for disconnected client
+    const clientIds = wsToClientIds.get(ws);
+    if (clientIds && clientIds.size > 0) {
+      awarenessProtocol.removeAwarenessStates(room.awareness, Array.from(clientIds), null);
+    }
+    wsToClientIds.delete(ws);
+
+    // Cleanup empty rooms
+    if (room.conns.size === 0) {
+      schedulePersist(documentName);
+      // Don't destroy doc immediately — keep for persistence
+      setTimeout(() => {
+        const current = rooms.get(documentName);
+        if (current && current.conns.size === 0) {
+          current.awareness.destroy();
+          current.doc.destroy();
+          rooms.delete(documentName);
+        }
+      }, 30_000);
+    }
+  });
+}
+
+function handleSyncMessage(decoder, room, conn, documentName) {
+  const syncMessageType = decoding.readVarUint(decoder);
+
+  switch (syncMessageType) {
+    case syncProtocol.messageYjsSyncStep1: {
+      // Client sends its state vector; reply with sync step 2 (the diff)
+      const sv = decoding.readVarUint8Array(decoder);
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, MSG_SYNC);
+      syncProtocol.writeSyncStep2(encoder, room.doc, sv);
+      try { conn.ws.send(encoding.toUint8Array(encoder)); } catch { /* ignore */ }
+
+      // Also send our own sync step 1 so the client can send us its diff
+      const svEncoder = encoding.createEncoder();
+      encoding.writeVarUint(svEncoder, MSG_SYNC);
+      syncProtocol.writeSyncStep1(svEncoder, room.doc);
+      try { conn.ws.send(encoding.toUint8Array(svEncoder)); } catch { /* ignore */ }
+      break;
+    }
+    case syncProtocol.messageYjsSyncStep2: {
+      if (conn.ctx.readOnly) break;
+      syncProtocol.readSyncStep2(decoder, room.doc, 'remote');
+      schedulePersist(documentName);
+      break;
+    }
+    case syncProtocol.messageYjsUpdate: {
+      if (conn.ctx.readOnly) break;
+      syncProtocol.readUpdate(decoder, room.doc, 'remote');
+      schedulePersist(documentName);
+      break;
     }
   }
 }
 
-function addAwarenessClient(workspaceId, noteId, clientId, connection) {
-  const key = getAwarenessKey(workspaceId, noteId);
-  if (!awarenessStore.has(key)) {
-    awarenessStore.set(key, new Map());
+function handleAwarenessMessage(decoder, room, conn) {
+  const update = decoding.readVarUint8Array(decoder);
+
+  // Track which awareness client IDs belong to this connection
+  const updateDecoder = decoding.createDecoder(update);
+  const len = decoding.readVarUint(updateDecoder);
+  for (let i = 0; i < len; i++) {
+    const clientID = decoding.readVarUint(updateDecoder);
+    decoding.readVarUint(updateDecoder); // clock
+    decoding.readVarString(updateDecoder); // state JSON
+    if (!wsToClientIds.has(conn.ws)) wsToClientIds.set(conn.ws, new Set());
+    wsToClientIds.get(conn.ws).add(clientID);
   }
-  awarenessStore.get(key).set(clientId, connection);
-  
-  // Send current awareness state to new client
-  const roomAwareness = awarenessStore.get(key);
-  const states = [];
-  for (const [id, conn] of roomAwareness) {
-    if (id === clientId) continue;
-    const ctx = conn.context ?? {};
-    if (ctx.awarenessState) {
-      states.push({ clientId: id, state: ctx.awarenessState });
-    }
-  }
-  if (states.length > 0) {
-    try {
-      connection.sendStateless(JSON.stringify({
-        type: 'awareness-sync',
-        states,
-        timestamp: Date.now(),
-      }));
-    } catch {
-      // Client may have disconnected
-    }
-  }
+
+  awarenessProtocol.applyAwarenessUpdate(room.awareness, update, conn);
 }
 
-function removeAwarenessClient(workspaceId, noteId, clientId) {
-  const key = getAwarenessKey(workspaceId, noteId);
-  const roomAwareness = awarenessStore.get(key);
-  if (roomAwareness) {
-    roomAwareness.delete(clientId);
-    if (roomAwareness.size === 0) {
-      awarenessStore.delete(key);
-    }
-  }
-}
+// --- LISTEN/NOTIFY sync notifications ---
 
-/**
- * Start a Postgres LISTEN client that receives sync notifications from the
- * Fastify push-batch route and broadcasts them as stateless JSON messages
- * to all Hocuspocus connections in the matching workspace.
- *
- * This is how Device B learns about Device A's pushes without waiting for
- * the 30-second pull timer.  The notification payload is:
- *   { workspaceId, noteIds, excludeDeviceId }
- *
- * Connections whose context.workspaceId matches AND whose deviceId differs
- * from excludeDeviceId receive a stateless message:
- *   { type: 'notification', noteIds, timestamp }
- *
- * The client then triggers an immediate HTTP pull to fetch the encrypted
- * updates from yjs_doc_updates.
- */
-async function startSyncNotificationListener(server) {
+async function startSyncNotificationListener() {
   let pool;
   try {
-    // The db/postgres module may not be loaded yet in standalone Hocuspocus
-    // mode.  Lazy-require so the module is optional.
     const postgres = require('./db/postgres');
     pool = postgres.getPool();
   } catch {
@@ -141,25 +375,17 @@ async function startSyncNotificationListener(server) {
           if (!workspaceId) return;
 
           let notified = 0;
-          // In Hocuspocus v4, documents live on server.hocuspocus.documents.
-          // Each Document has a .connections Map<Connection, Context>.
-          const hocuspocus = server.hocuspocus;
-          if (!hocuspocus?.documents) return;
-          for (const [, doc] of hocuspocus.documents) {
-            for (const [conn] of doc.connections) {
-              const ctx = conn.context ?? {};
+          for (const [, room] of rooms) {
+            for (const conn of room.conns) {
+              const ctx = conn.ctx;
               if (ctx.workspaceId !== workspaceId) continue;
               if (excludeDeviceId && ctx.deviceId === excludeDeviceId) continue;
-              try {
-                conn.sendStateless(JSON.stringify({
-                  type: 'notification',
-                  noteIds,
-                  timestamp: Date.now(),
-                }));
-                notified++;
-              } catch {
-                // client may have disconnected between notification dispatch
-              }
+              sendText(conn.ws, {
+                type: 'notification',
+                noteIds,
+                timestamp: Date.now(),
+              });
+              notified++;
             }
           }
           if (notified > 0 && process.env.NODE_ENV !== 'production') {
@@ -195,170 +421,43 @@ async function startSyncNotificationListener(server) {
   await listen();
 }
 
+// --- Server startup ---
+
+let wss;
+
 async function startHocuspocus() {
   const { initErrorMonitoring } = require('./lib/error-monitoring');
   initErrorMonitoring(process.env.GLITCHTIP_DSN ?? process.env.HOCUSPOCUS_GLITCHTIP_DSN);
 
-  const server = new Server({
-    port: HOCUSPOCUS_PORT,
-
-    async onAuthenticate({ token, documentName, connection }) {
-      if (!token || typeof token !== 'string') {
-        throw new Error('Missing session token');
-      }
-
-      const room = parseRoomName(documentName);
-      if (!room) {
-        throw new Error('Invalid room name format');
-      }
-
-      const workspaceId = room.workspaceId;
-
-      const headers = { 'Content-Type': 'application/json' };
-      if (INTERNAL_API_SECRET) {
-        headers['X-Internal-Secret'] = INTERNAL_API_SECRET;
-      }
-
-      // /auth/verify-session validates membership when workspaceId is provided (returns role).
-      // Meta rooms carry no noteId — workspace membership is the whole check.
-      const body = { token, workspaceId };
-      if (room.noteId) body.noteId = room.noteId;
-
-      const response = await fetch(`${AUTH_BACKEND_URL}/auth/verify-session`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-      });
-
-      if (response.status === 403) {
-        throw new Error('Not a member of this workspace');
-      }
-
-      if (!response.ok) {
-        throw new Error('Invalid or expired session token');
-      }
-
-      const { userId, role } = await response.json();
-
-      const readOnly = role === 'viewer' || role === 'guest';
-      if (readOnly) {
-        connection.readOnly = true;
-      }
-
-      return { userId, workspaceId, noteId: room.noteId, role, readOnly };
-    },
-
-    async connected({ documentName, connection, context }) {
-      const role = context?.role || 'editor';
-      const readOnly = connection.readOnly || false;
-      try {
-        connection.sendStateless(JSON.stringify({ type: 'auth', readOnly, role }));
-      } catch {
-        // client may have disconnected before we could send
-      }
-
-      // Register client for awareness
-      const room = parseRoomName(documentName);
-      if (room) {
-        const clientId = context?.clientId ?? connection.id ?? Math.random().toString(36).slice(2);
-        connection.context = {
-          ...connection.context,
-          workspaceId: room.workspaceId,
-          noteId: room.noteId,
-          clientId,
-        };
-        addAwarenessClient(room.workspaceId, room.noteId ?? 'meta', clientId, connection);
-      }
-
-      // Catch-up is handled by the HTTP sync engine (pull-batch), which
-      // returns sync-key-encrypted envelopes from yjs_doc_updates.  We
-      // intentionally do NOT relay stored updates here because the stored
-      // data may be in a different encryption format than what the client
-      // expects.  The client pulls via HTTP after connecting.
-    },
-
-    async onClose({ documentName, connection, context }) {
-      // Clean up awareness on disconnect
-      const room = parseRoomName(documentName);
-      if (room && context?.clientId) {
-        removeAwarenessClient(room.workspaceId, room.noteId ?? 'meta', context.clientId);
-      }
-    },
-
-    async onStatelessMessage({ documentName, connection, context, message }) {
-      // Handle awareness messages from clients
-      const room = parseRoomName(documentName);
-      if (!room || !context?.clientId) return;
-
-      const clientId = context.clientId;
-
-      try {
-        const parsed = JSON.parse(message);
-        if (parsed.type === 'awareness' && parsed.state) {
-          // Store awareness state in connection context
-          connection.context = { ...connection.context, awarenessState: parsed.state };
-          // Broadcast to other clients in the same note room
-          broadcastAwareness(server, room.workspaceId, room.noteId ?? 'meta', clientId, parsed.state);
-        }
-      } catch {
-        // Ignore malformed messages
-      }
-    },
-
-    async onLoadDocument() {
-      // No-op: the server never reconstructs documents.  Catch-up is
-      // handled by the HTTP sync engine (pull-batch), and real-time
-      // relay is handled by Hocuspocus broadcasting to connected clients.
-    },
-
-    async onChange({ document, documentName, update, connection }) {
-      // We do NOT persist raw Yjs updates from Hocuspocus.  Persistence
-      // is handled exclusively by the HTTP sync engine (push-batch).
-      //
-      // Hocuspocus already relays updates to other clients IN THE SAME
-      // NOTE ROOM.  But clients viewing different notes in the same
-      // workspace won't receive the update.  Notify them so they can
-      // pull the change via HTTP when they open that note later.
-      const room = parseRoomName(documentName);
-      if (!room || room.kind !== 'note') return;
-      const { workspaceId, noteId } = room;
-
-      try {
-        if (!document?.connections) return;
-        for (const [conn] of document.connections) {
-          const ctx = conn.context ?? {};
-          if (ctx.workspaceId !== workspaceId) continue;
-          if (ctx.noteId === noteId) continue;
-          try {
-            conn.sendStateless(JSON.stringify({
-              type: 'notification',
-              noteIds: [noteId],
-              timestamp: Date.now(),
-            }));
-          } catch {
-            // client may have disconnected
-          }
-        }
-      } catch {
-        // iteration failure is non-fatal
-      }
-    },
-
-    async onListen({ port }) {
-      if (process.env.NODE_ENV !== 'production') {
-        console.log(`Hocuspocus server listening on port ${port}`);
-      }
-    },
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
   });
 
-  await server.listen();
+  wss = new WebSocketServer({ server });
 
-  // Start listening for sync notifications from the Fastify push-batch route.
-  // This allows clients to be notified in real-time when other devices push
-  // encrypted updates, triggering an immediate HTTP pull.
-  await startSyncNotificationListener(server);
+  server.listen(HOCUSPOCUS_PORT, () => {
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`Hocuspocus server listening on port ${HOCUSPOCUS_PORT}`);
+    }
+  });
 
-  return server;
+  wss.on('upgrade', handleUpgrade);
+
+  // Heartbeat to detect dead connections
+  const heartbeatInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (!ws.isAlive) return ws.terminate();
+      ws.isAlive = false;
+      ws.ping();
+    });
+  }, 30_000);
+
+  wss.on('close', () => clearInterval(heartbeatInterval));
+
+  await startSyncNotificationListener();
+
+  return wss;
 }
 
 module.exports = { startHocuspocus, parseRoomName };
