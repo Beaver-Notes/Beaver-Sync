@@ -8,6 +8,8 @@ const awarenessProtocol = require('y-protocols/awareness');
 const encoding = require('lib0/encoding');
 const decoding = require('lib0/decoding');
 
+const { createPostgresPersistence } = require('./db/yjs-persistence');
+
 const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.internal:3000';
 const HOCUSPOCUS_PORT = parseInt(process.env.HOCUSPOCUS_PORT ?? '8080', 10);
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
@@ -30,6 +32,8 @@ function parseRoomName(documentName) {
   }
   return null;
 }
+
+let persistence = null;
 
 // --- Per-room state ---
 
@@ -70,26 +74,12 @@ function getOrCreateRoom(documentName) {
     broadcastToRoom(documentName, msg, null);
   });
 
-  // Load persisted state from Postgres
-  loadRoomFromPersistence(documentName, doc);
+  // Load persisted state from Postgres via adapter
+  if (persistence) {
+    persistence.bindState(documentName, doc);
+  }
 
   return room;
-}
-
-async function loadRoomFromPersistence(documentName, doc) {
-  try {
-    const postgres = require('./db/postgres');
-    const pool = postgres.getPool();
-    const result = await pool.query(
-      'SELECT blob FROM yjs_documents WHERE doc_name = $1',
-      [documentName]
-    );
-    if (result.rows.length > 0) {
-      Y.applyUpdate(doc, result.rows[0].blob, 'persistence');
-    }
-  } catch {
-    // Postgres unavailable — proceed with empty doc
-  }
 }
 
 // Debounced persistence per room
@@ -102,31 +92,12 @@ function schedulePersist(documentName) {
   if (persistTimers.has(documentName)) return;
   const timer = setTimeout(() => {
     persistTimers.delete(documentName);
-    persistRoom(documentName);
+    const room = rooms.get(documentName);
+    if (room && persistence) {
+      persistence.writeState(documentName, room.doc);
+    }
   }, 1000);
   persistTimers.set(documentName, timer);
-}
-
-async function persistRoom(documentName) {
-  const room = rooms.get(documentName);
-  if (!room) return;
-  try {
-    const postgres = require('./db/postgres');
-    const pool = postgres.getPool();
-    const stateVector = Y.encodeStateVector(room.doc);
-    const blob = Y.encodeStateAsUpdate(room.doc);
-    await pool.query(
-      `INSERT INTO yjs_documents (doc_name, state_vector, blob, updated_at)
-       VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (doc_name) DO UPDATE SET
-         state_vector = EXCLUDED.state_vector,
-         blob = EXCLUDED.blob,
-         updated_at = NOW()`,
-      [documentName, stateVector, blob]
-    );
-  } catch (err) {
-    console.error(`[hocuspocus] persist failed for ${documentName}:`, err.message);
-  }
 }
 
 function broadcastToRoom(documentName, msg, excludeWs) {
@@ -426,6 +397,9 @@ async function startSyncNotificationListener() {
 let wss;
 
 async function startHocuspocus() {
+  const postgres = require('./db/postgres');
+  persistence = createPostgresPersistence(postgres.getPool());
+
   const { initErrorMonitoring } = require('./lib/error-monitoring');
   initErrorMonitoring(process.env.GLITCHTIP_DSN ?? process.env.HOCUSPOCUS_GLITCHTIP_DSN);
 
