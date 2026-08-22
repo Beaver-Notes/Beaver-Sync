@@ -160,6 +160,7 @@ async function buildApp() {
   await app.register(require('./routes/admin'),       { prefix: '/admin' });
   await app.register(require('./routes/webhooks'),    { prefix: '/webhooks' });
   await app.register(require('./routes/comments'),    { prefix: '/comments' });
+  await app.register(require('./routes/sso-admin'));
 
   await app.register(require('@fastify/websocket'));
   await app.register(require('./routes/ws'));
