@@ -114,11 +114,11 @@ services:
       retries: 3
       start_period: 10s
 
-  hocuspocus:
+  ws-relay:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: beaver-sync-test-hocuspocus
+    container_name: beaver-sync-test-ws-relay
     restart: unless-stopped
     depends_on:
       api:
@@ -127,7 +127,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
       AUTH_BACKEND_URL: http://api:3000
-    command: ["node", "src/hocuspocus.js"]
+    command: ["node", "src/ws-relay.js"]
     ports:
       - "0.0.0.0:8080:8080"
     networks:

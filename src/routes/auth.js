@@ -342,7 +342,7 @@ async function authRoutes(app) {
         return reply.send({ userId: result.userId, role: membership.role });
       }
 
-      // Not a workspace member, but a noteId was supplied (hocuspocus always
+      // Not a workspace member, but a noteId was supplied (ws-relay always
       // sends both). Fall through to the note-collaborator check below.
     }
 

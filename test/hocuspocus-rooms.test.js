@@ -2,7 +2,7 @@
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert');
-const { parseRoomName } = require('../src/hocuspocus');
+const { parseRoomName } = require('../src/ws-relay');
 
 describe('parseRoomName', () => {
   test('parses note rooms with underscore IDs', () => {

@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const { Subscription, Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember } = require('../models');
-const { getQuotaBytes, getHistoryDays } = require('./plans');
+const { getQuotaBytes, getHistoryDays, resolvePlanForAccount } = require('./plans');
 const { isOrgParticipant } = require('./plan-resolution');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -66,14 +66,14 @@ function historyCutoffTs(plan, now = Date.now()) {
 // plan (free → 0 days) governs instead.
 async function historyCutoffForAccount(accountId, workspaceId = null) {
   const sub = await Subscription.findOne({ accountId }).lean();
-  let plan = sub?.plan || 'free';
+  let orgSub = null;
   if (workspaceId) {
     const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
     if (ws?.orgId && (await isOrgParticipant(ws.orgId, accountId))) {
-      const orgSub = await OrgSubscription.findOne({ orgId: ws.orgId }).lean();
-      if (orgSub?.plan) plan = orgSub.plan;
+      orgSub = await OrgSubscription.findOne({ orgId: ws.orgId }).lean();
     }
   }
+  const plan = resolvePlanForAccount({ orgSub, sub });
   return { plan, cutoffTs: historyCutoffTs(plan) };
 }
 

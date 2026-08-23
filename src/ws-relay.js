@@ -11,7 +11,7 @@ const decoding = require('lib0/decoding');
 const { createPostgresPersistence } = require('./db/yjs-persistence');
 
 const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.internal:3000';
-const HOCUSPOCUS_PORT = parseInt(process.env.HOCUSPOCUS_PORT ?? '8080', 10);
+const WS_RELAY_PORT = parseInt(process.env.WS_RELAY_PORT ?? '8080', 10);
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 
 const ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):note:([a-zA-Z0-9_-]+)$/;
@@ -150,7 +150,10 @@ function handleUpgrade(req, socket, head) {
   const token = url.searchParams.get('token');
   const documentName = url.pathname.replace(/^\//, '');
 
+  console.log(`[ws-relay] upgrade request: ${documentName} (token: ${token ? token.slice(0, 8) + '...' : 'MISSING'})`);
+
   if (!token) {
+    console.warn('[ws-relay] upgrade rejected: no token');
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
     return;
@@ -158,6 +161,7 @@ function handleUpgrade(req, socket, head) {
 
   const room = parseRoomName(documentName);
   if (!room) {
+    console.warn(`[ws-relay] upgrade rejected: bad room name "${documentName}"`);
     socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
     socket.destroy();
     return;
@@ -168,6 +172,7 @@ function handleUpgrade(req, socket, head) {
   verifySession(token, workspaceId, room.noteId)
     .then(({ userId, role }) => {
       const readOnly = role === 'viewer' || role === 'guest';
+      console.log(`[ws-relay] upgrade accepted: ${documentName} user=${userId} role=${role}`);
 
       wss.handleUpgrade(req, socket, head, (ws) => {
         ws.isAlive = true;
@@ -181,15 +186,15 @@ function handleUpgrade(req, socket, head) {
           readOnly,
           clientId: Math.random().toString(36).slice(2),
         };
-        ws._hocuspocusCtx = ctx;
-        ws._hocuspocusDocumentName = documentName;
+        ws._wsCtx = ctx;
+        ws._wsDocumentName = documentName;
 
         wss.emit('connection', ws, req);
         handleConnection(ws, documentName, ctx);
       });
     })
     .catch((err) => {
-      console.warn('[hocuspocus] Auth failed:', err.message);
+      console.warn(`[ws-relay] Auth failed for ${documentName}: ${err.message}`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
     });
@@ -233,7 +238,7 @@ function handleConnection(ws, documentName, ctx) {
           break;
       }
     } catch (err) {
-      console.warn('[hocuspocus] Error handling message:', err.message);
+      console.warn('[ws-relay] Error handling message:', err.message);
     }
   });
 
@@ -322,7 +327,7 @@ async function startSyncNotificationListener() {
     const postgres = require('./db/postgres');
     pool = postgres.getPool();
   } catch {
-    console.warn('[hocuspocus] Postgres pool unavailable — sync notifications disabled');
+    console.warn('[ws-relay] Postgres pool unavailable — sync notifications disabled');
     return;
   }
 
@@ -337,7 +342,7 @@ async function startSyncNotificationListener() {
       await client.query('LISTEN sync_notifications');
       reconnectAttempts = 0;
       if (process.env.NODE_ENV !== 'production') {
-        console.log('[hocuspocus] Listening for sync notifications on Postgres');
+        console.log('[ws-relay] Listening for sync notifications on Postgres');
       }
 
       client.on('notification', (msg) => {
@@ -360,10 +365,10 @@ async function startSyncNotificationListener() {
             }
           }
           if (notified > 0 && process.env.NODE_ENV !== 'production') {
-            console.log(`[hocuspocus] Notified ${notified} client(s) in workspace ${workspaceId} about ${noteIds.length} note(s)`);
+            console.log(`[ws-relay] Notified ${notified} client(s) in workspace ${workspaceId} about ${noteIds.length} note(s)`);
           }
         } catch (err) {
-          console.warn('[hocuspocus] Failed to process sync notification:', err.message);
+          console.warn('[ws-relay] Failed to process sync notification:', err.message);
         }
       });
 
@@ -377,7 +382,7 @@ async function startSyncNotificationListener() {
       client.on('error', teardown);
       client.on('end', teardown);
     } catch (err) {
-      console.warn('[hocuspocus] Failed to start sync notification listener:', err.message);
+      console.warn('[ws-relay] Failed to start sync notification listener:', err.message);
       if (client) { client.release(true); client = null; }
       scheduleReconnect();
     }
@@ -396,12 +401,12 @@ async function startSyncNotificationListener() {
 
 let wss;
 
-async function startHocuspocus() {
+async function startWsRelay() {
   const postgres = require('./db/postgres');
   persistence = createPostgresPersistence(postgres.getPool());
 
   const { initErrorMonitoring } = require('./lib/error-monitoring');
-  initErrorMonitoring(process.env.GLITCHTIP_DSN ?? process.env.HOCUSPOCUS_GLITCHTIP_DSN);
+  initErrorMonitoring(process.env.GLITCHTIP_DSN ?? process.env.WS_RELAY_GLITCHTIP_DSN);
 
   const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -410,9 +415,9 @@ async function startHocuspocus() {
 
   wss = new WebSocketServer({ server });
 
-  server.listen(HOCUSPOCUS_PORT, () => {
+  server.listen(WS_RELAY_PORT, () => {
     if (process.env.NODE_ENV !== 'production') {
-      console.log(`Hocuspocus server listening on port ${HOCUSPOCUS_PORT}`);
+      console.log(`[ws-relay] listening on port ${WS_RELAY_PORT}`);
     }
   });
 
@@ -434,11 +439,11 @@ async function startHocuspocus() {
   return wss;
 }
 
-module.exports = { startHocuspocus, parseRoomName };
+module.exports = { startWsRelay, parseRoomName };
 
 if (require.main === module) {
-  startHocuspocus().catch((err) => {
-    console.error('Fatal Hocuspocus startup error:', err);
+  startWsRelay().catch((err) => {
+    console.error('Fatal ws-relay startup error:', err);
     process.exit(1);
   });
 }
