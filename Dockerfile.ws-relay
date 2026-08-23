@@ -1,0 +1,34 @@
+# Lean Dockerfile for the WebSocket relay server
+# Only installs the ~6 packages it actually needs (~80MB vs ~180MB full deps)
+FROM node:22-alpine AS deps
+
+WORKDIR /app
+
+# Install only what ws-relay requires
+RUN npm init -y > /dev/null 2>&1 && \
+    npm install --save ws yjs y-protocols lib0 pg @sentry/node && \
+    npm cache clean --force
+
+# Stage 2: Runtime
+FROM node:22-alpine AS runtime
+
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY src/ws-relay.js ./src/ws-relay.js
+COPY src/db/postgres.js ./src/db/postgres.js
+COPY src/db/yjs-persistence.js ./src/db/yjs-persistence.js
+COPY src/lib/error-monitoring.js ./src/lib/error-monitoring.js
+COPY package.json ./
+
+RUN addgroup -S beaver && adduser -S beaver -G beaver \
+    && mkdir -p /app/keys \
+    && chown -R beaver:beaver /app
+
+USER beaver
+
+EXPOSE 8080
+
+STOPSIGNAL SIGTERM
+
+CMD ["node", "src/ws-relay.js"]

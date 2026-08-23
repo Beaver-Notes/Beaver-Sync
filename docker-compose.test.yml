@@ -117,7 +117,7 @@ services:
   ws-relay:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.ws-relay
     container_name: beaver-sync-test-ws-relay
     restart: unless-stopped
     depends_on:
