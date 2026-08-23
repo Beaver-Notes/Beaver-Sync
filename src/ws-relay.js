@@ -10,9 +10,19 @@ const decoding = require('lib0/decoding');
 
 const { createPostgresPersistence } = require('./db/yjs-persistence');
 
-const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.internal:3000';
-const WS_RELAY_PORT = parseInt(process.env.WS_RELAY_PORT ?? '8080', 10);
-const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
+function resolveConfig() {
+  return {
+    port: parseInt(process.env.WS_RELAY_PORT ?? '8080', 10),
+    authBackendUrl: process.env.AUTH_BACKEND_URL || 'http://api:3000',
+    internalSecret: process.env.INTERNAL_API_SECRET,
+    databaseUrl: process.env.DATABASE_URL,
+  };
+}
+
+const config = resolveConfig();
+const AUTH_BACKEND_URL = config.authBackendUrl;
+const WS_RELAY_PORT = config.port;
+const INTERNAL_API_SECRET = config.internalSecret;
 
 const ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):note:([a-zA-Z0-9_-]+)$/;
 const META_ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):meta$/;
@@ -437,7 +447,7 @@ async function startWsRelay() {
   return wss;
 }
 
-module.exports = { startWsRelay, parseRoomName };
+module.exports = { startWsRelay, parseRoomName, resolveConfig };
 
 if (require.main === module) {
   startWsRelay().catch((err) => {
