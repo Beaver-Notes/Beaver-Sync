@@ -413,15 +413,13 @@ async function startWsRelay() {
     res.end(JSON.stringify({ status: 'ok', timestamp: new Date().toISOString() }));
   });
 
-  wss = new WebSocketServer({ server });
+  wss = new WebSocketServer({ noServer: true });
 
   server.listen(WS_RELAY_PORT, () => {
-    if (process.env.NODE_ENV !== 'production') {
-      console.log(`[ws-relay] listening on port ${WS_RELAY_PORT}`);
-    }
+    console.log(`[ws-relay] listening on port ${WS_RELAY_PORT}`);
   });
 
-  wss.on('upgrade', handleUpgrade);
+  server.on('upgrade', handleUpgrade);
 
   // Heartbeat to detect dead connections
   const heartbeatInterval = setInterval(() => {

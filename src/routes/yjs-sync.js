@@ -228,6 +228,11 @@ async function yjsSyncRoutes(app) {
     if (!await requireWorkspaceRole(req, reply, workspaceId, false)) return;
 
     const { cutoffTs } = await historyCutoffForAccount(req.userId, workspaceId);
+    console.log(`[pull-batch] ws=${workspaceId} notes=${notes.length} cutoffTs=${cutoffTs} userId=${req.userId}`);
+
+    for (const { noteId, checkpoint, limit } of notes) {
+      console.log(`[pull-batch]   note=${noteId} checkpoint=${JSON.stringify(checkpoint)} limit=${limit}`);
+    }
 
     if (process.env.NODE_ENV !== 'production') {
       console.log(`[pull-batch] ws=${workspaceId} notes=${notes.length} deviceId=${req.headers['x-device-id'] || 'none'}`);
@@ -239,13 +244,15 @@ async function yjsSyncRoutes(app) {
     const entries = await Promise.all(notes.map(async ({ noteId, checkpoint, limit }) => {
       const page = await persistence.loadUpdatesAfter(workspaceId, noteId, checkpoint, Math.min(limit, MAX_UPDATES_PER_PULL), cutoffTs);
       if (process.env.NODE_ENV !== 'production') {
-        console.log(`[pull-batch]   -> ${noteId}: ${page.updates.length} updates, hasMore=${page.hasMore}`);
+        console.log(`[pull-batch]   -> ${noteId}: ${page.updates.length} updates, hasMore=${page.hasMore}${page.stale ? ' STALE' : ''}`);
       }
-      return [noteId, {
+      const entry = {
         updates: page.updates.map((update) => formatUpdate(noteId, update)),
         nextCheckpoint: page.nextCheckpoint,
         hasMore: page.hasMore,
-      }];
+      };
+      if (page.stale) entry.stale = true;
+      return [noteId, entry];
     }));
     return reply.send({ notes: Object.fromEntries(entries) });
   });

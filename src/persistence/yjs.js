@@ -250,11 +250,27 @@ async function getDocumentSyncState(workspaceId, noteId) {
   };
 }
 
+// Maximum age (ms) for a checkpoint to be considered fresh.
+// Checkpoints older than this are treated as stale and the server returns
+// `stale: true` so the client clears them and does a full re-pull.
+const MAX_CURSOR_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 async function loadUpdatesAfter(workspaceId, noteId, checkpoint, limit, sinceTs = 0) {
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PULL_PAGE_SIZE) {
     throw new RangeError(`pull page size must be between 1 and ${MAX_PULL_PAGE_SIZE}`);
   }
   const devices = checkpoint || {};
+  const hasCheckpoint = Object.keys(devices).length > 0;
+
+  // --- Cursor expiry: reject checkpoints older than MAX_CURSOR_AGE_MS ---
+  if (hasCheckpoint) {
+    const maxTs = Math.max(...Object.values(devices).map((v) => v.ts));
+    if (Date.now() - maxTs > MAX_CURSOR_AGE_MS) {
+      console.log(`[pull-batch] note=${noteId} stale cursor (age=${Date.now() - maxTs}ms, max=${MAX_CURSOR_AGE_MS}ms)`);
+      return { updates: [], nextCheckpoint: {}, hasMore: false, stale: true };
+    }
+  }
+
   const conditions = [];
   const params = [workspaceId, noteId];
   let paramIdx = 3;
@@ -297,10 +313,29 @@ async function loadUpdatesAfter(workspaceId, noteId, checkpoint, limit, sinceTs 
       nextCheckpoint[row.deviceId] = { ts: row.ts, sequence: row.clock };
     }
   }
+
+  // --- Stale cursor detection: 0 rows returned but server has newer data ---
+  // When the client sends a non-empty checkpoint and we return 0 rows, it
+  // could mean either "client is up to date" or "client's cursor is stale"
+  // (e.g. from a previous session, or after server data was compacted/rotated).
+  // A lightweight COUNT check distinguishes the two cases.
+  let stale = false;
+  if (page.length === 0 && hasCheckpoint) {
+    const { rows: countRows } = await query(
+      `SELECT COUNT(*)::int AS cnt FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = $2`,
+      [workspaceId, noteId]
+    );
+    if (countRows[0]?.cnt > 0) {
+      console.log(`[pull-batch] note=${noteId} stale cursor detected (server has ${countRows[0].cnt} rows, checkpoint returned 0)`);
+      stale = true;
+    }
+  }
+
   return {
     updates: page,
-    nextCheckpoint: last ? nextCheckpoint : checkpoint,
+    nextCheckpoint: last ? nextCheckpoint : {},
     hasMore,
+    stale,
   };
 }
 
