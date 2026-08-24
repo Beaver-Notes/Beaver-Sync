@@ -131,6 +131,7 @@ async function webhookRoutes(app) {
       }
     } catch (err) {
       app.log.error({ err, type: event.type }, 'Error processing Stripe webhook');
+      throw err;
     }
 
     return reply.send({ received: true, processed: true });
@@ -206,6 +207,7 @@ async function webhookRoutes(app) {
       await upsertSubscription({ accountId, plan, status, provider: 'apple', providerId: originalTransactionId, renewsAt });
     } catch (err) {
       app.log.error({ err }, 'Error processing Apple webhook');
+      throw err;
     }
 
     return reply.send({ received: true });
@@ -276,6 +278,7 @@ async function webhookRoutes(app) {
       await upsertSubscription({ accountId: existing.accountId, plan, status, provider: 'google', providerId: purchaseToken });
     } catch (err) {
       app.log.error({ err }, 'Error processing Google webhook');
+      throw err;
     }
 
     return reply.send({ received: true });

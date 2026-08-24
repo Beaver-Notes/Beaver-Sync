@@ -178,6 +178,9 @@ async function organizationRoutes(app) {
     if (!accountId) {
       return reply.status(400).send({ error: 'account_id_required' });
     }
+    if (!['admin', 'member'].includes(role)) {
+      return reply.status(400).send({ error: 'invalid_role', message: 'role must be member or admin.' });
+    }
 
     const existing = await OrgMember.findOne({ orgId: req.orgId, accountId }).lean();
     if (existing) {
@@ -307,6 +310,16 @@ async function organizationRoutes(app) {
     if (plan !== undefined) {
       if (!VALID_PLANS.has(plan)) {
         return reply.status(400).send({ error: 'validation_error', message: 'Invalid plan.' });
+      }
+      // Paid plans (starter/pro/team/enterprise) are sourced from the Stripe /
+      // Apple / Google billing webhook (upsertSubscription), never set directly
+      // by a workspace owner — otherwise an owner could self-grant enterprise
+      // and bypass every billing gate. Only a downgrade to 'free' is allowed here.
+      if (plan !== 'free') {
+        return reply.status(402).send({
+          error: 'plan_change_requires_payment',
+          message: 'Plan upgrades must be completed through billing.',
+        });
       }
       update.plan = plan;
     }

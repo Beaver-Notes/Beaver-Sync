@@ -89,7 +89,10 @@ function isPaidPlan(plan) {
 }
 
 function resolvePlanForAccount({ orgSub, sub } = {}) {
-  if (process.env.PLAN_OVERRIDE && VALID_PLANS.has(process.env.PLAN_OVERRIDE)) {
+  // PLAN_OVERRIDE is a dev/test escape hatch only. In production it must never
+  // be honored, or a leaked env value silently disables every plan/quota/device
+  // gate for all users (billing bypass).
+  if (process.env.NODE_ENV !== 'production' && process.env.PLAN_OVERRIDE && VALID_PLANS.has(process.env.PLAN_OVERRIDE)) {
     return process.env.PLAN_OVERRIDE;
   }
   return orgSub?.plan || sub?.plan || 'free';
