@@ -4,7 +4,7 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { z } = require('zod');
 const { VaultKeyParams, WorkspaceMember } = require('../models');
-const { query, transaction } = require('../db');
+const { createVaultChallenge, consumeVaultChallenge } = require('../repositories/vaultProofChallenge');
 const { audit } = require('../lib/audit');
 
 const BCRYPT_ROUNDS = 12;
@@ -67,27 +67,6 @@ async function requireMember(app, userId, workspaceId) {
   return membership;
 }
 
-function hashChallenge(challenge) {
-  return crypto.createHash('sha256').update(challenge, 'utf8').digest('hex');
-}
-
-async function consumeChallenge({ workspaceId, accountId, challenge }) {
-  const now = new Date().toISOString();
-  return await transaction(async (client) => {
-    const { rows } = await client.query(
-      'SELECT id, expires_at FROM vault_proof_challenges WHERE workspace_id = $1 AND account_id = $2 AND challenge_hash = $3 LIMIT 1',
-      [workspaceId, accountId, hashChallenge(challenge)]
-    );
-    const row = rows[0];
-    if (!row || row.expires_at <= now) {
-      if (row) await client.query('DELETE FROM vault_proof_challenges WHERE id = $1', [row.id]);
-      return false;
-    }
-    const result = await client.query('DELETE FROM vault_proof_challenges WHERE id = $1', [row.id]);
-    return result.rowCount === 1;
-  });
-}
-
 async function vaultRoutes(app) {
   await app.register(require('../middleware/auth'));
 
@@ -107,10 +86,7 @@ async function vaultRoutes(app) {
     const challenge = crypto.randomBytes(32).toString('base64url');
     const createdAt = new Date();
     const expiresAt = new Date(createdAt.getTime() + CHALLENGE_TTL_MS).toISOString();
-    await query(
-      'INSERT INTO vault_proof_challenges (id, workspace_id, account_id, challenge_hash, expires_at, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
-      [crypto.randomUUID(), workspaceId, req.userId, hashChallenge(challenge), expiresAt, createdAt.toISOString()]
-    );
+    await createVaultChallenge({ workspaceId, accountId: req.userId, challenge, expiresAt, createdAt: createdAt.toISOString() });
     return reply.send({ challenge, expiresAt });
   });
 
@@ -135,7 +111,7 @@ async function vaultRoutes(app) {
     }
 
     const { passphraseProof, keyParams, challenge } = parsed.data;
-    if (!await consumeChallenge({ workspaceId, accountId: req.userId, challenge })) {
+    if (!await consumeVaultChallenge({ workspaceId, accountId: req.userId, challenge })) {
       return reply.status(401).send({ error: 'invalid_challenge', message: 'The vault proof challenge is invalid or expired.' });
     }
 
@@ -230,7 +206,7 @@ async function vaultRoutes(app) {
       });
     }
 
-    if (!await consumeChallenge({ workspaceId, accountId: req.userId, challenge: parsed.data.challenge })) {
+    if (!await consumeVaultChallenge({ workspaceId, accountId: req.userId, challenge: parsed.data.challenge })) {
       return reply.status(401).send({ error: 'invalid_challenge', message: 'The vault proof challenge is invalid or expired.' });
     }
 

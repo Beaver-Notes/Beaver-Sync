@@ -124,3 +124,17 @@ full suite to prove isolation (currently green-in-isolation proves the bug).
 Execute Phase 0 first. Begin by confirming T1's contamination mechanism (run full
 suite serially; identify the leaking global stub) and fixing it, so every later change
 has a real safety net.
+
+---
+
+## Progress Log
+
+- **bee3673** — Phase 1 quick wins: deduped `requireWorkspaceMember`/`requireWorkspaceWriter`
+  into `middleware/org.js` (was redefined in `yjs-sync.js`); `models.deleteMany` is now an
+  alias of `deleteOne`; test/helpers/db.js teardown makes `beaver_test` hermetic per-file.
+  D4 resolved. D3 already resolved in current tree (inline `require('../db')` no longer present).
+- **vaultProofChallenge repo** — ADR-1 first step: extracted the `vault_proof_challenges`
+  raw SQL (1 INSERT + 1 transaction) out of `vault.js` into
+  `src/repositories/vaultProofChallenge.js`. `test/vault.test.js` 6/6 pass. Next domains
+  in order of smallness: `organizations.js`, `auth.js`, `workspaces.js`, `commits.js`,
+  `collaboration.js`, `account.js`, then `sync-state.js` (largest).
