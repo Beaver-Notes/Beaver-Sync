@@ -7,11 +7,11 @@ const { audit } = require('../lib/audit');
 const { historyCutoffForAccount } = require('../lib/plan-lifecycle');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
 const { getPool } = require('../db/postgres');
+const { DEVICE_ID_PATTERN } = require('../lib/patterns');
 
 const MAX_UPDATES_PER_PUSH = 200;
 const MAX_UPDATES_PER_PULL = 500;
 const MAX_BODY_BYTES = Math.min(parseInt(process.env.YJS_SYNC_BODY_LIMIT_BYTES ?? '10485760', 10), 10485760);
-const DEVICE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const SYNC_KEY_PATTERN = /^([a-zA-Z0-9_-]{1,256})~~([a-zA-Z0-9_-]{1,128})~~([0-9]+)~~([0-9]+)\.yjs\.json$/;
 
 const UpdateSchema = z.object({
@@ -63,13 +63,19 @@ function getDeviceId(req, reply) {
   return deviceId;
 }
 
-async function requireWorkspaceRole(req, reply, workspaceId, write) {
+async function requireWorkspaceMember(req, reply, workspaceId) {
   const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
   if (!membership) {
     reply.status(403).send({ error: 'not_workspace_member' });
     return null;
   }
-  if (write && !['owner', 'editor'].includes(membership.role)) {
+  return membership;
+}
+
+async function requireWorkspaceWriter(req, reply, workspaceId) {
+  const membership = await requireWorkspaceMember(req, reply, workspaceId);
+  if (!membership) return null;
+  if (!['owner', 'editor'].includes(membership.role)) {
     reply.status(403).send({ error: 'workspace_write_forbidden' });
     return null;
   }
@@ -151,7 +157,7 @@ async function yjsSyncRoutes(app) {
       return reply.status(403).send({ error: 'device_session_mismatch' });
     }
     const { workspaceId, notes } = parsed.data;
-    if (!await requireWorkspaceRole(req, reply, workspaceId, true)) return;
+    if (!await requireWorkspaceWriter(req, reply, workspaceId)) return;
     req.workspaceId = workspaceId;
 
     for (const { noteId, updates } of notes) {
@@ -225,7 +231,7 @@ async function yjsSyncRoutes(app) {
     const parsed = BatchPullSchema.safeParse(req.body ?? {});
     if (!parsed.success) return validationError(reply, parsed);
     const { workspaceId, notes } = parsed.data;
-    if (!await requireWorkspaceRole(req, reply, workspaceId, false)) return;
+    if (!await requireWorkspaceMember(req, reply, workspaceId)) return;
 
     const { cutoffTs } = await historyCutoffForAccount(req.userId, workspaceId);
     console.log(`[pull-batch] ws=${workspaceId} notes=${notes.length} cutoffTs=${cutoffTs} userId=${req.userId}`);
@@ -260,14 +266,14 @@ async function yjsSyncRoutes(app) {
   app.get('/note-ids', { ...protect }, async (req, reply) => {
     const workspaceId = req.query.workspaceId;
     if (!workspaceId) return reply.status(400).send({ error: 'missing_workspace' });
-    if (!await requireWorkspaceRole(req, reply, workspaceId, false)) return;
+    if (!await requireWorkspaceMember(req, reply, workspaceId)) return;
     return reply.send({ noteIds: await persistence.listNoteIds(workspaceId) });
   });
 
   app.delete('/updates', { ...protect, bodyLimit: 4096 }, async (req, reply) => {
     const parsed = DeleteSchema.safeParse(req.body ?? {});
     if (!parsed.success) return validationError(reply, parsed);
-    if (!await requireWorkspaceRole(req, reply, parsed.data.workspaceId, true)) return;
+    if (!await requireWorkspaceWriter(req, reply, parsed.data.workspaceId)) return;
     await persistence.deleteUpdatesForNote(parsed.data.workspaceId, parsed.data.noteId);
     return reply.send({ deleted: true });
   });

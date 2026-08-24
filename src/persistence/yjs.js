@@ -36,20 +36,6 @@ function generateUpdateId() {
   return `${Date.now()}-${crypto.randomUUID()}`;
 }
 
-async function storeUpdate(workspaceId, noteId, updateData, deviceId, clock, encrypted = false) {
-  const now = new Date().toISOString();
-  await query(`
-    INSERT INTO yjs_doc_updates
-    (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    ON CONFLICT DO NOTHING
-  `, [
-    generateUpdateId(), workspaceId, noteId,
-    Buffer.isBuffer(updateData) ? updateData : Buffer.from(updateData),
-    encrypted ? 1 : 0, deviceId, clock, Date.now(), now
-  ]);
-}
-
 async function storeUpdatesBatch(workspaceId, noteId, updates) {
   if (!updates.length) return { accepted: 0, duplicate: 0, checkpoint: null };
   if (updates.length > MAX_BATCH_SIZE) {
@@ -68,27 +54,6 @@ function checkpointForRows(rows) {
     .map((row) => ({ ts: row.ts, sequence: row.clock, deviceId: row.device_id }))
     .sort(compareCheckpoints)
     .at(-1) ?? null;
-}
-
-async function getAcceptedBytes(workspaceId, notes) {
-  const seen = new Set();
-  let bytes = 0;
-  for (const { noteId, updates } of notes) {
-    for (const update of updates) {
-      const identity = `${noteId}\u0000${update.deviceId}\u0000${update.sequence}`;
-      if (!seen.has(identity)) {
-        const { rows } = await query(`
-          SELECT 1 FROM yjs_doc_updates
-          WHERE workspace_id = $1 AND note_id = $2 AND device_id = $3 AND clock = $4
-        `, [workspaceId, noteId, update.deviceId, update.sequence]);
-        if (!rows.length) {
-          bytes += Buffer.isBuffer(update.data) ? update.data.byteLength : Buffer.byteLength(update.data);
-        }
-      }
-      seen.add(identity);
-    }
-  }
-  return bytes;
 }
 
 async function storeNotesBatch(workspaceId, notes, quota = null) {
@@ -482,10 +447,8 @@ async function listNoteIds(workspaceId) {
 
 module.exports = {
   parseRoomName,
-  storeUpdate,
   storeUpdatesBatch,
   storeNotesBatch,
-  getAcceptedBytes,
   getWorkspaceSyncState,
   getDocumentSyncState,
   loadUpdatesAfter,

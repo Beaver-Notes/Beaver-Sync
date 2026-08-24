@@ -6,7 +6,7 @@ const { verifyAssetSignature } = require('../lib/asset-sign');
 const { storageConfig } = require('../services/r2');
 
 const MAX_ASSET_SIZE_BYTES = parseInt(
-  process.env.MAX_ASSET_SIZE_BYTES ?? String(100 * 1024 * 1024),
+  process.env.ASSET_MAX_SIZE_BYTES ?? String(100 * 1024 * 1024),
   10
 );
 const ASSET_URL_TTL_SECONDS = Math.min(
@@ -16,22 +16,7 @@ const ASSET_URL_TTL_SECONDS = Math.min(
 const ASSET_KEY_PATTERN = /^[a-zA-Z0-9._ -]{1,256}$/;
 const ASSET_UPLOAD_CONCURRENCY = 8;
 
-// Runs `fn` over `items` with bounded concurrency, preserving order.
-async function mapWithConcurrency(items, concurrency, fn) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  const workers = [];
-  for (let w = 0; w < concurrency; w++) {
-    workers.push((async () => {
-      while (cursor < items.length) {
-        const index = cursor++;
-        results[index] = await fn(items[index], index);
-      }
-    })());
-  }
-  await Promise.all(workers);
-  return results;
-}
+const { mapWithConcurrency } = require('../lib/concurrency');
 
 // Shared per-asset upload pipeline used by /batch and /seed-batch.
 // Runs the R2 puts with bounded concurrency and applies a single aggregated
@@ -547,16 +532,20 @@ async function assetRoutes(app) {
         urls.push({ assetKey, url });
       }
     } else {
-      // R2/S3: generate native presigned PUT URLs
-      for (const assetKey of keys) {
-        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
-        try {
-          const key = r2.assetKey(req.userId, assetKey);
-          const url = await r2.presignPut(key, 'application/octet-stream', PRESIGN_TTL);
-          urls.push({ assetKey, url });
-        } catch (err) {
-          console.warn('[assets] presign failed:', assetKey, err.message);
-        }
+      // R2/S3: generate native presigned PUT URLs concurrently
+      const presignPromises = keys.map((assetKey) => {
+        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) return Promise.resolve(null);
+        const key = r2.assetKey(req.userId, assetKey);
+        return r2.presignPut(key, 'application/octet-stream', PRESIGN_TTL)
+          .then((url) => ({ assetKey, url }))
+          .catch((err) => {
+            console.warn('[assets] presign failed:', assetKey, err.message);
+            return null;
+          });
+      });
+      const presigned = await Promise.all(presignPromises);
+      for (const entry of presigned) {
+        if (entry) urls.push(entry);
       }
     }
 

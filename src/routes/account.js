@@ -7,15 +7,15 @@ const { Account, Subscription, Device, Organization, OrgMember, OrgSubscription,
 const { transaction } = require('../db');
 const mlkem = require('../lib/mlkem');
 const r2 = require('../services/r2');
-const { hashAccountId } = require('../lib/crypto');
+const { hashSessionId } = require('../lib/crypto');
 const { isEnterpriseMode } = require('../lib/license');
 const { getQuotaBytes } = require('../lib/plans');
 const { sendAccountDeletedEmail } = require('../email');
+const { DEVICE_ID_PATTERN } = require('../lib/patterns');
 
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{3,32}$/;
 
 const ACCOUNT_DELETE_BODY_LIMIT_BYTES = parseInt(process.env.ACCOUNT_DELETE_BODY_LIMIT_BYTES ?? '8192', 10);
-const DEVICE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const EXPORT_URL_TTL = parseInt(process.env.EXPORT_URL_TTL_SECONDS ?? '604800', 10);
 
 async function accountRoutes(app) {
@@ -255,7 +255,7 @@ async function accountRoutes(app) {
     // deletion below must not be gated on the (untimed) Resend HTTP call.
     sendAccountDeletedEmail(app, account.id);
 
-    const accountIdHash = hashAccountId(req.userId);
+    const accountIdHash = hashSessionId(req.userId);
 
     await transaction(async (client) => {
       await client.query(`DELETE FROM audit_logs WHERE account_id_hash = $1`, [accountIdHash]);

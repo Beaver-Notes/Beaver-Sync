@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember, Subscription } = require('../models');
+const { query } = require('../db');
 const { audit } = require('../lib/audit');
 const { sendWorkspaceInviteEmail } = require('../email');
 const { isFreePlan, resolvePlanForAccount } = require('../lib/plans');
@@ -112,7 +113,6 @@ async function workspaceRoutes(app) {
     }
 
     // Initialize sync state for the new workspace so /sync/state doesn't 404
-    const { query } = require('../db');
     await query(
       'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
       [workspace.id, 'empty', 0, new Date().toISOString()]
@@ -350,7 +350,9 @@ async function workspaceRoutes(app) {
         { accountId: targetUserId, workspaceId },
         { revoked: true }
       );
-    } catch {}
+    } catch (err) {
+      app.log.warn({ err: err.message, targetUserId, workspaceId }, 'Failed to revoke sessions on member removal');
+    }
 
     app.log.info({ workspaceId, removedUser: targetUserId, byUser: req.userId }, 'Member removed from workspace');
     audit(req, 'member_removed', { workspaceId, targetUserId });

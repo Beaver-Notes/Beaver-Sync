@@ -92,15 +92,6 @@ test('aggregates checkpoints across notes with the device tie-breaker', async ()
   assert.deepEqual(result.checkpoint, { ts: 60, sequence: 4, deviceId: 'device-b' });
 });
 
-test('counts duplicate identities once when preflighting accepted bytes', async () => {
-  const bytes = await persistence.getAcceptedBytes('ws-1', [{ noteId: 'note-byte-preflight', updates: [
-    { deviceId: 'device-a', sequence: 1, data: Buffer.from('same') },
-    { deviceId: 'device-a', sequence: 1, data: Buffer.from('same') },
-  ] }]);
-
-  assert.equal(bytes, 4);
-});
-
 test('rejects persistence batches larger than the API limit', async () => {
   await assert.rejects(
     persistence.storeUpdatesBatch('ws-1', 'note-too-large', Array.from({ length: 201 }, (_, index) => ({

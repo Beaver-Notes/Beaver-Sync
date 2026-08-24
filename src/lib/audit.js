@@ -2,7 +2,7 @@
 
 const { AuditLog } = require('../models');
 const mlkem = require('./mlkem');
-const { hashAccountId } = require('./crypto');
+const { hashSessionId } = require('./crypto');
 
 function getIpSubnet(req) {
   const ip = req.ip ?? '0.0.0.0';
@@ -21,7 +21,7 @@ function audit(req, action, meta = {}) {
         : null;
 
       await AuditLog.create({
-        accountIdHash: hashAccountId(req.userId),
+        accountIdHash: hashSessionId(req.userId),
         workspaceId: meta.workspaceId ?? null,
         action,
         metadataEncrypted,

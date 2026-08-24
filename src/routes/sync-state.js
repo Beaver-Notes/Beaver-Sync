@@ -9,22 +9,7 @@ const CLAIM_TTL_MS = 30 * 60 * 1000;
 
 const VERIFY_CONCURRENCY = 8;
 
-// Runs `fn` over `items` with bounded concurrency, preserving order.
-async function mapWithConcurrency(items, concurrency, fn) {
-  const results = new Array(items.length);
-  let cursor = 0;
-  const workers = [];
-  for (let w = 0; w < concurrency; w++) {
-    workers.push((async () => {
-      while (cursor < items.length) {
-        const index = cursor++;
-        results[index] = await fn(items[index], index);
-      }
-    })());
-  }
-  await Promise.all(workers);
-  return results;
-}
+const { mapWithConcurrency } = require('../lib/concurrency');
 
 const WorkspaceSchema = z.object({ workspaceId: z.string().min(1) });
 const CompleteSchema = WorkspaceSchema.extend({
@@ -127,7 +112,7 @@ async function syncStateRoutes(app) {
 
   app.get('/state', protect, async (req, reply) => {
     const parsed = WorkspaceSchema.safeParse(req.query);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId } = parsed.data;
     await requireWorkspaceMember(req, reply, workspaceId);
     if (reply.sent) return;
@@ -138,7 +123,7 @@ async function syncStateRoutes(app) {
 
   app.post('/initialize/claim', protect, async (req, reply) => {
     const parsed = WorkspaceSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
@@ -158,7 +143,7 @@ async function syncStateRoutes(app) {
 
   app.post('/initialize/complete', protect, async (req, reply) => {
     const parsed = CompleteSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId, token, generation, documents, assets } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
@@ -169,17 +154,19 @@ async function syncStateRoutes(app) {
       return reply.status(400).send({ error: 'snapshot_generation_mismatch' });
     }
 
-    const storage = getObjectStorage();
-    for (const document of documents) {
-      if (!validKeySegment(workspaceId) || !validKeySegment(document.noteId)) {
-        return reply.status(400).send({ error: 'invalid_snapshot_key' });
+      const storage = getObjectStorage();
+      const snapshotErrors = await mapWithConcurrency(documents, VERIFY_CONCURRENCY, async (document) => {
+        if (!validKeySegment(workspaceId) || !validKeySegment(document.noteId)) {
+          return { error: 'invalid_snapshot_key' };
+        }
+        if (document.snapshotKey !== snapshotKeyFor(workspaceId, document.noteId, generation)) {
+          return { error: 'invalid_snapshot_key' };
+        }
+        return verifyObject(storage, document.snapshotKey, 'snapshot_missing');
+      });
+      for (const error of snapshotErrors) {
+        if (error) return reply.status(400).send({ error });
       }
-      if (document.snapshotKey !== snapshotKeyFor(workspaceId, document.noteId, generation)) {
-        return reply.status(400).send({ error: 'invalid_snapshot_key' });
-      }
-      const error = await verifyObject(storage, document.snapshotKey, 'snapshot_missing');
-      if (error) return reply.status(400).send({ error });
-    }
     const assetErrors = await mapWithConcurrency(assets, VERIFY_CONCURRENCY, async (asset) => {
       const assetKey = storage?.assetKey ? storage.assetKey(req.userId, asset) : asset;
       return verifyObject(storage, assetKey, 'asset_missing');
@@ -199,21 +186,32 @@ async function syncStateRoutes(app) {
       if (!state || state.initialization_token !== token) return 'invalid_token';
       if (!state.initialization_expires_at || state.initialization_expires_at <= now) return 'expired_token';
 
-      const upsertSql = `
-        INSERT INTO sync_document_state
-          (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, snapshot_ts, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT(workspace_id, note_id) DO UPDATE SET
-          snapshot_generation = excluded.snapshot_generation,
-          snapshot_key = excluded.snapshot_key,
-          checkpoint_ts = excluded.checkpoint_ts,
-          checkpoint_sequence = excluded.checkpoint_sequence,
-          snapshot_ts = excluded.snapshot_ts,
-          updated_at = excluded.updated_at
-      `;
-      for (const document of documents) {
-        await client.query(upsertSql, [workspaceId, document.noteId, document.snapshotGeneration, document.snapshotKey ?? null,
-          document.checkpointTs, document.checkpointSequence, document.snapshotTs ?? 0, now]);
+      if (documents.length > 0) {
+        const columnCount = 8;
+        const placeholders = documents.map((_, i) => {
+          const b = i * columnCount;
+          return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, $${b + 7}, $${b + 8})`;
+        }).join(', ');
+        const values = [];
+        for (const d of documents) {
+          values.push(
+            workspaceId, d.noteId, d.snapshotGeneration, d.snapshotKey ?? null,
+            d.checkpointTs, d.checkpointSequence, d.snapshotTs ?? 0, now
+          );
+        }
+        const upsertSql = `
+          INSERT INTO sync_document_state
+            (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, snapshot_ts, updated_at)
+          VALUES ${placeholders}
+          ON CONFLICT(workspace_id, note_id) DO UPDATE SET
+            snapshot_generation = excluded.snapshot_generation,
+            snapshot_key = excluded.snapshot_key,
+            checkpoint_ts = excluded.checkpoint_ts,
+            checkpoint_sequence = excluded.checkpoint_sequence,
+            snapshot_ts = excluded.snapshot_ts,
+            updated_at = excluded.updated_at
+        `;
+        await client.query(upsertSql, values);
       }
       await client.query(`
         UPDATE sync_workspace_state
@@ -236,7 +234,7 @@ async function syncStateRoutes(app) {
       generation: z.number().int().positive(),
       data: z.string().min(1),
     }).strict().safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId, token, noteId, generation, data } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
@@ -279,7 +277,7 @@ async function syncStateRoutes(app) {
       token: z.string().min(1),
       noteIds: z.array(z.string().min(1).max(256)).min(1).max(500),
     }).strict().safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId, token, noteIds } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
@@ -317,7 +315,7 @@ async function syncStateRoutes(app) {
 
   app.post('/initialize/reset', protect, async (req, reply) => {
     const parsed = WorkspaceSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
@@ -342,7 +340,7 @@ async function syncStateRoutes(app) {
       workspaceId: z.string().min(1),
       noteIds: z.array(z.string().min(1).max(256)).min(1).max(500),
     }).strict().safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId, noteIds } = parsed.data;
     await requireWorkspaceMember(req, reply, workspaceId);
     if (reply.sent) return;
@@ -370,9 +368,9 @@ async function syncStateRoutes(app) {
     }
 
     const presignedUrls = await Promise.all(presignPromises);
-    for (let i = 0; i < noteIdsToSign.length; i++) {
-      const row = rows.find(r => r.note_id === noteIdsToSign[i]);
-      urls[noteIdsToSign[i]] = {
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      urls[row.note_id] = {
         url: presignedUrls[i],
         key: row.snapshot_key,
         snapshotTs: row.snapshot_ts ?? 0,

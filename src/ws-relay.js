@@ -10,19 +10,9 @@ const decoding = require('lib0/decoding');
 
 const { createPostgresPersistence } = require('./db/yjs-persistence');
 
-function resolveConfig() {
-  return {
-    port: parseInt(process.env.WS_RELAY_PORT ?? '8080', 10),
-    authBackendUrl: process.env.AUTH_BACKEND_URL || 'http://api:3000',
-    internalSecret: process.env.INTERNAL_API_SECRET,
-    databaseUrl: process.env.DATABASE_URL,
-  };
-}
-
-const config = resolveConfig();
-const AUTH_BACKEND_URL = config.authBackendUrl;
-const WS_RELAY_PORT = config.port;
-const INTERNAL_API_SECRET = config.internalSecret;
+const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.internal:3000';
+const WS_RELAY_PORT = parseInt(process.env.WS_RELAY_PORT ?? '8080', 10);
+const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 
 const ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):note:([a-zA-Z0-9_-]+)$/;
 const META_ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):meta$/;
@@ -160,7 +150,10 @@ function handleUpgrade(req, socket, head) {
   const token = url.searchParams.get('token');
   const documentName = url.pathname.replace(/^\//, '');
 
-  console.log(`[ws-relay] upgrade request: ${documentName} (token: ${token ? token.slice(0, 8) + '...' : 'MISSING'})`);
+  // Avoid logging tokens (even truncated) and noisy per-upgrade logs in prod.
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[ws-relay] upgrade request: ${documentName}`);
+  }
 
   if (!token) {
     console.warn('[ws-relay] upgrade rejected: no token');
@@ -447,7 +440,7 @@ async function startWsRelay() {
   return wss;
 }
 
-module.exports = { startWsRelay, parseRoomName, resolveConfig };
+module.exports = { startWsRelay, parseRoomName };
 
 if (require.main === module) {
   startWsRelay().catch((err) => {

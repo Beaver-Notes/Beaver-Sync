@@ -9,11 +9,11 @@ const { audit } = require('../lib/audit');
 const { historyCutoffTs } = require('../lib/plan-lifecycle');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
 const { query } = require('../db');
+const { DEVICE_ID_PATTERN } = require('../lib/patterns');
 
 const COMMIT_BODY_LIMIT_BYTES = parseInt(process.env.COMMIT_BODY_LIMIT_BYTES ?? '1048576', 10);
 const MAX_CURSOR_BYTES = parseInt(process.env.COMMIT_CURSOR_QUERY_MAX_BYTES ?? '4096', 10);
 const MAX_CURSOR_ENTRIES = parseInt(process.env.COMMIT_CURSOR_MAX_ENTRIES ?? '100', 10);
-const DEVICE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const COMMIT_ID_PATTERN = /^\d+-[a-zA-Z0-9_-]+-\d+$/;
 
 const CommitUploadSchema = z.object({

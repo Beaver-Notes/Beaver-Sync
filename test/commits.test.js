@@ -21,7 +21,7 @@ const { setupTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const r2 = require('../src/services/r2');
-const { hashSessionId, createNoteHash, hashAccountId } = require('../src/lib/crypto');
+const { hashSessionId, createNoteHash } = require('../src/lib/crypto');
 const mlkem = require('../src/lib/mlkem');
 
 const originalMethods = {
@@ -266,7 +266,7 @@ test('real POST /commits inserts commit metadata and serves it through list + hi
 
   await models.Device.deleteOne({ accountId: account.id });
   await models.CommitMeta.deleteMany({ accountId: account.id });
-  await models.AuditLog.deleteMany({ accountIdHash: hashAccountId(account.id) });
+  await models.AuditLog.deleteMany({ accountIdHash: hashSessionId(account.id) });
   await models.Subscription.deleteOne({ accountId: account.id });
   await models.Session.deleteMany({ accountId: account.id });
   await models.Account.deleteOne({ _id: account.id });

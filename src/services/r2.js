@@ -323,8 +323,13 @@ async function stat(key) {
       }),
     );
     return { sizeBytes: res.ContentLength ?? 0 };
-  } catch {
-    return null;
+  } catch (err) {
+    // Only a genuine "not found" is "absent". Any other error (auth, network,
+    // 5xx) must propagate so callers can return 503 instead of a false 404.
+    if (err.name === 'NoSuchKey' || err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) {
+      return null;
+    }
+    throw err;
   }
 }
 
