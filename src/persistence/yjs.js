@@ -129,7 +129,7 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
         INSERT INTO yjs_doc_updates
         ${UPDATE_INSERT_COLUMNS}
         VALUES ${placeholders}
-        ON CONFLICT DO NOTHING
+        ON CONFLICT (workspace_id, note_id, device_id, clock) DO NOTHING
       `, chunk.flat());
       accepted += result.rowCount;
     }

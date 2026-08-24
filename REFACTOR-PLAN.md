@@ -138,6 +138,13 @@ has a real safety net.
   `src/repositories/vaultProofChallenge.js`. `test/vault.test.js` 6/6 pass. Next domains
   in order of smallness: `organizations.js`, `auth.js`, `workspaces.js`, `commits.js`,
   `collaboration.js`, `account.js`, then `sync-state.js` (largest).
+- **H3 UNIQUE constraint** — `yjs_doc_updates` now has `UNIQUE (workspace_id, note_id, device_id, clock)`
+  and `storeNotesBatch` uses `ON CONFLICT (workspace_id, note_id, device_id, clock) DO NOTHING`.
+  The DB is now the dedup authority; the former app-only pre-query race (duplicate rows
+  accumulating forever under concurrent pushes) is closed. Verified: a retried push is
+  reported `accepted:0, duplicate:1`. Existing production tables with duplicates need a
+  one-off `ALTER TABLE ... ADD CONSTRAINT` + dedupe before this applies (no migration
+  runner in repo; document for deploy).
 - **syncWorkspaceState repo** — `organizations.js` raw `INSERT INTO sync_workspace_state`
   extracted to `src/repositories/syncWorkspaceState.js` (`createEmptyState`). Confirms
   ADR-1 pattern scales to a table shared with the largest file (`sync-state.js`).
