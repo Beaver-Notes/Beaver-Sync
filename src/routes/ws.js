@@ -15,14 +15,21 @@ async function wsRoutes(app) {
       return;
     }
 
+    let session;
     try {
-      const session = await validateSession(token);
+      session = await validateSession(token);
+    } catch (err) {
+      app.log.warn({ err }, 'ws session validation failed');
+      socket.close(4002, 'Invalid token');
+      return;
+    }
 
-      if (!session) {
-        socket.close(4002, 'Invalid token');
-        return;
-      }
+    if (!session) {
+      socket.close(4002, 'Invalid token');
+      return;
+    }
 
+    try {
       const memberships = await WorkspaceMember.find({ accountId: session.userId }).lean();
       const workspaceIds = memberships.map((m) => m.workspaceId);
 
@@ -61,8 +68,9 @@ async function wsRoutes(app) {
       });
 
       socket.send(JSON.stringify({ type: 'connected', userId: session.userId }));
-    } catch {
-      socket.close(4002, 'Invalid token');
+    } catch (err) {
+      app.log.error({ err }, 'ws connection setup failed');
+      socket.close(4500, 'Internal error');
     }
   });
 }

@@ -258,8 +258,9 @@ async function del(key) {
 }
 
 async function delMany(keys) {
-  if (!keys || keys.length === 0) return { deleted: 0 };
+  if (!keys || keys.length === 0) return { deleted: 0, failed: 0 };
   let totalDeleted = 0;
+  let totalFailed = 0;
   for (let i = 0; i < keys.length; i += 1000) {
     const chunk = keys.slice(i, i + 1000).map((k) => ({ Key: k }));
     try {
@@ -270,18 +271,25 @@ async function delMany(keys) {
         }),
       );
       totalDeleted += res.Deleted?.length ?? 0;
-    } catch {
+      const errors = res.Errors ?? [];
+      if (errors.length) {
+        totalFailed += errors.length;
+        console.warn(`[r2] delMany batch had ${errors.length} errors`);
+      }
+    } catch (err) {
+      console.warn('[r2] delMany batch failed, falling back per-object:', err?.message);
       for (const e of chunk) {
         try {
-          await r2.send(
-            new DeleteObjectCommand({ Bucket: BUCKET, Key: e.Key }),
-          );
+          await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: e.Key }));
           totalDeleted++;
-        } catch {}
+        } catch (objErr) {
+          totalFailed++;
+          console.warn(`[r2] failed to delete ${e.Key}:`, objErr?.message);
+        }
       }
     }
   }
-  return { deleted: totalDeleted };
+  return { deleted: totalDeleted, failed: totalFailed };
 }
 
 /**

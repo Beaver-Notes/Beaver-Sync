@@ -58,6 +58,7 @@ function createPostgresPersistence(pool) {
       docs.delete(docName)
     } catch (err) {
       console.error(`[yjs-persistence] writeState failed for ${docName}:`, err.message)
+      throw err
     }
   }
 

@@ -45,7 +45,8 @@ function validKeySegment(value) {
 function getObjectStorage() {
   try {
     return require('../services/r2');
-  } catch {
+  } catch (err) {
+    console.warn('[sync-state] object storage unavailable:', err?.message);
     return null;
   }
 }

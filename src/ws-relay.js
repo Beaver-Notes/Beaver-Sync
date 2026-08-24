@@ -102,7 +102,10 @@ function schedulePersist(documentName) {
     persistTimers.delete(documentName);
     const room = rooms.get(documentName);
     if (room && persistence) {
-      persistence.writeState(documentName, room.doc);
+      persistence.writeState(documentName, room.doc).catch((err) => {
+        console.warn(`[ws-relay] persist failed for ${documentName}, retrying:`, err?.message);
+        schedulePersist(documentName);
+      });
     }
   }, 1000);
   persistTimers.set(documentName, timer);
@@ -407,7 +410,7 @@ async function startSyncNotificationListener() {
   function scheduleReconnect() {
     const delay = Math.min(5000 * 2 ** reconnectAttempts, MAX_DELAY);
     reconnectAttempts++;
-    setTimeout(() => { listen().catch(() => {}); }, delay);
+    setTimeout(() => { listen().catch((err) => console.warn('[ws-relay] reconnect failed:', err?.message)); }, delay);
   }
 
   await listen();

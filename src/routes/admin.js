@@ -112,7 +112,9 @@ async function adminRoutes(app) {
         { accountId: targetUserId, workspaceId },
         { revoked: true }
       );
-    } catch {}
+    } catch (err) {
+      console.error('[admin] failed to revoke sessions for removed member:', err?.message);
+    }
 
     return reply.send({ deleted: true, workspaceId, userId: targetUserId });
   });
@@ -253,7 +255,9 @@ async function adminRoutes(app) {
         try {
           const raw = await mlkem.decryptMetadata(log.metadataEncrypted);
           meta = JSON.parse(raw);
-        } catch { }
+        } catch (err) {
+          console.warn('[admin] failed to decrypt audit metadata:', err?.message);
+        }
       }
       return { ...log, metadataEncrypted: undefined, metadata: meta };
     }));
