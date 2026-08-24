@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('path');
+const test = require('node:test');
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 
@@ -47,6 +48,8 @@ async function setupTestDb() {
 
   const { ensureSchema } = require('../../src/db/migrate-postgres');
   await ensureSchema();
+  // Start from a known-clean DB so files run in any order share no rows.
+  await cleanTestDb();
 }
 
 // FK-safe delete order: children before parents (workspaces before orgs/accounts).
@@ -77,3 +80,9 @@ async function cleanTestDb() {
 }
 
 module.exports = { setupTestDb, cleanTestDb, DEFAULT_DATABASE_URL };
+
+// Hermetic teardown: any file that imports this helper leaves no rows behind,
+// so the shared test DB stays clean for every other file (serial runs).
+test.after(async () => {
+  await cleanTestDb();
+});

@@ -54,6 +54,17 @@ async function requireWorkspaceMember(req, reply, workspaceId) {
   return membership;
 }
 
+async function requireWorkspaceWriter(req, reply, workspaceId) {
+  const membership = await requireWorkspaceMember(req, reply, workspaceId);
+  if (reply.sent) return null;
+
+  if (!['owner', 'editor'].includes(membership.role)) {
+    return reply.status(403).send({ error: 'workspace_write_forbidden' });
+  }
+
+  return membership;
+}
+
 async function requireWorkspaceOwner(req, reply, workspaceId) {
   const membership = await requireWorkspaceMember(req, reply, workspaceId);
   if (reply.sent) return null;
@@ -70,5 +81,6 @@ module.exports = {
   requireOrgAdmin,
   requireOrgOwner,
   requireWorkspaceMember,
+  requireWorkspaceWriter,
   requireWorkspaceOwner,
 };

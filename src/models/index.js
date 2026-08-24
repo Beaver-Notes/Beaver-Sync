@@ -366,10 +366,8 @@ function createModel(table, pkField) {
       return { deletedCount: result.rowCount };
     },
 
-    async deleteMany(filter) {
-      const { sql: whereSql, params } = buildWhere(filter);
-      const result = await query(`DELETE FROM ${table} ${whereSql}`, params);
-      return { deletedCount: result.rowCount };
+    deleteMany(filter) {
+      return this.deleteOne(filter);
     },
 
     async countDocuments(filter) {

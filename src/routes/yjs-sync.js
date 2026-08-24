@@ -2,12 +2,13 @@
 
 const { z } = require('zod');
 const persistence = require('../persistence/yjs');
-const { Device, WorkspaceMember } = require('../models');
+const { Device } = require('../models');
 const { audit } = require('../lib/audit');
 const { historyCutoffForAccount } = require('../lib/plan-lifecycle');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
 const { getPool } = require('../db/postgres');
 const { DEVICE_ID_PATTERN } = require('../lib/patterns');
+const { requireWorkspaceMember, requireWorkspaceWriter } = require('../middleware/org');
 
 const MAX_UPDATES_PER_PUSH = 200;
 const MAX_UPDATES_PER_PULL = 500;
@@ -61,25 +62,6 @@ function getDeviceId(req, reply) {
     return null;
   }
   return deviceId;
-}
-
-async function requireWorkspaceMember(req, reply, workspaceId) {
-  const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
-  if (!membership) {
-    reply.status(403).send({ error: 'not_workspace_member' });
-    return null;
-  }
-  return membership;
-}
-
-async function requireWorkspaceWriter(req, reply, workspaceId) {
-  const membership = await requireWorkspaceMember(req, reply, workspaceId);
-  if (!membership) return null;
-  if (!['owner', 'editor'].includes(membership.role)) {
-    reply.status(403).send({ error: 'workspace_write_forbidden' });
-    return null;
-  }
-  return membership;
 }
 
 function validateUpdateKey(noteId, update, headerDeviceId) {
