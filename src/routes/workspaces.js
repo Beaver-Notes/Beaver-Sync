@@ -8,12 +8,9 @@ const { sendWorkspaceInviteEmail } = require('../email');
 const { isFreePlan, resolvePlanForAccount } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
 const { resolveOrgSubscription } = require('../lib/plan-resolution');
+const { hashSessionId } = require('../lib/crypto');
 
 const BODY_LIMIT = parseInt(process.env.WORKSPACE_BODY_LIMIT_BYTES ?? '8192', 10);
-
-function hashToken(raw) {
-  return crypto.createHmac('sha256', process.env.SESSION_HMAC_KEY).update(raw).digest('hex');
-}
 
 async function getMembership(userId, workspaceId) {
   return WorkspaceMember.findOne({ workspaceId, accountId: userId }).lean();
@@ -285,7 +282,7 @@ async function workspaceRoutes(app) {
     }
 
     const rawToken = crypto.randomBytes(32).toString('base64url');
-    const tokenHash = hashToken(rawToken);
+    const tokenHash = hashSessionId(rawToken);
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     await WorkspaceInvite.create({
@@ -369,7 +366,7 @@ async function workspaceRoutes(app) {
       return reply.status(400).send({ error: 'invalid_token', message: 'Invalid invite token.' });
     }
 
-    const tokenHash = hashToken(rawToken);
+    const tokenHash = hashSessionId(rawToken);
     const invite = await WorkspaceInvite.findOne({ tokenHash }).lean();
 
     if (!invite) {

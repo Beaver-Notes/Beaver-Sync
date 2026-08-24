@@ -4,8 +4,7 @@ const crypto = require('crypto');
 const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember, OrgKey, OrgInvite } = require('../models');
 const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { requireOrgMember, requireOrgAdmin, requireOrgOwner } = require('../middleware/org');
-
-const VALID_PLANS = new Set(['free', 'starter', 'pro', 'team', 'enterprise']);
+const { VALID_PLANS } = require('../lib/plans');
 
 async function organizationRoutes(app) {
   await app.register(require('../middleware/auth'));

@@ -99,6 +99,6 @@ function resolvePlanForAccount({ orgSub, sub } = {}) {
 }
 
 module.exports = {
-  PLANS, VALID_PLANS, getPlan, getQuotaBytes, getHistoryDays,
+  VALID_PLANS, getPlan, getQuotaBytes, getHistoryDays,
   getDeviceLimit, getFlags, isFreePlan, isPaidPlan, resolvePlanForAccount,
 };
