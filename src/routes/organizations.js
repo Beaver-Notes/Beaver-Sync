@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember, OrgKey, OrgInvite } = require('../models');
-const { query } = require('../db');
+const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { requireOrgMember, requireOrgAdmin, requireOrgOwner } = require('../middleware/org');
 
 const VALID_PLANS = new Set(['free', 'starter', 'pro', 'team', 'enterprise']);
@@ -92,10 +92,7 @@ async function organizationRoutes(app) {
       );
     }
 
-    await query(
-      'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-      [workspace.id, 'empty', 0, new Date().toISOString()]
-    );
+    await createEmptyState(workspace.id);
 
     return reply.status(201).send({
       id: orgId,

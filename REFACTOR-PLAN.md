@@ -138,3 +138,6 @@ has a real safety net.
   `src/repositories/vaultProofChallenge.js`. `test/vault.test.js` 6/6 pass. Next domains
   in order of smallness: `organizations.js`, `auth.js`, `workspaces.js`, `commits.js`,
   `collaboration.js`, `account.js`, then `sync-state.js` (largest).
+- **syncWorkspaceState repo** — `organizations.js` raw `INSERT INTO sync_workspace_state`
+  extracted to `src/repositories/syncWorkspaceState.js` (`createEmptyState`). Confirms
+  ADR-1 pattern scales to a table shared with the largest file (`sync-state.js`).
