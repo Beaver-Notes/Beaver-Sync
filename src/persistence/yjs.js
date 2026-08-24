@@ -286,12 +286,12 @@ async function loadUpdatesAfter(workspaceId, noteId, checkpoint, limit, sinceTs 
   // A lightweight COUNT check distinguishes the two cases.
   let stale = false;
   if (page.length === 0 && hasCheckpoint) {
-    const { rows: countRows } = await query(
-      `SELECT COUNT(*)::int AS cnt FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = $2`,
+    const { rows: existsRows } = await query(
+      `SELECT 1 FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = $2 LIMIT 1`,
       [workspaceId, noteId]
     );
-    if (countRows[0]?.cnt > 0) {
-      console.log(`[pull-batch] note=${noteId} stale cursor detected (server has ${countRows[0].cnt} rows, checkpoint returned 0)`);
+    if (existsRows.length > 0) {
+      console.log(`[pull-batch] note=${noteId} stale cursor detected (server has newer data, checkpoint returned 0)`);
       stale = true;
     }
   }

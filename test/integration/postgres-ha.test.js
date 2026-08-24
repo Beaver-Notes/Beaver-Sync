@@ -22,8 +22,8 @@ describe('Postgres HA integration', () => {
   });
 
   it('can run migrations', async () => {
-    const { runMigrations } = require('../../src/db/migrate-postgres');
-    await runMigrations();
+    const { ensureSchema } = require('../../src/db/migrate-postgres');
+    await ensureSchema();
   });
 
   it('can create and query account', async () => {

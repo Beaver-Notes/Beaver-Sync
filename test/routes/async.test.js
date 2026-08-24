@@ -1,5 +1,7 @@
 'use strict';
 
+// SMOKE TEST ONLY: asserts route handlers are exported as functions.
+// It does NOT exercise any route behavior — do not treat as route coverage.
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
