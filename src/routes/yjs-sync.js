@@ -181,7 +181,13 @@ async function yjsSyncRoutes(app) {
     const { accepted, duplicate, acceptedBytes: sizeBytes, checkpoint } = result;
 
     const deviceLabel = String(req.headers['x-device-label'] ?? 'Unknown Device').slice(0, 128);
-    await Device.findOneAndUpdate({ accountId: req.userId, deviceId }, { label: deviceLabel, lastSeen: new Date() }, { upsert: true, new: true });
+    try {
+      await Device.findOneAndUpdate({ accountId: req.userId, deviceId }, { label: deviceLabel, lastSeen: new Date() }, { upsert: true, new: true });
+    } catch (err) {
+      // The batch is already committed; a device-metadata write failure must
+      // not turn a successful push into a 500.
+      app.log.warn({ err: err?.message, deviceId }, 'device metadata update failed after push');
+    }
     audit(req, 'yjs_push_batch', { accepted, duplicate, deviceId, workspaceId, noteCount: notes.length });
 
     // Notify other connected clients via Postgres LISTEN/NOTIFY so they
@@ -198,9 +204,10 @@ async function yjsSyncRoutes(app) {
           'sync_notifications',
           JSON.stringify({ workspaceId, noteIds, excludeDeviceId: deviceId }),
         ]);
-      } catch {
+      } catch (err) {
         // Notification failure is non-fatal — the 30-second pull timer
         // will pick up changes eventually.
+        app.log.warn({ err: err?.message }, 'sync_notifications notify failed');
       }
     }
 
@@ -216,14 +223,9 @@ async function yjsSyncRoutes(app) {
     if (!await requireWorkspaceMember(req, reply, workspaceId)) return;
 
     const { cutoffTs } = await historyCutoffForAccount(req.userId, workspaceId);
-    console.log(`[pull-batch] ws=${workspaceId} notes=${notes.length} cutoffTs=${cutoffTs} userId=${req.userId}`);
-
-    for (const { noteId, checkpoint, limit } of notes) {
-      console.log(`[pull-batch]   note=${noteId} checkpoint=${JSON.stringify(checkpoint)} limit=${limit}`);
-    }
 
     if (process.env.NODE_ENV !== 'production') {
-      console.log(`[pull-batch] ws=${workspaceId} notes=${notes.length} deviceId=${req.headers['x-device-id'] || 'none'}`);
+      console.log(`[pull-batch] ws=${workspaceId} notes=${notes.length} cutoffTs=${cutoffTs} deviceId=${req.headers['x-device-id'] || 'none'}`);
       for (const { noteId, checkpoint, limit } of notes) {
         console.log(`[pull-batch]   note=${noteId} checkpoint=${JSON.stringify(checkpoint)} limit=${limit}`);
       }

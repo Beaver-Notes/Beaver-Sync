@@ -2,6 +2,14 @@
 
 const http = require('http');
 const { WebSocketServer } = require('ws');
+
+process.on('uncaughtException', (err) => {
+  console.error('[ws-relay][fatal] uncaughtException', { message: err?.message, stack: err?.stack });
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[ws-relay][fatal] unhandledRejection', { reason: reason instanceof Error ? { message: reason.message, stack: reason.stack } : reason });
+});
 const Y = require('yjs');
 const syncProtocol = require('y-protocols/sync');
 const awarenessProtocol = require('y-protocols/awareness');
@@ -131,6 +139,9 @@ async function verifySession(token, workspaceId, noteId) {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
+    // Bound the auth call so a hung backend can't leave the upgrade socket
+    // open indefinitely (connection-exhaustion DoS surface).
+    signal: AbortSignal.timeout(Number(process.env.WS_RELAY_AUTH_TIMEOUT_MS ?? 10000)),
   });
 
   if (response.status === 403) {
@@ -175,7 +186,9 @@ function handleUpgrade(req, socket, head) {
   verifySession(token, workspaceId, room.noteId)
     .then(({ userId, role }) => {
       const readOnly = role === 'viewer' || role === 'guest';
-      console.log(`[ws-relay] upgrade accepted: ${documentName} user=${userId} role=${role}`);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[ws-relay] upgrade accepted: ${documentName} user=${userId} role=${role}`);
+      }
 
       wss.handleUpgrade(req, socket, head, (ws) => {
         ws.isAlive = true;

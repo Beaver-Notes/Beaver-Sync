@@ -155,6 +155,7 @@ async function syncStateRoutes(app) {
     }
 
       const storage = getObjectStorage();
+      if (!storage) return reply.status(503).send({ error: 'storage_unavailable' });
       const snapshotErrors = await mapWithConcurrency(documents, VERIFY_CONCURRENCY, async (document) => {
         if (!validKeySegment(workspaceId) || !validKeySegment(document.noteId)) {
           return { error: 'invalid_snapshot_key' };
@@ -261,12 +262,23 @@ async function syncStateRoutes(app) {
     let body;
     try {
       body = Buffer.from(data, 'base64');
-      if (!body.length || body.toString('base64') !== data) throw new Error('invalid base64');
+      if (!body.length || body.toString('base64') !== data) {
+        return reply.status(400).send({ error: 'invalid_base64' });
+      }
+    } catch {
+      return reply.status(400).send({ error: 'invalid_base64' });
+    }
+
+    try {
       await storage.put(key, body, 'application/octet-stream');
       const error = await verifyObject(storage, key, 'snapshot_verification_failed');
-      if (error) return reply.status(400).send({ error });
+      // A missing object right after a successful put is a storage-side
+      // consistency failure, not a client error.
+      if (error) return reply.status(503).send({ error });
     } catch {
-      return reply.status(400).send({ error: 'snapshot_upload_failed' });
+      // R2/MinIO outage or network error — must surface as 503 so clients
+      // retry, never as a 400 client failure.
+      return reply.status(503).send({ error: 'snapshot_upload_failed' });
     }
     return reply.send({ key, generation, sizeBytes: body.length });
   });

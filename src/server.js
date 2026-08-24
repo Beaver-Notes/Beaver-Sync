@@ -5,6 +5,17 @@ require('dotenv').config();
 const Fastify = require('fastify');
 const { getDb } = require('./db');
 
+// Crash-safety: a floating promise or thrown sync error must never vanish
+// without a trace. uncaughtException exits (state is undefined); unhandledRejection
+// logs loudly (Node's default already exits, this just makes it observable).
+process.on('uncaughtException', (err) => {
+  console.error('[fatal] uncaughtException', { message: err?.message, stack: err?.stack });
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] unhandledRejection', { reason: reason instanceof Error ? { message: reason.message, stack: reason.stack } : reason });
+});
+
 function validateRequiredEnv() {
   const missing = [];
   const isProduction = process.env.NODE_ENV === 'production';
@@ -62,34 +73,7 @@ function validateRequiredEnv() {
 
 validateRequiredEnv();
 
-function resolveConfig() {
-  const isProd = process.env.NODE_ENV === 'production';
-  const appUrl = process.env.APP_URL || 'http://localhost:4000';
-  return {
-    port: parseInt(process.env.PORT ?? '3000', 10),
-    host: process.env.HOST || '0.0.0.0',
-    nodeEnv: process.env.NODE_ENV || 'development',
-    isProduction: isProd,
-    appUrl,
-    storageEndpoint: process.env.R2_ENDPOINT || process.env.STORAGE_ENDPOINT || process.env.S3_ENDPOINT,
-    storageRegion: process.env.R2_REGION || process.env.STORAGE_REGION || process.env.S3_REGION || 'auto',
-    storageBucket: process.env.STORAGE_BUCKET_NAME || process.env.R2_BUCKET_NAME || process.env.S3_BUCKET_NAME || 'beaver-sync',
-    storageAccessKey: process.env.R2_ACCESS_KEY_ID || process.env.STORAGE_ACCESS_KEY_ID || process.env.S3_ACCESS_KEY_ID,
-    storageSecretKey: process.env.R2_SECRET_ACCESS_KEY || process.env.STORAGE_SECRET_ACCESS_KEY || process.env.S3_SECRET_ACCESS_KEY,
-    storagePublicEndpoint: process.env.STORAGE_PUBLIC_ENDPOINT,
-    storageForcePathStyle: (process.env.STORAGE_FORCE_PATH_STYLE || process.env.S3_FORCE_PATH_STYLE) !== 'false',
-    allowedOrigins: process.env.ALLOWED_ORIGINS || appUrl,
-    emailEnabled: !!process.env.RESEND_API_KEY,
-    legacyAuthEnabled: isProd ? false : (process.env.LEGACY_AUTH_ENABLED !== 'false'),
-    bodyLimit: parseInt(process.env.API_BODY_LIMIT_BYTES ?? '1048576', 10),
-    rateLimit: parseInt(process.env.API_RATE_LIMIT_PER_MINUTE ?? '120', 10),
-    sessionMaxAgeDays: parseInt(process.env.SESSION_MAX_AGE_DAYS ?? '30', 10),
-    trustProxy: process.env.TRUST_PROXY !== 'false',
-  };
-}
-
 async function buildApp() {
-  const config = resolveConfig();
   const { initErrorMonitoring } = require('./lib/error-monitoring');
   initErrorMonitoring(process.env.GLITCHTIP_DSN);
 
@@ -98,14 +82,14 @@ async function buildApp() {
 
   const app = Fastify({
     logger: {
-      level: config.isProduction ? 'warn' : 'info',
+      level: process.env.NODE_ENV === 'production' ? 'warn' : 'info',
       transport:
-        !config.isProduction
+        process.env.NODE_ENV !== 'production'
           ? { target: 'pino-pretty' }
           : undefined,
     },
-    bodyLimit: config.bodyLimit,
-    trustProxy: config.trustProxy,
+    bodyLimit: parseInt(process.env.API_BODY_LIMIT_BYTES ?? '1048576', 10),
+    trustProxy: process.env.TRUST_PROXY === 'false' ? false : true,
     requestTimeout: parseInt(process.env.REQUEST_TIMEOUT_MS ?? '30000', 10),
     connectionTimeout: parseInt(process.env.CONNECTION_TIMEOUT_MS ?? '10000', 10),
     keepAliveTimeout: parseInt(process.env.KEEP_ALIVE_TIMEOUT_MS ?? '5000', 10),
@@ -129,8 +113,8 @@ async function buildApp() {
 
   await app.register(require('@fastify/cors'), {
     origin:
-      config.isProduction
-        ? config.allowedOrigins.split(',')
+      process.env.NODE_ENV === 'production'
+        ? (process.env.ALLOWED_ORIGINS || '').split(',')
         : /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/,
     credentials: true,
   });
@@ -140,18 +124,19 @@ async function buildApp() {
     hook: 'onRequest',
   });
   app.decorate('setSessionCookie', function setSessionCookie(reply, rawId) {
+    const isProduction = process.env.NODE_ENV === 'production';
     reply.setCookie('bsession', rawId, {
       httpOnly: true,
       sameSite: 'strict',
-      secure: config.isProduction,
+      secure: isProduction,
       path: '/',
-      maxAge: config.sessionMaxAgeDays * 24 * 60 * 60,
+      maxAge: parseInt(process.env.SESSION_MAX_AGE_DAYS ?? '30', 10) * 24 * 60 * 60,
     });
     return reply;
   });
 
   await app.register(require('@fastify/rate-limit'), {
-    max: config.rateLimit,
+    max: parseInt(process.env.API_RATE_LIMIT_PER_MINUTE ?? '120'),
     timeWindow: '1 minute',
     keyGenerator: (req) => req.userId || req.ip,
     errorResponseBuilder: (_req, context) => ({
@@ -207,7 +192,7 @@ async function buildApp() {
       timestamp: new Date().toISOString(),
     };
 
-    if (!config.isProduction) {
+    if (process.env.NODE_ENV !== 'production') {
       try {
         getDb();
         payload.db = 'connected';
@@ -223,6 +208,7 @@ async function buildApp() {
     const statusCode =
       err.statusCode ??
       (err.error === 'rate_limit_exceeded' ? 429 : 500);
+    const isProduction = process.env.NODE_ENV === 'production';
     const logLevel = statusCode >= 500 ? 'error' : statusCode >= 429 ? 'warn' : 'info';
 
     req.log[logLevel]({
@@ -236,13 +222,13 @@ async function buildApp() {
       return reply.status(400).send({
         error: 'validation_error',
         message: 'Invalid request data.',
-        ...(config.isProduction ? {} : { details: err.validation }),
+        ...(isProduction ? {} : { details: err.validation }),
       });
     }
 
     return reply.status(statusCode).send({
       error: err.code ?? err.error ?? 'internal_error',
-      message: config.isProduction && statusCode >= 500
+      message: isProduction && statusCode >= 500
         ? 'An unexpected error occurred.'
         : (err.message ?? 'Request failed.'),
     });
@@ -288,4 +274,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { buildApp, start, resolveConfig };
+module.exports = { buildApp, start };
