@@ -152,11 +152,29 @@ async function verifySession(token, workspaceId, noteId) {
   return response.json();
 }
 
+async function verifyTicket(ticket) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (INTERNAL_API_SECRET) {
+    headers['X-Internal-Secret'] = INTERNAL_API_SECRET;
+  }
+  const response = await fetch(`${AUTH_BACKEND_URL}/auth/verify-ticket`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ticket }),
+    signal: AbortSignal.timeout(Number(process.env.WS_RELAY_AUTH_TIMEOUT_MS ?? 10000)),
+  });
+  if (!response.ok) {
+    throw new Error('Invalid or expired ticket');
+  }
+  return response.json();
+}
+
 // --- Connection handling ---
 
 function handleUpgrade(req, socket, head) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = url.searchParams.get('token');
+  const ticket = url.searchParams.get('ticket');
   const documentName = url.pathname.replace(/^\//, '');
 
   // Avoid logging tokens (even truncated) and noisy per-upgrade logs in prod.
@@ -164,7 +182,7 @@ function handleUpgrade(req, socket, head) {
     console.log(`[ws-relay] upgrade request: ${documentName}`);
   }
 
-  if (!token) {
+  if (!token && !ticket) {
     console.warn('[ws-relay] upgrade rejected: no token');
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
@@ -181,8 +199,13 @@ function handleUpgrade(req, socket, head) {
 
   // Authenticate before upgrading
   const workspaceId = room.workspaceId;
-  verifySession(token, workspaceId, room.noteId)
-    .then(({ userId, role }) => {
+  const authPromise = ticket
+    ? verifyTicket(ticket)
+    : verifySession(token, workspaceId, room.noteId);
+  authPromise
+    .then((auth) => {
+      const userId = auth.userId;
+      const role = auth.role ?? 'editor';
       const readOnly = role === 'viewer' || role === 'guest';
       if (process.env.NODE_ENV !== 'production') {
         console.log(`[ws-relay] upgrade accepted: ${documentName} user=${userId} role=${role}`);

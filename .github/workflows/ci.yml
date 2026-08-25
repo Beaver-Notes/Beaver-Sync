@@ -45,6 +45,5 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://beaver:beaver@localhost:5432/beaver_test
 
-      - name: Audit dependencies (report only)
-        run: yarn audit
-        continue-on-error: true
+      - name: Audit dependencies (fail on critical)
+        run: yarn audit --audit-level=critical

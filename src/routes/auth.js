@@ -29,6 +29,25 @@ function timingSafeEqualStr(a, b) {
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
+// Shared workspace/note role resolution for verify-session and ws-ticket.
+// Returns { role } or { error: { status, payload } }.
+async function resolveAuthRole(userId, workspaceId, noteId) {
+  if (!workspaceId && !noteId) return {};
+  if (workspaceId) {
+    const membership = await WorkspaceMember.findOne({ workspaceId, accountId: userId }).lean();
+    if (membership) return { role: membership.role };
+    if (noteId === undefined) {
+      return { error: { status: 403, payload: { error: 'forbidden', message: 'Not a member of this workspace.' } } };
+    }
+  }
+  const { NoteInvitation } = require('../models');
+  const collab = await NoteInvitation.findOne({ noteId, userId }).lean();
+  if (!collab) {
+    return { error: { status: 403, payload: { error: 'forbidden', message: 'Not a collaborator on this note.' } } };
+  }
+  return { role: collab.role === 'viewer' ? 'viewer' : 'editor' };
+}
+
 const RegisterSchema = z.object({
   email:    z.string().email('Invalid email address').max(254),
   password: z
@@ -324,23 +343,11 @@ async function authRoutes(app) {
         });
       }
 
-      const { WorkspaceMember } = require('../models');
-      const membership = await WorkspaceMember.findOne({ workspaceId, accountId: result.userId }).lean();
-
-      if (!membership && noteId === undefined) {
-        // No noteId fallback available — nothing else can authorize this caller.
-        return reply.status(403).send({
-          error: 'forbidden',
-          message: 'Not a member of this workspace.',
-        });
+      const resolved = await resolveAuthRole(result.userId, workspaceId, noteId);
+      if (resolved.error) {
+        return reply.status(resolved.error.status).send(resolved.error.payload);
       }
-
-      if (membership) {
-        return reply.send({ userId: result.userId, role: membership.role });
-      }
-
-      // Not a workspace member, but a noteId was supplied (ws-relay always
-      // sends both). Fall through to the note-collaborator check below.
+      return reply.send({ userId: result.userId, role: resolved.role });
     }
 
     if (noteId !== undefined) {
@@ -351,16 +358,11 @@ async function authRoutes(app) {
         });
       }
 
-      const { NoteInvitation } = require('../models');
-      const collab = await NoteInvitation.findOne({ noteId, userId: result.userId }).lean();
-      if (!collab) {
-        return reply.status(403).send({
-          error: 'forbidden',
-          message: 'Not a collaborator on this note.',
-        });
+      const resolved = await resolveAuthRole(result.userId, undefined, noteId);
+      if (resolved.error) {
+        return reply.status(resolved.error.status).send(resolved.error.payload);
       }
-
-      return reply.send({ userId: result.userId, role: collab.role === 'viewer' ? 'viewer' : 'editor' });
+      return reply.send({ userId: result.userId, role: resolved.role });
     }
 
     return reply.send({ userId: result.userId });
@@ -394,6 +396,78 @@ async function authRoutes(app) {
     audit(req, 'logout', {});
     reply.clearCookie('bsession');
     return reply.send({ message: 'Logged out successfully.' });
+  });
+
+  // Kill switch for legacy stateless JWTs: everything issued before now stops working.
+  app.post('/revoke-legacy', {
+    preHandler: [app.authenticate],
+    config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
+  }, async (req, reply) => {
+    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+      return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Legacy auth is disabled.' });
+    }
+    await Account.updateOne({ _id: req.userId }, { $set: { jwtRevokedAt: new Date() } });
+    audit(req, 'revoke_legacy_tokens', {});
+    return reply.send({ message: 'All legacy tokens revoked.' });
+  });
+
+  // One-time short-lived ticket so session tokens never appear in WS URLs (L-1).
+  app.post('/ws-ticket', {
+    preHandler: [app.authenticate],
+    config: {
+      security: { public: false },
+      rateLimit: { max: parseInt(process.env.WS_TICKET_RATE_LIMIT_PER_MINUTE ?? '30', 10), timeWindow: '1 minute' },
+    },
+  }, async (req, reply) => {
+    const { workspaceId, noteId } = req.body ?? {};
+    const resolved = await resolveAuthRole(req.userId, workspaceId, noteId);
+    if (resolved.error) {
+      return reply.status(resolved.error.status).send(resolved.error.payload);
+    }
+    const ticket = crypto.randomBytes(32).toString('base64url');
+    const ttlSeconds = parseInt(process.env.WS_TICKET_TTL_SECONDS ?? '60', 10);
+    const { getDb } = require('../db');
+    const { hashSessionId } = require('../lib/crypto');
+    await getDb().query('DELETE FROM ws_tickets WHERE expires_at < NOW()');
+    await getDb().query(
+      'INSERT INTO ws_tickets (id_hash, account_id, device_id, role, expires_at) VALUES ($1,$2,$3,$4, NOW() + make_interval(secs => $5))',
+      [hashSessionId(ticket), req.userId, req.sessionDeviceId ?? null, resolved.role ?? null, ttlSeconds]
+    );
+    return reply.send({ ticket });
+  });
+
+  // Relay-only consumption of ws-tickets. Single-use via atomic DELETE ... RETURNING.
+  app.post('/verify-ticket', {
+    config: {
+      security: { public: true },
+      rateLimit: { max: parseInt(process.env.WS_TICKET_RATE_LIMIT_PER_MINUTE ?? '30', 10), timeWindow: '1 minute' },
+    },
+  }, async (req, reply) => {
+    const internalSecret = process.env.INTERNAL_API_SECRET;
+    if (internalSecret) {
+      const providedSecret = req.headers['x-internal-secret'];
+      if (!providedSecret || !timingSafeEqualStr(providedSecret, internalSecret)) {
+        return reply.status(403).send({ error: 'forbidden', message: 'Internal API access denied.' });
+      }
+    }
+    const { ticket } = req.body ?? {};
+    if (!ticket || typeof ticket !== 'string' || ticket.length < 16) {
+      return reply.status(400).send({ error: 'invalid_request', message: 'Valid ticket required.' });
+    }
+    const { getDb } = require('../db');
+    const { hashSessionId } = require('../lib/crypto');
+    const consumed = await getDb().query(
+      'DELETE FROM ws_tickets WHERE id_hash = $1 AND expires_at > NOW() RETURNING account_id, device_id, role',
+      [hashSessionId(ticket)]
+    );
+    if (consumed.rows.length === 0) {
+      return reply.status(401).send({ error: 'invalid_ticket', message: 'Ticket is invalid, used, or expired.' });
+    }
+    const row = consumed.rows[0];
+    const out = { userId: row.account_id };
+    if (row.device_id) out.deviceId = row.device_id;
+    if (row.role) out.role = row.role;
+    return reply.send(out);
   });
 
   app.get('/sessions', {

@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const fp  = require('fastify-plugin');
 const { Session } = require('../models');
+const { getDb } = require('../db');
 const { hashSessionId } = require('../lib/crypto');
 
 const SESSION_TTL_HOURS = parseInt(process.env.SESSION_TTL_HOURS ?? '24', 10);
@@ -138,6 +139,13 @@ async function authPlugin(app) {
     if (process.env.LEGACY_AUTH_ENABLED === 'true') {
       try {
         const payload = verifyToken(rawId);
+        // Stateless JWTs are revocable via accounts.jwt_revoked_at (set by /auth/revoke-legacy)
+        const revoked = await getDb().query('SELECT jwt_revoked_at FROM accounts WHERE id = $1', [payload.sub]);
+        // Inclusive second comparison: tokens issued in the revocation second die too
+        if (revoked.rows[0]?.jwt_revoked_at && payload.iat <= Math.floor(new Date(revoked.rows[0].jwt_revoked_at).getTime() / 1000)) {
+          req.authResult = 'expired';
+          return reply.status(401).send({ error: 'token_expired', message: 'Your session has expired. Please log in again.' });
+        }
         req.userId = payload.sub;
         req.sessionDeviceId = null;
         req.authResult = 'authenticated';

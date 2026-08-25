@@ -16,6 +16,16 @@ CREATE TABLE IF NOT EXISTS accounts (
   created_at            TEXT NOT NULL
 );
 
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS jwt_revoked_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS ws_tickets (
+  id_hash    TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id  TEXT,
+  role       TEXT,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS organizations (
   id TEXT PRIMARY KEY,
   name_encrypted TEXT NOT NULL,
