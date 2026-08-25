@@ -59,7 +59,7 @@ test.after(async () => {
 
 test('push accepts updates, then reports an identical retry as duplicate', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: {} });
   const payload = {
     workspaceId: 'workspace-1',
@@ -78,7 +78,7 @@ test('push accepts updates, then reports an identical retry as duplicate', async
 
 test('REST pushed envelopes are stored as opaque encrypted journal rows', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: {} });
   const response = await request(app, session, '/yjs/push-batch', {
     workspaceId: 'workspace-1',
@@ -99,7 +99,7 @@ test('REST pushed envelopes are stored as opaque encrypted journal rows', async 
 
 test('duplicate-only retries are not rejected by quota or an untrusted workspace header', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: {} });
   const payload = {
     workspaceId: 'workspace-1',
@@ -125,7 +125,7 @@ test('duplicate-only retries are not rejected by quota or an untrusted workspace
 
 test('team and enterprise pushes charge workspace storage, including duplicate-only retries charging neither counter', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: {} });
 
   for (const plan of ['team', 'enterprise']) {
@@ -151,7 +151,7 @@ test('team and enterprise pushes charge workspace storage, including duplicate-o
 
 test('rolls back prepared notes and quota when persistence fails mid-transaction', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: {} });
   await query('UPDATE subscriptions SET plan = $1, storage_used_bytes = 3 WHERE account_id = $2', ['team', 'account-1']);
   await query('UPDATE workspaces SET storage_used_bytes = 7 WHERE id = $1', ['workspace-1']);
@@ -186,7 +186,7 @@ test('rolls back prepared notes and quota when persistence fails mid-transaction
 
 test('rejects a device identity that does not match the request header', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: {} });
   const response = await request(app, session, '/yjs/push-batch', {
     workspaceId: 'workspace-1',
@@ -199,7 +199,7 @@ test('rejects a device identity that does not match the request header', async (
 
 test('requires membership for reads and rejects viewer writes', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   await seedAccount('account-2');
   const outsiderSession = await createSession('account-2', { headers: {} });
   const outsider = await request(app, outsiderSession, '/yjs/pull-batch', { workspaceId: 'workspace-1', notes: [{ noteId: 'note-1', checkpoint: null, limit: 10 }] });
@@ -221,7 +221,7 @@ test('requires membership for reads and rejects viewer writes', async (t) => {
 
 test('validates every note before storing any note', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: {} });
   const response = await request(app, session, '/yjs/push-batch', {
     workspaceId: 'workspace-1',
@@ -238,7 +238,7 @@ test('validates every note before storing any note', async (t) => {
 
 test('rejects malformed keys and unsafe numeric fields', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: {} });
   const malformedKey = await request(app, session, '/yjs/push-batch', {
     workspaceId: 'workspace-1',
@@ -256,11 +256,13 @@ test('rejects malformed keys and unsafe numeric fields', async (t) => {
 
 test('pull returns bounded pages and a retry of the checkpoint is stable', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: {} });
+  // Recent epoch-ms: pull cursors older than 24h are treated as stale.
+  const base = Date.now() - 60_000;
   const push = await request(app, session, '/yjs/push-batch', {
     workspaceId: 'workspace-1',
-    notes: [{ noteId: 'note-pages', updates: [1, 2, 3].map((sequence) => ({ key: `note-pages~~device-a~~${sequence}~~${sequence}.yjs.json`, data: 'eA==', deviceId: 'device-a', sequence, ts: sequence })) }],
+    notes: [{ noteId: 'note-pages', updates: [1, 2, 3].map((sequence) => ({ key: `note-pages~~device-a~~${base + sequence}~~${sequence}.yjs.json`, data: 'eA==', deviceId: 'device-a', sequence, ts: base + sequence })) }],
   });
   assert.equal(push.statusCode, 201);
 
@@ -269,21 +271,24 @@ test('pull returns bounded pages and a retry of the checkpoint is stable', async
   const page = first.json().notes['note-pages'];
   assert.equal(page.updates.length, 2);
   assert.equal(page.hasMore, true);
-  assert.deepEqual(page.nextCheckpoint, { 'device-a': { ts: 2, sequence: 2 } });
+  assert.deepEqual(page.nextCheckpoint, { 'device-a': { ts: base + 2, sequence: 2 } });
 
   const retry = await request(app, session, '/yjs/pull-batch', { workspaceId: 'workspace-1', notes: [{ noteId: 'note-pages', checkpoint: page.nextCheckpoint, limit: 2 }] });
-  assert.deepEqual(retry.json().notes['note-pages'].updates.map((update) => update.key), ['note-pages~~device-a~~3~~3.yjs.json']);
+  assert.deepEqual(retry.json().notes['note-pages'].updates.map((update) => update.key), [`note-pages~~device-a~~${base + 3}~~3.yjs.json`]);
 });
 
 test('pull filters each device independently when timestamps are interleaved', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('account-1', { headers: { 'x-device-id': 'device-a' } });
+  // Recent epoch-ms, device-a ahead of device-b (interleaved order).
+  const tsA = Date.now() - 60_000;
+  const tsB = tsA - 1_000;
   const payload = {
     workspaceId: 'workspace-1',
     notes: [{ noteId: 'interleaved', updates: [
-      { key: 'interleaved~~device-a~~100~~1.yjs.json', data: 'YQ==', deviceId: 'device-a', sequence: 1, ts: 100 },
-      { key: 'interleaved~~device-b~~50~~1.yjs.json', data: 'Yg==', deviceId: 'device-b', sequence: 1, ts: 50 },
+      { key: `interleaved~~device-a~~${tsA}~~1.yjs.json`, data: 'YQ==', deviceId: 'device-a', sequence: 1, ts: tsA },
+      { key: `interleaved~~device-b~~${tsB}~~1.yjs.json`, data: 'Yg==', deviceId: 'device-b', sequence: 1, ts: tsB },
     ] }],
   };
   assert.equal((await request(app, session, '/yjs/push-batch', payload, 'device-a')).statusCode, 400);
@@ -294,15 +299,15 @@ test('pull filters each device independently when timestamps are interleaved', a
   }, 'device-b')).statusCode, 201);
   const first = await request(app, session, '/yjs/pull-batch', {
     workspaceId: 'workspace-1', notes: [{ noteId: 'interleaved', checkpoint: {
-      'device-a': { ts: 100, sequence: 1 },
+      'device-a': { ts: tsA, sequence: 1 },
     }, limit: 10 }],
   }, 'device-a');
-  assert.deepEqual(first.json().notes.interleaved.updates.map((update) => update.key), ['interleaved~~device-b~~50~~1.yjs.json']);
+  assert.deepEqual(first.json().notes.interleaved.updates.map((update) => update.key), [`interleaved~~device-b~~${tsB}~~1.yjs.json`]);
 });
 
 test('reserves quota atomically when concurrent pushes race for the last byte', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const proQuota = 50 * 1024 ** 3;
   await query('UPDATE subscriptions SET plan = $1, storage_quota_bytes = $2, storage_used_bytes = $3 WHERE account_id = $4', ['pro', proQuota, proQuota - 1, 'account-1']);
   const session = await createSession('account-1', { headers: { 'x-device-id': 'device-a' } });
@@ -319,7 +324,7 @@ test('reserves quota atomically when concurrent pushes race for the last byte', 
 
 test('binds a device header to its session and enforces the account device limit', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   await query('UPDATE subscriptions SET plan = $1, storage_quota_bytes = 1000000 WHERE account_id = $2', ['starter', 'account-1']);
   const boundSession = await createSession('account-1', { headers: { 'x-device-id': 'bound-device' } });
   const mismatch = await request(app, boundSession, '/yjs/push-batch', {

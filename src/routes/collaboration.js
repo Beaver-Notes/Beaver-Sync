@@ -3,7 +3,14 @@
 const crypto = require('crypto');
 const { z } = require('zod');
 const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models');
-const { query } = require('../db');
+const {
+  storeRecipients,
+  noteHasAnyKey,
+  getEnvelopesForUser,
+  createKeyDistributionRequest,
+  listKeyDistributionRequests,
+  deleteKeyDistributionRequest,
+} = require('../repositories/noteKeys');
 const { validatePublicKey } = require('../lib/recipient-wrap');
 const { sendNoteInviteEmail } = require('../email');
 const { isFreePlan } = require('../lib/plans');
@@ -35,7 +42,8 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-const NoteIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/);
+// noteIds are claim keys for unclaimed notes; floor blocks brute-forceable short IDs (M-2)
+const NoteIdSchema = z.string().min(16).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 
 const baseRateLimit = {
   config: {
@@ -126,16 +134,7 @@ async function collaborationRoutes(app) {
     if (await NoteKey.countDocuments({ noteId }) > 0) {
       outcome = { existing: true, stored: 0 };
     } else {
-      const now = new Date().toISOString();
-      const rows = recipients.map((r) => [noteId, r.userId, r.deviceId || 'default', r.wrappedKey, now]);
-      const placeholders = rows
-        .map((_, i) => `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`)
-        .join(', ');
-      await query(`
-        INSERT INTO note_keys (note_id, user_id, device_id, wrapped_key, created_at)
-        VALUES ${placeholders}
-        ON CONFLICT(note_id, user_id, device_id) DO UPDATE SET wrapped_key = excluded.wrapped_key
-      `, rows.flat());
+      await storeRecipients(noteId, recipients);
       outcome = { existing: false, stored: recipients.length };
     }
 
@@ -184,17 +183,14 @@ async function collaborationRoutes(app) {
     const membership = await requireCollaborator(reply, noteId, req.userId);
     if (!membership) return;
 
-    const anyKey = await query('SELECT 1 FROM note_keys WHERE note_id = $1 LIMIT 1', [noteId]);
-    if (anyKey.rowCount === 0) {
+    const anyKey = await noteHasAnyKey(noteId);
+    if (!anyKey) {
       // Fresh note: no envelopes at all. The frontend (later task) detects a
       // fresh note via noteHasKey === false and provisions the first key.
       return reply.send({ noteId, wrappedKeys: [], noteHasKey: false });
     }
 
-    const envelopes = await query(
-      'SELECT device_id, wrapped_key FROM note_keys WHERE note_id = $1 AND user_id = $2',
-      [noteId, req.userId]
-    );
+    const envelopes = await getEnvelopesForUser(noteId, req.userId);
     if (envelopes.rowCount === 0) {
       // Caller is a collaborator but has no envelope yet — late joiner. They
       // must be re-wrapped by an owner, not provision a fresh key.
@@ -229,11 +225,7 @@ async function collaborationRoutes(app) {
     const membership = await requireCollaborator(reply, noteId, req.userId);
     if (!membership) return;
 
-    await query(
-      `INSERT INTO key_distribution_requests (note_id, user_id, target_device_id, requested_at)
-       VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
-      [noteId, req.userId, targetDeviceId, new Date().toISOString()]
-    );
+    await createKeyDistributionRequest({ noteId, userId: req.userId, targetDeviceId });
     return reply.send({ ok: true });
   });
 
@@ -242,12 +234,9 @@ async function collaborationRoutes(app) {
     ...baseRateLimit,
     ...protect,
   }, async (req, reply) => {
-    const rows = await query(
-      `SELECT note_id, user_id, target_device_id, requested_at FROM key_distribution_requests WHERE user_id = $1`,
-      [req.userId]
-    );
+    const requests = await listKeyDistributionRequests(req.userId);
     return reply.send({
-      requests: rows.rows.map((r) => ({
+      requests: requests.map((r) => ({
         noteId: r.note_id,
         userId: r.user_id,
         targetDeviceId: r.target_device_id,
@@ -273,10 +262,7 @@ async function collaborationRoutes(app) {
     const membership = await requireCollaborator(reply, req.params.noteId, req.userId);
     if (!membership) return;
 
-    await query(
-      `DELETE FROM key_distribution_requests WHERE note_id=$1 AND user_id=$2 AND target_device_id=$3`,
-      [req.params.noteId, req.userId, targetDeviceId]
-    );
+    await deleteKeyDistributionRequest({ noteId: req.params.noteId, userId: req.userId, targetDeviceId });
     return reply.send({ ok: true });
   });
 
@@ -476,6 +462,9 @@ async function collaborationRoutes(app) {
 
     const membership = await requireCollaborator(reply, noteId, req.userId);
     if (!membership) return;
+    if (membership !== true && membership.role !== 'editor') {
+      return reply.status(403).send({ error: 'forbidden', message: 'Only editors can remove collaborators.' });
+    }
 
     const result = await NoteInvitation.deleteOne({ noteId, userId: targetUserId });
     if (result.deletedCount === 0) {

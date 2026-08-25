@@ -102,14 +102,14 @@ test('workspace join gate: keyless joiner is rejected with keypair_required', as
 test('singular recipient gate: keyless collaborator is rejected with keypair_required', async () => {
   await query(
     'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
-    ['rec-note', 'alice', 'alice', 'editor', now]
+    ['rec-note-gate-check', 'alice', 'alice', 'editor', now]
   );
   await query(
     'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
-    ['rec-note', 'nokey', 'alice', 'editor', now]
+    ['rec-note-gate-check', 'nokey', 'alice', 'editor', now]
   );
 
-  const res = await post(aliceSession, '/collaboration/keys/rec-note/recipient', {
+  const res = await post(aliceSession, '/collaboration/keys/rec-note-gate-check/recipient', {
     recipientUserId: 'nokey',
     wrappedKey: '{"kemCt":"abc","ct":"def","tag":"ghi"}',
   });
@@ -120,14 +120,14 @@ test('singular recipient gate: keyless collaborator is rejected with keypair_req
 test('plural recipients gate: keyless collaborator is rejected with keypair_required', async () => {
   await query(
     'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
-    ['recs-note', 'alice', 'alice', 'editor', now]
+    ['recs-note-gate-check', 'alice', 'alice', 'editor', now]
   );
   await query(
     'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
-    ['recs-note', 'nokey', 'alice', 'editor', now]
+    ['recs-note-gate-check', 'nokey', 'alice', 'editor', now]
   );
 
-  const res = await post(aliceSession, '/collaboration/keys/recs-note/recipients', {
+  const res = await post(aliceSession, '/collaboration/keys/recs-note-gate-check/recipients', {
     recipients: [{ userId: 'nokey', wrappedKey: '{"kemCt":"abc","ct":"def","tag":"ghi"}' }],
   });
   assert.equal(res.statusCode, 403);

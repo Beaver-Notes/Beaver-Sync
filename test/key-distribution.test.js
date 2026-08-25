@@ -65,7 +65,7 @@ test.after(async () => {
 
 test('create + list + delete key distribution request', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { noteId, ownerHeaders } = await seedNote();
   const create = await app.inject({

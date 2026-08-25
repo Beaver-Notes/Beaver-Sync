@@ -98,7 +98,7 @@ test.after(async () => {
 
 test('a workspace member can read sync state', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await request(app, 'GET', '/sync/state?workspaceId=sync-workspace', users.member);
   assert.equal(response.statusCode, 200);
@@ -113,7 +113,7 @@ test('a workspace member can read sync state', async (t) => {
 
 test('a non-member cannot read sync state', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await request(app, 'GET', '/sync/state?workspaceId=sync-workspace', users.outsider);
   assert.equal(response.statusCode, 403);
@@ -121,7 +121,7 @@ test('a non-member cannot read sync state', async (t) => {
 
 test('unauthenticated state, claim, and complete requests are rejected', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   assert.equal((await unauthenticatedRequest(app, 'GET', '/sync/state?workspaceId=sync-workspace')).statusCode, 401);
   assert.equal((await unauthenticatedRequest(app, 'POST', '/sync/initialize/claim', {
@@ -134,7 +134,7 @@ test('unauthenticated state, claim, and complete requests are rejected', async (
 
 test('only the owner can claim initialization and a second claim is rejected', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const memberResponse = await request(app, 'POST', '/sync/initialize/claim', users.member, { workspaceId: 'sync-workspace' });
   assert.equal(memberResponse.statusCode, 403);
@@ -151,7 +151,7 @@ test('only the owner can claim initialization and a second claim is rejected', a
 
 test('an expired claim can be reclaimed', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   await query('UPDATE sync_workspace_state SET initialization_expires_at = $1 WHERE workspace_id = $2', [new Date(Date.now() - 1_000).toISOString(), 'sync-workspace']);
   const response = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
@@ -160,7 +160,7 @@ test('an expired claim can be reclaimed', async (t) => {
 
 test('completion rejects documents from a different snapshot generation', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   const response = await request(app, 'POST', '/sync/initialize/complete', users.owner, {
@@ -173,7 +173,7 @@ test('completion rejects documents from a different snapshot generation', async 
 
 test('completion rejects a missing or invalid declared snapshot object', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   const response = await request(app, 'POST', '/sync/initialize/complete', users.owner, {
@@ -186,7 +186,7 @@ test('completion rejects a missing or invalid declared snapshot object', async (
 
 test('completion rejects a declared snapshot absent from object storage', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   const response = await request(app, 'POST', '/sync/initialize/complete', users.owner, {
@@ -199,7 +199,7 @@ test('completion rejects a declared snapshot absent from object storage', async 
 
 test('completion rejects invalid document fields and generations', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const invalidDocuments = [
     { noteId: '', snapshotGeneration: 1 },
@@ -218,7 +218,7 @@ test('completion rejects invalid document fields and generations', async (t) => 
 
 test('an expired completion claim is rejected and leaves the workspace initializing', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   await query('UPDATE sync_workspace_state SET initialization_expires_at = $1 WHERE workspace_id = $2', [new Date(Date.now() - 1_000).toISOString(), 'sync-workspace']);
@@ -232,7 +232,7 @@ test('an expired completion claim is rejected and leaves the workspace initializ
 
 test('completion accepts more than 500 asset keys (seed path may upload >500 assets)', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   const assets = Array.from({ length: 501 }, (_, i) => `assets--note-${i}--file.png`);
@@ -252,7 +252,7 @@ test('completion accepts more than 500 asset keys (seed path may upload >500 ass
 
 test('completion has no asset-count cap; a much larger key set is still verified', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   const assets = Array.from({ length: 2000 }, (_, i) => `assets--note-${i}--file.png`);
@@ -270,7 +270,7 @@ test('completion has no asset-count cap; a much larger key set is still verified
 
 test('a completion database failure rolls back document rows and initialization', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   await query(`CREATE OR REPLACE FUNCTION fail_sync_document_insert() RETURNS trigger AS $$
@@ -302,7 +302,7 @@ test('a completion database failure rolls back document rows and initialization'
 
 test('state reads include persisted workspace and document mappings', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   await query(`
     INSERT INTO sync_document_state
@@ -321,13 +321,13 @@ test('state reads include persisted workspace and document mappings', async (t) 
   assert.equal(response.json().generation, 4);
   assert.deepEqual(response.json().documents, [{
     noteId: 'persisted-note', snapshotGeneration: 4, snapshotKey: 'snapshot-key',
-    checkpointTs: 123, checkpointSequence: 9,
+    checkpointTs: 123, checkpointSequence: 9, snapshotTs: 0,
   }]);
 });
 
 test('completion rejects the wrong token and atomically initializes an empty mapping', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   await query('UPDATE sync_workspace_state SET initialization_expires_at = $1 WHERE workspace_id = $2', [new Date(Date.now() - 1_000).toISOString(), 'sync-workspace']);
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
@@ -350,7 +350,7 @@ test('completion rejects the wrong token and atomically initializes an empty map
 
 test('snapshot-urls returns presigned URLs for batch upload', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   assert.equal(claim.statusCode, 200);
@@ -374,7 +374,7 @@ test('snapshot-urls returns presigned URLs for batch upload', async (t) => {
 
 test('snapshot-urls rejects invalid token', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
 
@@ -389,7 +389,7 @@ test('snapshot-urls rejects invalid token', async (t) => {
 
 test('snapshot-urls rejects non-owner', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   const { token } = claim.json();

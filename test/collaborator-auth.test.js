@@ -48,7 +48,7 @@ async function inject(app, session, payload) {
 
 test('verify-session grants editor role to a note collaborator via noteId', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await seedAccount('pro');
   const editor = await seedAccount('pro');
   await models.NoteInvitation.create({
@@ -64,7 +64,7 @@ test('verify-session grants editor role to a note collaborator via noteId', asyn
 
 test('verify-session grants viewer role to a note collaborator via noteId', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await seedAccount('pro');
   const viewer = await seedAccount('pro');
   await models.NoteInvitation.create({
@@ -80,7 +80,7 @@ test('verify-session grants viewer role to a note collaborator via noteId', asyn
 
 test('verify-session rejects a non-collaborator on a note', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await seedAccount('pro');
   const outsider = await seedAccount('pro');
   await models.NoteInvitation.create({
@@ -96,7 +96,7 @@ test('verify-session rejects a non-collaborator on a note', async (t) => {
 
 test('verify-session falls through to the collaborator check when a non-member sends workspaceId + noteId', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await seedAccount('pro');
   const editor = await seedAccount('pro');
   await models.NoteInvitation.create({
@@ -112,7 +112,7 @@ test('verify-session falls through to the collaborator check when a non-member s
 
 test('verify-session returns 403 when a non-member sends workspaceId + noteId and is not a collaborator either', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await seedAccount('pro');
   const outsider = await seedAccount('pro');
   await models.NoteInvitation.create({
@@ -128,7 +128,7 @@ test('verify-session returns 403 when a non-member sends workspaceId + noteId an
 
 test('verify-session rejects an empty-string noteId', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const user = await seedAccount('pro');
 
   const session = await createSession(user.id, { headers: {} });
@@ -140,7 +140,7 @@ test('verify-session rejects an empty-string noteId', async (t) => {
 
 test('verify-session rejects an invalid noteId', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const user = await seedAccount('pro');
 
   const session = await createSession(user.id, { headers: {} });
@@ -152,7 +152,7 @@ test('verify-session rejects an invalid noteId', async (t) => {
 
 test('verify-session still validates workspace membership when noteId is absent', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await seedAccount('pro');
   const member = await seedAccount('pro');
   const outsider = await seedAccount('pro');

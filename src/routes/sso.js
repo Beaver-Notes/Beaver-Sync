@@ -82,18 +82,20 @@ function buildSamlInstance(config) {
   });
 }
 
-async function jitProvision(email, config) {
+async function jitProvision(email, config, opts = {}) {
+  const { emailVerified = true } = opts;
+  // OIDC must present email_verified=true; SAML assertions are already trusted
+  if (emailVerified !== true) return null;
+
   const normalized = String(email).trim().toLowerCase();
   const domain = normalized.split('@')[1] ?? '';
 
-  if (config) {
-    const allowedHosts = (config.allowedEmailDomains && String(config.allowedEmailDomains))
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
-    if (allowedHosts.length > 0 && !allowedHosts.some((allowed) => domain === allowed || normalized.endsWith('.' + allowed))) {
-      return null;
-    }
+  const allowedHosts = config && (config.allowedEmailDomains && String(config.allowedEmailDomains))
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean) || [];
+  if (allowedHosts.length > 0 && !allowedHosts.some((allowed) => domain === allowed || normalized.endsWith('.' + allowed))) {
+    return null;
   }
 
   const emailHash = createEmailHash(normalized);
@@ -106,7 +108,10 @@ async function jitProvision(email, config) {
     });
     const { Subscription } = require('../models');
     await Subscription.create({ accountId: account.id, plan: 'free', status: 'active', storageQuotaBytes: 0, createdAt: new Date() });
+    return account;
   }
+  // Existing account: default-deny JIT linking unless domain explicitly allow-listed
+  if (allowedHosts.length === 0) return null;
   return account;
 }
 
@@ -170,13 +175,13 @@ async function ssoRoutes(app) {
         code_challenge: crypto.createHash('sha256').update(codeVerifier).digest('base64url'),
       });
 
-      return reply.redirect(301, url);
+      return reply.code(301).redirect(url);
     }
 
     const saml = buildSamlInstance(config);
     const host = req.headers['host'] ?? 'localhost';
     const url = await saml.getAuthorizeUrlAsync('', host, {});
-    return reply.redirect(301, url);
+    return reply.code(301).redirect(url);
   });
 
   app.post('/sso/:slug/acs', async (req, reply) => {
@@ -209,7 +214,7 @@ async function ssoRoutes(app) {
     const redirectTo = safeRedirectTarget(req.query?.RelayState, fallback);
     if (typeof app.setSessionCookie === 'function') app.setSessionCookie(reply, token);
     reply.header('Referrer-Policy', 'no-referrer');
-    return reply.redirect(302, `${redirectTo}?token=${encodeURIComponent(token)}`);
+    return reply.code(302).redirect(`${redirectTo}?token=${encodeURIComponent(token)}`);
   });
 
   app.get('/sso/:slug/oidc/callback', async (req, reply) => {
@@ -253,8 +258,11 @@ async function ssoRoutes(app) {
     if (!email) {
       return reply.status(400).send({ error: 'email_required', message: 'OIDC provider did not return an email address.' });
     }
+    if (userinfo.email_verified !== true) {
+      return reply.status(403).send({ error: 'email_not_verified', message: 'OIDC email must be verified.' });
+    }
 
-    const account = await jitProvision(email, config);
+    const account = await jitProvision(email, config, { emailVerified: userinfo.email_verified });
     if (!account) {
       return reply.status(403).send({ error: 'forbidden', message: 'Email domain is not permitted by this SSO configuration.' });
     }
@@ -263,7 +271,7 @@ async function ssoRoutes(app) {
     const redirectTo = `${APP_URL}/auth/sso/${config.slug}/complete`;
     if (typeof app.setSessionCookie === 'function') app.setSessionCookie(reply, token);
     reply.header('Referrer-Policy', 'no-referrer');
-    return reply.redirect(302, `${redirectTo}?token=${encodeURIComponent(token)}`);
+    return reply.code(302).redirect(`${redirectTo}?token=${encodeURIComponent(token)}`);
   });
 }
 

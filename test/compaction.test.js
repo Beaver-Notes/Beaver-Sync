@@ -119,7 +119,7 @@ async function authHeaderFor(app, userId = '507f1f77bcf86cd799439011') {
 
 test('concurrent compaction requests: first succeeds, second returns 409', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let locked = false;
   models.CompactionLock.findOneAndUpdate = () => {
@@ -157,7 +157,7 @@ test('concurrent compaction requests: first succeeds, second returns 409', async
 
 test('lock is released after compaction completes', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let deleted = false;
   models.CompactionLock.findOneAndUpdate = async () => ({

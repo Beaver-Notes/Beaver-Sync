@@ -30,6 +30,8 @@ const { createSession } = require('../src/middleware/auth');
 
 const ids = { account: 'bootstrap-owner', workspace: 'bootstrap-workspace', note: 'bootstrap-note' };
 const deviceId = 'bootstrap-device';
+// Recent epoch-ms: pull cursors older than 24h are treated as stale.
+const TS_BASE = Date.now() - 60_000;
 
 async function seed() {
   const now = new Date().toISOString();
@@ -41,7 +43,7 @@ async function seed() {
 }
 
 function update(sequence) {
-  const ts = 100 + sequence;
+  const ts = TS_BASE + sequence;
   return {
     key: `${ids.note}~~${deviceId}~~${ts}~~${sequence}.yjs.json`,
     data: Buffer.from(`encrypted-yjs-${sequence}`).toString('base64'),
@@ -67,8 +69,8 @@ async function request(app, session, url, payload, method = 'POST') {
 test('bootstraps, completes, pushes, replays, and pulls every update exactly once', async (t) => {
   const expectedKeys = new Set([
     `${ids.account}/snapshot.json`,
-    `${ids.account}/yjs/${ids.note}~~${deviceId}~~101~~1.yjs.json`,
-    `${ids.account}/yjs/${ids.note}~~${deviceId}~~102~~2.yjs.json`,
+    `${ids.account}/yjs/${ids.note}~~${deviceId}~~${TS_BASE + 1}~~1.yjs.json`,
+    `${ids.account}/yjs/${ids.note}~~${deviceId}~~${TS_BASE + 2}~~2.yjs.json`,
     `yjs/${ids.workspace}/${ids.note}/1.yjs`,
   ]);
   const storageRequests = [];
@@ -149,13 +151,13 @@ test('bootstraps, completes, pushes, replays, and pulls every update exactly onc
   assert.equal(pushRes1.accepted, 2);
   assert.equal(pushRes1.duplicate, 0);
   assert.equal(pushRes1.sizeBytes, 30);
-  assert.deepEqual(pushRes1.checkpoint, { ts: 102, sequence: 2, deviceId });
+  assert.deepEqual(pushRes1.checkpoint, { ts: TS_BASE + 2, sequence: 2, deviceId });
 
   const pushRes2 = (await push([firstUpdate])).json();
   assert.equal(pushRes2.accepted, 0);
   assert.equal(pushRes2.duplicate, 1);
   assert.equal(pushRes2.sizeBytes, 0);
-  assert.deepEqual(pushRes2.checkpoint, { ts: 101, sequence: 1, deviceId });
+  assert.deepEqual(pushRes2.checkpoint, { ts: TS_BASE + 1, sequence: 1, deviceId });
 
   const seen = [];
   let checkpoint = null;
@@ -174,7 +176,7 @@ test('bootstraps, completes, pushes, replays, and pulls every update exactly onc
 
   assert.deepEqual(seen, [firstUpdate.key, secondUpdate.key]);
   assert.equal(new Set(seen).size, 2);
-  assert.deepEqual(checkpoint, { [deviceId]: { ts: 102, sequence: 2 } });
+  assert.deepEqual(checkpoint, { [deviceId]: { ts: TS_BASE + 2, sequence: 2 } });
   assert.notEqual(storageRequests.length, 0);
   assert.deepEqual(storageRequests, [
     { method: 'PUT', key: `${ids.account}/snapshot.json`, bodyLength: 16 },
@@ -188,5 +190,5 @@ test('bootstraps, completes, pushes, replays, and pulls every update exactly onc
 });
 
 function firstStorageKey() {
-  return `${ids.note}~~${deviceId}~~101~~1.yjs.json`;
+  return `${ids.note}~~${deviceId}~~${TS_BASE + 1}~~1.yjs.json`;
 }

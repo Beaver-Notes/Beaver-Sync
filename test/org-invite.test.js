@@ -50,7 +50,7 @@ test.after(async () => {
 
 test('admin creates an invite that returns a raw token and grants membership on join', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const ownerSession = await createSession('inv-owner', { headers: {} });
   const joinerSession = await createSession('inv-joiner', { headers: {} });
 
@@ -80,7 +80,7 @@ test('admin creates an invite that returns a raw token and grants membership on 
 
 test('a keyless user cannot join via invite and is rejected with 403 keypair_required', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   await seedAccount('inv-keyless', null);
   const ownerSession = await createSession('inv-owner', { headers: {} });
   const keylessSession = await createSession('inv-keyless', { headers: {} });
@@ -98,7 +98,7 @@ test('a keyless user cannot join via invite and is rejected with 403 keypair_req
 
 test('a require-approval invite is pending until an admin approves it, then join succeeds', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const ownerSession = await createSession('inv-owner', { headers: {} });
   const joinerSession = await createSession('inv-joiner2', { headers: {} });
 
@@ -123,7 +123,7 @@ test('a require-approval invite is pending until an admin approves it, then join
 
 test('revoked invites are rejected with 404 on join', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const ownerSession = await createSession('inv-owner', { headers: {} });
   const joinerSession = await createSession('inv-joiner', { headers: {} });
 
@@ -142,7 +142,7 @@ test('revoked invites are rejected with 404 on join', async (t) => {
 
 test('public-keys returns only collaborators with keypairs and 403s for outsiders', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   await seedAccount('pk-owner', PUBKEY);
   await seedAccount('pk-user1', PUBKEY_2);
   await seedAccount('pk-user2', null);
@@ -150,25 +150,25 @@ test('public-keys returns only collaborators with keypairs and 403s for outsider
   for (const uid of ['pk-owner', 'pk-user1', 'pk-user2']) {
     await query(
       'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
-      ['note-pk', uid, 'pk-owner', 'editor', now]
+      ['note-pubkey-test', uid, 'pk-owner', 'editor', now]
     );
   }
 
   const ownerSession = await createSession('pk-owner', { headers: {} });
   const outsiderSession = await createSession('pk-outsider', { headers: {} });
 
-  const response = await inject(app, ownerSession, 'GET', '/collaboration/public-keys/note-pk');
+  const response = await inject(app, ownerSession, 'GET', '/collaboration/public-keys/note-pubkey-test');
   assert.equal(response.statusCode, 200);
   const expected = [
-    { userId: 'pk-owner', kemPublicKey: PUBKEY },
-    { userId: 'pk-user1', kemPublicKey: PUBKEY_2 },
+    { userId: 'pk-owner', deviceId: 'default', kemPublicKey: PUBKEY },
+    { userId: 'pk-user1', deviceId: 'default', kemPublicKey: PUBKEY_2 },
   ];
   assert.deepEqual(
     response.json().collaborators.sort((a, b) => a.userId.localeCompare(b.userId)),
     expected.sort((a, b) => a.userId.localeCompare(b.userId))
   );
 
-  const forbidden = await inject(app, outsiderSession, 'GET', '/collaboration/public-keys/note-pk');
+  const forbidden = await inject(app, outsiderSession, 'GET', '/collaboration/public-keys/note-pubkey-test');
   assert.equal(forbidden.statusCode, 403);
   assert.equal(forbidden.json().error, 'forbidden');
 });

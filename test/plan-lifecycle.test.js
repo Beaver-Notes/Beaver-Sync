@@ -145,7 +145,7 @@ test('checkDowngrade allows an account with no subscription', async () => {
 
 test('commits /history is clamped to the starter 30-day window', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('starter');
   const noteId = 'history-note';
   const noteIdHash = createNoteHash(noteId);
@@ -167,7 +167,7 @@ test('commits /history is clamped to the starter 30-day window', async (t) => {
 
 test('commits list is clamped to the starter 30-day window', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('starter');
 
   await seedCommit(account.id, '1-dev-b-1', 'dev-b', null, Date.now() - 40 * DAY_MS);
@@ -187,7 +187,7 @@ test('commits list is clamped to the starter 30-day window', async (t) => {
 
 test('yjs pull-batch is clamped to the starter 30-day window', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('starter');
   await seedWorkspace('ws-clamp', account.id);
   await seedYjsUpdate('ws-clamp', 'note-x', 'dev-c', 1, Date.now() - 40 * DAY_MS);
@@ -209,7 +209,7 @@ test('yjs pull-batch is clamped to the starter 30-day window', async (t) => {
 
 test('yjs pull-batch is not clamped for enterprise plans', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('enterprise');
   await seedWorkspace('ws-ent', account.id);
   await seedYjsUpdate('ws-ent', 'note-y', 'dev-d', 1, Date.now() - 40 * DAY_MS);
@@ -230,7 +230,7 @@ test('yjs pull-batch is not clamped for enterprise plans', async (t) => {
 
 test('free signup skips org + workspace provisioning', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const email = `free-${crypto.randomBytes(4).toString('hex')}@test.example`;
 
   const res = await app.inject({

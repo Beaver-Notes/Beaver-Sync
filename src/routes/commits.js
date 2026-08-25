@@ -8,7 +8,7 @@ const { createNoteHash } = require('../lib/crypto');
 const { audit } = require('../lib/audit');
 const { historyCutoffTs } = require('../lib/plan-lifecycle');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
-const { query } = require('../db');
+const { listHistory } = require('../repositories/commits');
 const { DEVICE_ID_PATTERN } = require('../lib/patterns');
 
 const COMMIT_BODY_LIMIT_BYTES = parseInt(process.env.COMMIT_BODY_LIMIT_BYTES ?? '1048576', 10);
@@ -240,36 +240,10 @@ async function commitRoutes(app) {
     const beforeTs = parseInt(req.query.before, 10);
     const before = Number.isFinite(beforeTs) ? new Date(beforeTs) : null;
 
-    const params = [req.userId, noteIdHash];
-    let sql = `
-      SELECT
-        commits.commit_id AS commitId,
-        commits.device_id AS deviceId,
-        commits.clock,
-        commits.ts,
-        commits.created_at AS createdAt,
-        accounts.username AS authorName,
-        devices.label AS deviceLabel
-      FROM commits
-      LEFT JOIN accounts ON commits.account_id = accounts.id
-      LEFT JOIN devices ON commits.account_id = devices.account_id AND commits.device_id = devices.device_id
-      WHERE commits.account_id = $1 AND commits.note_id_hash = $2
-    `;
-    let paramIndex = 3;
-    if (before) {
-      sql += ` AND commits.created_at < $${paramIndex++}`;
-      params.push(before.toISOString());
-    }
     const { plan } = await resolveEffectivePlan(req);
     const cutoffTs = historyCutoffTs(plan);
-    if (cutoffTs > 0) {
-      sql += ` AND commits.created_at >= $${paramIndex++}`;
-      params.push(new Date(cutoffTs).toISOString());
-    }
-    sql += ` ORDER BY commits.created_at DESC LIMIT $${paramIndex}`;
-    params.push(limit);
 
-    const { rows: commits } = await query(sql, params);
+    const commits = await listHistory({ userId: req.userId, noteIdHash, before, cutoffTs, limit });
 
     return reply.send({ commits, noteId });
   });

@@ -33,12 +33,7 @@ if (process.env.LEGACY_AUTH_ENABLED === 'true') {
   loadKeys();
 }
 
-function getIpSubnet(req) {
-  const ip = req.ip ?? '0.0.0.0';
-  const ipv4 = ip.includes(':') ? '0.0.0.0' : ip;
-  const parts = ipv4.split('.');
-  return parts.slice(0, 3).join('.');
-}
+const { getIpSubnet } = require('../lib/audit');
 
 async function createSession(userId, req, workspaceId = null) {
   const rawId = crypto.randomBytes(32).toString('base64url');

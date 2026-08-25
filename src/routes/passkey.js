@@ -9,8 +9,18 @@ const {
 } = require('@simplewebauthn/server');
 
 const { Account, Credential, Subscription, WebAuthnChallenge } = require('../models');
-const { createSession, setSessionCookieIfAvailable } = require('../middleware/auth');
+const { createSession, setSessionCookieIfAvailable, validateSession } = require('../middleware/auth');
 const { createEmailHash } = require('../lib/crypto');
+
+async function isAuthenticatedAs(req, accountId) {
+  let rawId = null;
+  const authHeader = req.headers['authorization'];
+  if (authHeader && authHeader.startsWith('Bearer ')) rawId = authHeader.slice(7);
+  if (!rawId && req.cookies?.bsession) rawId = req.cookies.bsession;
+  if (!rawId) return false;
+  const result = await validateSession(rawId);
+  return result && result.userId === accountId;
+}
 
 const AUTH_BODY_LIMIT_BYTES = parseInt(process.env.AUTH_BODY_LIMIT_BYTES ?? '16384', 10);
 
@@ -78,9 +88,21 @@ async function passkeyRoutes(app) {
     const deviceLabel = String(parsed.data.deviceLabel).slice(0, 128);
 
     let account = await Account.findOne({ emailHmac: emailHash });
+    let isNewAccount = false;
     if (!account) {
       const kdfSalt = require('crypto').randomBytes(32).toString('hex');
       account = await Account.create({ emailHmac: emailHash, passwordHash: null, kdfSalt });
+      isNewAccount = true;
+    }
+    if (!isNewAccount) {
+      const authed = await isAuthenticatedAs(req, account.id);
+      if (!authed) {
+        app.recordSecurityEvent(req, 'passkey_register_rejected_existing_account', { emailHash });
+        return reply.status(403).send({
+          error: 'forbidden',
+          message: 'An account with this email already exists. Please sign in to add a passkey.',
+        });
+      }
     }
 
     const options = await generateRegistrationOptions({
@@ -121,6 +143,23 @@ async function passkeyRoutes(app) {
     const account = await Account.findOne({ emailHmac: emailHash });
     if (!account) {
       return reply.status(400).send({ error: 'account_not_found', message: 'Beaver Account not found.' });
+    }
+
+    // Existing accounts must be authenticated to add a new credential — prevents takeover.
+    const existingCreds = await Credential.find({ accountId: account.id }).lean();
+    const isBrandNew =
+      existingCreds.length === 0 &&
+      account.createdAt &&
+      Date.now() - new Date(account.createdAt).getTime() < 60_000;
+    if (!isBrandNew) {
+      const authed = await isAuthenticatedAs(req, account.id);
+      if (!authed) {
+        app.recordSecurityEvent(req, 'passkey_register_rejected_existing_account_complete', { emailHash });
+        return reply.status(403).send({
+          error: 'forbidden',
+          message: 'An account with this email already exists. Please sign in to add a passkey.',
+        });
+      }
     }
 
     let verification;

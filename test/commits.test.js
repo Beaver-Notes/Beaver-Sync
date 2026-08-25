@@ -115,7 +115,7 @@ async function authHeaderFor(app, userId = '507f1f77bcf86cd799439011') {
 
 test('plaintext payload string is rejected with 400', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const auth = await authHeaderFor(app);
 
@@ -143,7 +143,7 @@ test('plaintext payload string is rejected with 400', async (t) => {
 
 test('valid aes256gcm-v1 envelope is accepted', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let storedPayload = null;
   r2.put = async (key, body) => { storedPayload = body.toString('utf8'); };
@@ -188,7 +188,7 @@ test('real POST /commits inserts commit metadata and serves it through list + hi
   Object.assign(r2, originalMethods.r2);
 
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const account = await models.Account.create({
     emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY)
@@ -274,7 +274,7 @@ test('real POST /commits inserts commit metadata and serves it through list + hi
 
 test('envelope missing cipher is rejected with 400', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const auth = await authHeaderFor(app);
 

@@ -159,10 +159,10 @@ async function syncStateRoutes(app) {
       if (!storage) return reply.status(503).send({ error: 'storage_unavailable' });
       const snapshotErrors = await mapWithConcurrency(documents, VERIFY_CONCURRENCY, async (document) => {
         if (!validKeySegment(workspaceId) || !validKeySegment(document.noteId)) {
-          return { error: 'invalid_snapshot_key' };
+          return 'invalid_snapshot_key';
         }
         if (document.snapshotKey !== snapshotKeyFor(workspaceId, document.noteId, generation)) {
-          return { error: 'invalid_snapshot_key' };
+          return 'invalid_snapshot_key';
         }
         return verifyObject(storage, document.snapshotKey, 'snapshot_missing');
       });

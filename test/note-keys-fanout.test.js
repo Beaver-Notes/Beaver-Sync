@@ -100,7 +100,7 @@ test.after(async () => {
 
 test('storeRecipients stores per-device envelopes and getKey returns all', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { noteId, ownerHeaders, ownerId } = await seedNoteWithCollaborator();
   const wrappedA = makeEnvelope('kA');
@@ -136,7 +136,7 @@ test('storeRecipients stores per-device envelopes and getKey returns all', async
 
 test('getKey reports noteHasKey false for a fresh note', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { noteId, ownerHeaders } = await seedNoteWithCollaborator();
   const res = await app.inject({
@@ -152,7 +152,7 @@ test('getKey reports noteHasKey false for a fresh note', async (t) => {
 
 test('listPublicKeys returns all device keys of collaborators (flat shape)', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { noteId, ownerHeaders, collabId } = await seedNoteWithCollaborator({ devices: ['d1', 'd2'] });
   const res = await app.inject({

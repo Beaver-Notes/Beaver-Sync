@@ -36,4 +36,4 @@ function audit(req, action, meta = {}) {
   setImmediate(write);
 }
 
-module.exports = { audit };
+module.exports = { audit, getIpSubnet };

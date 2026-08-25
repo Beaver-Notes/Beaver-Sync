@@ -1,11 +1,15 @@
 'use strict';
 
-process.env.DATABASE_URL = 'postgresql://localhost:5432/test';
+require('../helpers/db');
 
-const { describe, it } = require('node:test');
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 
 const persistence = require('../../src/persistence/yjs');
+
+after(async () => {
+  await require('../../src/db').close();
+});
 
 describe('Yjs persistence', () => {
   it('exports expected functions', () => {

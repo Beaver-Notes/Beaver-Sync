@@ -34,7 +34,7 @@ test.after(async () => {
 
 test('publish rejects plaintext passphrase and requires a proof', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('vault-account', { headers: {} });
   const response = await app.inject({
     method: 'PUT',
@@ -49,7 +49,7 @@ test('publish rejects plaintext passphrase and requires a proof', async (t) => {
 
 test('verify accepts a proof and rejects a plaintext passphrase field', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('vault-account', { headers: {} });
   const headers = { authorization: `Bearer ${session}`, 'content-type': 'application/json' };
   const challenge = await app.inject({ method: 'POST', url: '/vault/vault-workspace/challenge', headers, payload: {} });
@@ -82,7 +82,7 @@ test('verify accepts a proof and rejects a plaintext passphrase field', async (t
 
 test('rejects a proof issued for another workspace', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('vault-account', { headers: {} });
   const headers = { authorization: `Bearer ${session}`, 'content-type': 'application/json' };
   const challenge = await app.inject({ method: 'POST', url: '/vault/vault-workspace/challenge', headers, payload: {} });
@@ -101,7 +101,7 @@ test('rejects a proof issued for another workspace', async (t) => {
 
 test('consumes a challenge exactly once', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const session = await createSession('vault-account', { headers: {} });
   const headers = { authorization: `Bearer ${session}`, 'content-type': 'application/json' };
   const challenge = await app.inject({ method: 'POST', url: '/vault/vault-workspace/challenge', headers, payload: {} });
@@ -114,7 +114,7 @@ test('consumes a challenge exactly once', async (t) => {
 
 test('rejects an expired challenge', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const challenge = 'expired-challenge';
   const hash = require('node:crypto').createHash('sha256').update(challenge).digest('hex');
   await query(
@@ -133,7 +133,7 @@ test('rejects an expired challenge', async (t) => {
 
 test('gates legacy rows until the owner republishes', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const bcrypt = require('bcrypt');
   await query(
     `INSERT INTO vault_key_params (id, workspace_id, owner_id, passphrase_hash, key_params_blob, created_at, updated_at, proof_version)

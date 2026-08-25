@@ -4,7 +4,7 @@ const fp = require('fastify-plugin');
 const { Subscription, Workspace, WorkspaceMember } = require('../models');
 const { getQuotaBytes, getDeviceLimit, isFreePlan, resolvePlanForAccount } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
-const { resolveOrgSubscription } = require('../lib/plan-resolution');
+const { resolveOrgSubscription, orgIdFromReq } = require('../lib/plan-resolution');
 
 async function subscriptionPlugin(app) {
   app.decorate('requireActiveSync', async function (req, reply) {
@@ -23,13 +23,9 @@ async function subscriptionPlugin(app) {
       sub = await Subscription.findOne({ accountId: req.userId }).lean();
     }
 
-    let orgId = req.body?.orgId ?? req.params?.orgId ?? req.query?.orgId ?? null;
-    const workspaceId =
-      req.body?.workspaceId ??
-      req.params?.workspaceId ??
-      req.query?.workspaceId ??
-      req.headers?.['x-workspace-id'] ??
-      null;
+    const resolved = orgIdFromReq(req);
+    let orgId = resolved.orgId;
+    const workspaceId = resolved.workspaceId;
     if (!orgId && workspaceId && typeof workspaceId === 'string') {
       const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
       if (ws) orgId = ws.orgId;

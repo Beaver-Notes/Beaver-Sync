@@ -22,23 +22,18 @@ const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.in
 const WS_RELAY_PORT = parseInt(process.env.WS_RELAY_PORT ?? '8080', 10);
 const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
 
-const ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):note:([a-zA-Z0-9_-]+)$/;
-const META_ROOM_PATTERN = /^workspace:([a-zA-Z0-9_-]+):meta$/;
-
 // y-websocket message types
 const MSG_SYNC = 0;
 const MSG_AWARENESS = 1;
 
+const { parseRoomName: baseParseRoomName } = require('./persistence/yjs');
+
 function parseRoomName(documentName) {
-  const noteMatch = ROOM_PATTERN.exec(documentName);
-  if (noteMatch) {
-    return { kind: 'note', workspaceId: noteMatch[1], noteId: noteMatch[2] };
-  }
-  const metaMatch = META_ROOM_PATTERN.exec(documentName);
-  if (metaMatch) {
-    return { kind: 'meta', workspaceId: metaMatch[1], noteId: null };
-  }
-  return null;
+  const base = baseParseRoomName(documentName);
+  if (!base) return null;
+  return base.noteId != null
+    ? { kind: 'note', workspaceId: base.workspaceId, noteId: base.noteId }
+    : { kind: 'meta', workspaceId: base.workspaceId, noteId: null };
 }
 
 let persistence = null;
@@ -452,6 +447,38 @@ async function startWsRelay() {
   wss.on('close', () => clearInterval(heartbeatInterval));
 
   await startSyncNotificationListener();
+
+  // Graceful shutdown: flush debounced persists (<=1s of edits per room) before exit
+  let shuttingDown = false;
+  async function gracefulShutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[ws-relay] Received ${signal} — flushing persists`);
+    try { clearInterval(heartbeatInterval); } catch {}
+    // Flush every pending debounce timer immediately
+    for (const timer of persistTimers.values()) clearTimeout(timer);
+    persistTimers.clear();
+    const flushes = [];
+    for (const [documentName, room] of rooms) {
+      if (persistence && room?.doc) {
+        flushes.push(
+          persistence.writeState(documentName, room.doc).catch((err) =>
+            console.warn(`[ws-relay] Final persist failed for ${documentName}:`, err?.message)
+          )
+        );
+      }
+    }
+    await Promise.allSettled(flushes);
+    try { wss.close(); } catch {}
+    try { server.close(); } catch {}
+    try {
+      const postgres = require('./db/postgres');
+      await postgres.close?.();
+    } catch {}
+    process.exit(0);
+  }
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   return wss;
 }

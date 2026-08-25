@@ -244,6 +244,9 @@ async function sendViaSmtp({ host, port, user, pass, from, to, subject, html }) 
               break;
             case 7:
               {
+                // SMTP dot-stuffing (RFC 5321 §4.5.2): any line beginning with
+                // '.' must be escaped as '..' so a single '.' terminates DATA.
+                const stuffed = String(html).split(/\r?\n/).map((l) => (l.startsWith('.') ? '.' + l : l)).join('\r\n');
                 const msg = [
                   `From: ${from}`,
                   `To: ${to}`,
@@ -251,7 +254,7 @@ async function sendViaSmtp({ host, port, user, pass, from, to, subject, html }) 
                   "MIME-Version: 1.0",
                   "Content-Type: text/html; charset=utf-8",
                   "",
-                  html,
+                  stuffed,
                   ".",
                 ].join("\r\n");
                 send(msg);
@@ -294,13 +297,14 @@ async function sendViaSendmail(to, { subject, html, text }) {
     to = sanitizeHeader(to);
     subject = sanitizeHeader(subject);
 
+    const stuffed = String(html || text || "").split(/\r?\n/).map((l) => (l.startsWith('.') ? '.' + l : l)).join('\n');
     const message = [
       `To: ${to}`,
       `Subject: ${subject}`,
       "MIME-Version: 1.0",
       "Content-Type: text/html; charset=utf-8",
       "",
-      html || text || "",
+      stuffed,
     ].join("\n");
 
     sendmail.stdin.write(message);

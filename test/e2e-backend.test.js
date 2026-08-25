@@ -74,18 +74,18 @@ function get(session, url) {
 }
 
 test('invite requires target to have a keypair', async () => {
-  const res = await post(aliceSession, '/collaboration/invite/note-1', { username: 'nokey' });
+  const res = await post(aliceSession, '/collaboration/invite/note-e2e-keys-note-01', { username: 'nokey' });
   assert.equal(res.statusCode, 403);
   assert.equal(res.json().error, 'keypair_required');
 });
 
 test('stores recipient envelopes and returns only the caller\u2019s own', async () => {
-  await post(aliceSession, '/collaboration/invite/note-1', { username: 'bob' });
+  await post(aliceSession, '/collaboration/invite/note-e2e-keys-note-01', { username: 'bob' });
 
   const secret = Buffer.from('a'.repeat(64), 'hex');
   const aliceEnv = await wrapForRecipient(alice.pk, secret);
   const bobEnv = await wrapForRecipient(bob.pk, secret);
-  const res = await post(aliceSession, '/collaboration/keys/note-1/recipients', {
+  const res = await post(aliceSession, '/collaboration/keys/note-e2e-keys-note-01/recipients', {
     recipients: [
       { userId: 'alice', wrappedKey: JSON.stringify(aliceEnv) },
       { userId: 'bob', wrappedKey: JSON.stringify(bobEnv) },
@@ -96,25 +96,25 @@ test('stores recipient envelopes and returns only the caller\u2019s own', async 
   assert.equal(res.json().noteHasKey, true);
   assert.equal(res.json().existing, false);
 
-  const aliceGet = await get(aliceSession, '/collaboration/keys/note-1');
+  const aliceGet = await get(aliceSession, '/collaboration/keys/note-e2e-keys-note-01');
   assert.equal(aliceGet.statusCode, 200);
   assert.equal(aliceGet.json().noteHasKey, true);
   const parsed = JSON.parse(aliceGet.json().wrappedKeys[0].wrappedKey);
   assert.equal(parsed.kemCt, aliceEnv.kemCt);
 
-  const bobGet = await get(bobSession, '/collaboration/keys/note-1');
+  const bobGet = await get(bobSession, '/collaboration/keys/note-e2e-keys-note-01');
   assert.equal(bobGet.json().noteHasKey, true);
   assert.equal(JSON.parse(bobGet.json().wrappedKeys[0].wrappedKey).kemCt, bobEnv.kemCt);
 });
 
 test('GET /keys/:noteId reports noteHasKey for fresh notes and late joiners', async () => {
   // Fresh note: no envelopes yet, but the caller must be a collaborator first.
-  let fresh = await get(aliceSession, '/collaboration/keys/note-fresh');
+  let fresh = await get(aliceSession, '/collaboration/keys/note-fresh-key-store');
   assert.equal(fresh.statusCode, 403);
   assert.equal(fresh.json().error, 'forbidden');
-  await post(aliceSession, '/collaboration/invite/note-fresh', { username: 'alice' }).catch(() => {});
+  await post(aliceSession, '/collaboration/invite/note-fresh-key-store', { username: 'alice' }).catch(() => {});
 
-  fresh = await get(aliceSession, '/collaboration/keys/note-fresh');
+  fresh = await get(aliceSession, '/collaboration/keys/note-fresh-key-store');
   assert.equal(fresh.statusCode, 200);
   assert.equal(fresh.json().noteHasKey, false);
   assert.deepEqual(fresh.json().wrappedKeys, []);
@@ -123,15 +123,15 @@ test('GET /keys/:noteId reports noteHasKey for fresh notes and late joiners', as
   const secret = Buffer.from('b'.repeat(64), 'hex');
   const aliceEnv = await wrapForRecipient(alice.pk, secret);
   originalAliceKemCt = aliceEnv.kemCt;
-  const store = await post(aliceSession, '/collaboration/keys/note-fresh/recipients', {
+  const store = await post(aliceSession, '/collaboration/keys/note-fresh-key-store/recipients', {
     recipients: [{ userId: 'alice', wrappedKey: JSON.stringify(aliceEnv) }],
   });
   assert.equal(store.statusCode, 200);
   assert.equal(store.json().existing, false);
 
   // Late joiner with no envelope still learns the note already has a key.
-  await post(aliceSession, '/collaboration/invite/note-fresh', { username: 'bob' });
-  const bobGet = await get(bobSession, '/collaboration/keys/note-fresh');
+  await post(aliceSession, '/collaboration/invite/note-fresh-key-store', { username: 'bob' });
+  const bobGet = await get(bobSession, '/collaboration/keys/note-fresh-key-store');
   assert.equal(bobGet.statusCode, 200);
   assert.equal(bobGet.json().noteHasKey, true);
   assert.deepEqual(bobGet.json().wrappedKeys, []);
@@ -140,16 +140,16 @@ test('GET /keys/:noteId reports noteHasKey for fresh notes and late joiners', as
   const outsider = await makeKeypair();
   await seedAccount('outsider2', outsider.pk);
   const outsiderSession = await createSession('outsider2', {});
-  const denied = await get(outsiderSession, '/collaboration/keys/note-fresh');
+  const denied = await get(outsiderSession, '/collaboration/keys/note-fresh-key-store');
   assert.equal(denied.statusCode, 403);
   assert.equal(denied.json().error, 'forbidden');
 });
 
 test('storeRecipients is idempotent and refuses to rotate an existing note key', async () => {
-  // note-fresh already has an envelope for alice; bob is a collaborator.
+  // note-fresh-key-store already has an envelope for alice; bob is a collaborator.
   const secret = Buffer.from('c'.repeat(64), 'hex');
   const bobEnv = await wrapForRecipient(bob.pk, secret);
-  const res = await post(bobSession, '/collaboration/keys/note-fresh/recipients', {
+  const res = await post(bobSession, '/collaboration/keys/note-fresh-key-store/recipients', {
     recipients: [{ userId: 'bob', wrappedKey: JSON.stringify(bobEnv) }],
   });
   assert.equal(res.statusCode, 200);
@@ -158,20 +158,20 @@ test('storeRecipients is idempotent and refuses to rotate an existing note key',
   assert.equal(res.json().noteHasKey, true);
 
   // Bob's attempted overwrite did not land — still no envelope for bob.
-  const bobGet = await get(bobSession, '/collaboration/keys/note-fresh');
+  const bobGet = await get(bobSession, '/collaboration/keys/note-fresh-key-store');
   assert.equal(bobGet.json().noteHasKey, true);
   assert.deepEqual(bobGet.json().wrappedKeys, []);
 
   // Alice's original envelope is untouched.
-  const aliceGet = await get(aliceSession, '/collaboration/keys/note-fresh');
+  const aliceGet = await get(aliceSession, '/collaboration/keys/note-fresh-key-store');
   assert.equal(JSON.parse(aliceGet.json().wrappedKeys[0].wrappedKey).kemCt, originalAliceKemCt);
 });
 
 test('singular recipient refuses to overwrite an existing note key', async () => {
-  // note-fresh already has an envelope for alice (see earlier tests).
+  // note-fresh-key-store already has an envelope for alice (see earlier tests).
   const secret = Buffer.from('d'.repeat(64), 'hex');
   const bobEnv = await wrapForRecipient(bob.pk, secret);
-  const res = await post(bobSession, '/collaboration/keys/note-fresh/recipient', {
+  const res = await post(bobSession, '/collaboration/keys/note-fresh-key-store/recipient', {
     recipientUserId: 'bob',
     wrappedKey: JSON.stringify(bobEnv),
   });
@@ -181,17 +181,17 @@ test('singular recipient refuses to overwrite an existing note key', async () =>
   assert.equal(res.json().noteHasKey, true);
 
   // Bob's attempted overwrite did not land — still no envelope for bob.
-  const bobGet = await get(bobSession, '/collaboration/keys/note-fresh');
+  const bobGet = await get(bobSession, '/collaboration/keys/note-fresh-key-store');
   assert.equal(bobGet.json().noteHasKey, true);
   assert.deepEqual(bobGet.json().wrappedKeys, []);
 
   // Alice's original envelope is untouched.
-  const aliceGet = await get(aliceSession, '/collaboration/keys/note-fresh');
+  const aliceGet = await get(aliceSession, '/collaboration/keys/note-fresh-key-store');
   assert.equal(JSON.parse(aliceGet.json().wrappedKeys[0].wrappedKey).kemCt, originalAliceKemCt);
 });
 
 test('comments are stored encrypted with mentions filtered to collaborators', async () => {
-  const res = await post(aliceSession, '/comments/note-1', {
+  const res = await post(aliceSession, '/comments/note-e2e-keys-note-01', {
     contentEncrypted: 'ciphertext',
     contentIv: 'iv',
     mentions: ['bob', 'nokey', 'alice'],
@@ -202,7 +202,7 @@ test('comments are stored encrypted with mentions filtered to collaborators', as
   assert.equal(comment.contentEncrypted, 'ciphertext');
   assert.equal(comment.mentions, '["bob"]');
 
-  const list = await get(bobSession, '/comments/note-1');
+  const list = await get(bobSession, '/comments/note-e2e-keys-note-01');
   assert.equal(list.statusCode, 200);
   assert.equal(list.json().comments[0].contentEncrypted, 'ciphertext');
   assert.ok(!('authorName' in list.json().comments[0]));
@@ -211,21 +211,21 @@ test('comments are stored encrypted with mentions filtered to collaborators', as
 test('public-keys exposes only keypair\u2019d collaborators and rejects non-collaborators', async () => {
   await query(
     'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
-    ['note-pub', 'alice', 'alice', 'editor', now]
+    ['note-public-keys', 'alice', 'alice', 'editor', now]
   );
   await query(
     'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
-    ['note-pub', 'bob', 'alice', 'editor', now]
+    ['note-public-keys', 'bob', 'alice', 'editor', now]
   );
   await query(
     'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
-    ['note-pub', 'nokey', 'alice', 'viewer', now]
+    ['note-public-keys', 'nokey', 'alice', 'viewer', now]
   );
 
-  const res = await get(aliceSession, '/collaboration/public-keys/note-pub');
+  const res = await get(aliceSession, '/collaboration/public-keys/note-public-keys');
   assert.equal(res.statusCode, 200);
   const body = res.json();
-  assert.equal(body.noteId, 'note-pub');
+  assert.equal(body.noteId, 'note-public-keys');
   const userMap = new Map(body.collaborators.map((c) => [c.userId, c.kemPublicKey]));
   assert.ok(userMap.has('bob'));
   assert.equal(userMap.get('bob'), bob.pk);
@@ -234,7 +234,7 @@ test('public-keys exposes only keypair\u2019d collaborators and rejects non-coll
   const outsider = await makeKeypair();
   await seedAccount('outsider', outsider.pk);
   const outsiderSession = await createSession('outsider', {});
-  const denied = await get(outsiderSession, '/collaboration/public-keys/note-pub');
+  const denied = await get(outsiderSession, '/collaboration/public-keys/note-public-keys');
   assert.equal(denied.statusCode, 403);
   assert.equal(denied.json().error, 'forbidden');
 });

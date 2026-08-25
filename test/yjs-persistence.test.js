@@ -28,7 +28,8 @@ async function seedUpdates(workspaceId, noteId, count) {
     deviceId: 'device-a',
     sequence: index + 1,
     data: Buffer.from(String(index + 1)),
-    ts: 10 + index,
+    // Recent epoch-ms: pull cursors older than 24h are treated as stale.
+    ts: Date.now() - 60_000 + index,
   })));
 }
 
@@ -72,9 +73,10 @@ test('returns continuation metadata when a pull is truncated', async () => {
 });
 
 test('orders same-timestamp updates from different devices deterministically', async () => {
+  const sharedTs = Date.now() - 60_000;
   await persistence.storeUpdatesBatch('ws-1', 'note-same-clock', [
-    { deviceId: 'device-b', sequence: 1, data: Buffer.from('b'), ts: 50 },
-    { deviceId: 'device-a', sequence: 1, data: Buffer.from('a'), ts: 50 },
+    { deviceId: 'device-b', sequence: 1, data: Buffer.from('b'), ts: sharedTs },
+    { deviceId: 'device-a', sequence: 1, data: Buffer.from('a'), ts: sharedTs },
   ]);
 
   const firstPage = await persistence.loadUpdatesAfter('ws-1', 'note-same-clock', null, 1);

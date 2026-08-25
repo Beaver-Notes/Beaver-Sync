@@ -54,7 +54,7 @@ async function makeAccountWithPlan(plan, orgPlan, seats) {
 
 test('requirePaidWrite rejects free plan with 402', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('free');
 
   const req = { userId: account.id, subscription: { plan: 'free' } };
@@ -66,7 +66,7 @@ test('requirePaidWrite rejects free plan with 402', async (t) => {
 
 test('requirePaidWrite allows starter', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('starter');
 
   const req = { userId: account.id, subscription: { plan: 'starter' } };
@@ -78,7 +78,7 @@ test('requirePaidWrite allows starter', async (t) => {
 
 test('checkDeviceLimit enforces starter limit of 5', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('starter');
   await models.Subscription.updateOne(
     { accountId: account.id },
@@ -98,7 +98,7 @@ test('checkDeviceLimit enforces starter limit of 5', async (t) => {
 
 test('requirePaidWrite allows a free personal sub when the org is paid', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const req = {
     userId: 'any',
@@ -112,7 +112,7 @@ test('requirePaidWrite allows a free personal sub when the org is paid', async (
 
 test('checkDeviceLimit uses the org plan first (team is unlimited)', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('starter', 'team', 5);
 
   for (let i = 0; i < 6; i++) {
@@ -128,7 +128,7 @@ test('checkDeviceLimit uses the org plan first (team is unlimited)', async (t) =
 
 test('PLAN_OVERRIDE makes a free personal sub pass requirePaidWrite', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const prevOverride = process.env.PLAN_OVERRIDE;
   process.env.PLAN_OVERRIDE = 'team';
@@ -145,7 +145,7 @@ test('PLAN_OVERRIDE makes a free personal sub pass requirePaidWrite', async (t) 
 
 test('requireActiveSync resolves the org from a workspaceId in the body', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('free', 'team', 5);
 
   const orgMember = await models.OrgMember.findOne({ accountId: account.id }).lean();

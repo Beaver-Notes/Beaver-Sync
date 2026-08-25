@@ -4,7 +4,7 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { z }  = require('zod');
 const { Account, Subscription, Session, Workspace, WorkspaceMember, Organization, OrgMember, OrgSubscription } = require('../models');
-const { query } = require('../db');
+const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { createSession, validateSession, setSessionCookieIfAvailable } = require('../middleware/auth');
 const { validatePublicKey } = require('../lib/recipient-wrap');
 const { createEmailHash } = require('../lib/crypto');
@@ -120,10 +120,7 @@ async function authRoutes(app) {
       await WorkspaceMember.create({ workspaceId: defaultWorkspace.id, accountId: account.id, role: 'owner', createdAt: new Date() });
 
       // Initialize sync state for the new workspace so /sync/state doesn't 404
-      await query(
-        'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-        [defaultWorkspace.id, 'empty', 0, new Date().toISOString()]
-      );
+      await createEmptyState(defaultWorkspace.id);
     }
 
     const token = await createSession(account.id, req);

@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember, Subscription } = require('../models');
-const { query } = require('../db');
+const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { audit } = require('../lib/audit');
 const { sendWorkspaceInviteEmail } = require('../email');
 const { isFreePlan, resolvePlanForAccount } = require('../lib/plans');
@@ -110,10 +110,7 @@ async function workspaceRoutes(app) {
     }
 
     // Initialize sync state for the new workspace so /sync/state doesn't 404
-    await query(
-      'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-      [workspace.id, 'empty', 0, new Date().toISOString()]
-    );
+    await createEmptyState(workspace.id);
 
     app.log.info({ workspaceId: workspace.id, userId: req.userId }, 'Workspace created');
     audit(req, 'workspace_created', { workspaceId: workspace.id });

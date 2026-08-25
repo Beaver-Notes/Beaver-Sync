@@ -66,7 +66,7 @@ async function makeSession(userId, workspaceId) {
 
 test('removing a workspace member revokes only workspace-scoped sessions, not account-wide ones', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await makeAccount('owner-ws@example.com');
   const member = await makeAccount('member-ws@example.com');
@@ -124,7 +124,7 @@ test('removing a workspace member revokes only workspace-scoped sessions, not ac
 
 test('admin removing a workspace member also scopes session revocation', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await makeAccount('owner-admin@example.com');
   const member = await makeAccount('member-admin@example.com');
@@ -182,7 +182,7 @@ test('admin removing a workspace member also scopes session revocation', async (
 
 test('admin cannot revoke another user\'s account-wide (non-workspace) session', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await makeAccount('owner-revoke@example.com');
   const other = await makeAccount('other-revoke@example.com');
@@ -229,7 +229,7 @@ test('admin cannot revoke another user\'s account-wide (non-workspace) session',
 
 test('workspace owner can revoke a session issued by their workspace SSO', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await makeAccount('owner-ws-sso@example.com');
   const member = await makeAccount('member-ws-sso@example.com');

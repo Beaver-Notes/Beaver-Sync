@@ -140,7 +140,10 @@ async function assetRoutes(app) {
     ...protectWrite,
     bodyLimit: SEED_BATCH_MAX_BODY_BYTES,
     config: {
-      rateLimit: false,
+      rateLimit: {
+        max: parseInt(process.env.SEED_BATCH_RATE_LIMIT_PER_MINUTE ?? '30', 10),
+        timeWindow: '1 minute',
+      },
     },
   }, async (req, reply) => {
     const { assets } = req.body || {};
@@ -243,7 +246,31 @@ async function assetRoutes(app) {
       return reply.status(400).send({ error: 'empty_body', message: 'Asset body cannot be empty.' });
     }
 
+    // Enforce quota even on the signed-proxy path (otherwise presign + proxy bypasses accounting)
+    try {
+      const statBefore = await r2.stat(r2.assetKey(userId, key)).catch(() => null);
+      const existingSize = statBefore?.sizeBytes ?? 0;
+      const delta = body.length - existingSize;
+      if (delta > 0) {
+        const sub = await Subscription.findOne({ accountId: userId }).lean();
+        if (sub) {
+          const { getQuotaBytes } = require('../lib/plans');
+          const quota = getQuotaBytes(sub.plan, sub.seats ?? 1);
+          if (quota && (sub.storageUsedBytes ?? 0) + delta > quota) {
+            return reply.status(507).send({
+              error: 'storage_quota_exceeded',
+              message: 'Asset would exceed your storage quota.',
+              storageUsedBytes: sub.storageUsedBytes ?? 0,
+              storageQuotaBytes: quota,
+            });
+          }
+        }
+      }
+    } catch { /* quota check best-effort; do not block upload on lookup failure */ }
+
     const r2Key = r2.assetKey(userId, key);
+    let existingBefore;
+    try { existingBefore = await r2.stat(r2Key).catch(() => null); } catch { existingBefore = null; }
 
     try {
       await r2.put(r2Key, body, 'application/octet-stream');
@@ -252,6 +279,11 @@ async function assetRoutes(app) {
         return reply.status(503).send({ error: 'storage_unavailable', message: 'Asset storage is not available.' });
       }
       throw err;
+    }
+
+    const delta = body.length - (existingBefore?.sizeBytes ?? 0);
+    if (delta !== 0) {
+      await Subscription.updateOne({ accountId: userId }, { $inc: { storageUsedBytes: delta } });
     }
 
     return reply.status(201).send({ assetKey: key, sizeBytes: body.length });

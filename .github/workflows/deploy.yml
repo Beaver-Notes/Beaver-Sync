@@ -3,52 +3,61 @@ name: Deploy
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 jobs:
   test:
+    name: Test
     runs-on: ubuntu-latest
+
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16
         env:
-          POSTGRES_DB: beaver_test
           POSTGRES_USER: beaver
           POSTGRES_PASSWORD: beaver
+          POSTGRES_DB: beaver_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U beaver"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '22'
           cache: yarn
       - run: yarn install --frozen-lockfile
-      - run: yarn test
+      - run: yarn lint
+      - name: Test
+        run: yarn test
         env:
-          DATABASE_URL: postgresql://beaver:beaver@localhost:5432/beaver_test
+          TEST_DATABASE_URL: postgresql://beaver:beaver@localhost:5432/beaver_test
+      - name: Audit dependencies (report only)
+        run: yarn audit
+        continue-on-error: true
 
   deploy:
+    name: Deploy to VPS
     needs: test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    # Set repo variable DEPLOY_TARGET=vps to enable. Requires secrets:
+    # VPS_HOST, VPS_USERNAME, VPS_SSH_KEY
+    if: ${{ vars.DEPLOY_TARGET == 'vps' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy via SSH
+      - name: Deploy over SSH
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
+          username: ${{ secrets.VPS_USERNAME }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            set -e
             cd /opt/beaver-sync
-            git pull
-            docker compose -f docker-compose.prod.yml build --no-cache
-            docker compose -f docker-compose.prod.yml up -d
-            sleep 5
-            docker compose -f docker-compose.prod.yml ps
+            git pull --ff-only
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+            docker image prune -f

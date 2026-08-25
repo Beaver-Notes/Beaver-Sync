@@ -49,7 +49,7 @@ const authHeader = (account) => ({ authorization: `Bearer ${signToken(account.id
 
 test('GET /plans resolves flags for a starter subscription', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const account = await register('starter');
 
@@ -65,7 +65,7 @@ test('GET /plans resolves flags for a starter subscription', async (t) => {
 
 test('GET /plans reports free plan with zero quota for a free subscription', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const account = await register('free');
 
@@ -79,7 +79,7 @@ test('GET /plans reports free plan with zero quota for a free subscription', asy
 
 test('GET /plans requires authentication', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({ method: 'GET', url: '/plans' });
   assert.equal(res.statusCode, 401);
@@ -87,7 +87,7 @@ test('GET /plans requires authentication', async (t) => {
 
 test('GET /plans resolves the org plan when an orgId is supplied', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const account = await register('free');
   await seedOrg('org-plans-1', account.id, 'team');
@@ -106,7 +106,7 @@ test('GET /plans resolves the org plan when an orgId is supplied', async (t) => 
 
 test('GET /plans resolves the org plan from a workspaceId in the query', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-plans-2', owner.id, 'team');
@@ -124,7 +124,7 @@ test('GET /plans resolves the org plan from a workspaceId in the query', async (
 
 test('GET /plans does not leak another org plan to a non-member', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const otherOwner = await register('free');
   await seedOrg('org-leak-b', otherOwner.id, 'team');
@@ -145,7 +145,7 @@ test('GET /plans does not leak another org plan to a non-member', async (t) => {
 
 test('GET /plans resolves the org plan for a workspace member who is not an org member', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-ws-member', owner.id, 'team');
@@ -167,7 +167,7 @@ test('GET /plans resolves the org plan for a workspace member who is not an org 
 
 test('member-lookup finds a user by username', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-lookup-1', owner.id, 'free');
@@ -198,7 +198,7 @@ test('member-lookup finds a user by username', async (t) => {
 
 test('member-lookup finds a user by email', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-lookup-2', owner.id, 'free');
@@ -227,7 +227,7 @@ test('member-lookup finds a user by email', async (t) => {
 
 test('member-lookup returns found:false for an unknown user', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-lookup-3', owner.id, 'free');
@@ -245,7 +245,7 @@ test('member-lookup returns found:false for an unknown user', async (t) => {
 
 test('member-lookup is forbidden for viewer members', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-lookup-4', owner.id, 'free');
@@ -266,7 +266,7 @@ test('member-lookup is forbidden for viewer members', async (t) => {
 
 test('PATCH member role allows owner to promote a member to admin', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-patch-1', owner.id, 'free');
@@ -291,7 +291,7 @@ test('PATCH member role allows owner to promote a member to admin', async (t) =>
 
 test('PATCH member role rejects an invalid role', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-patch-2', owner.id, 'free');
@@ -313,7 +313,7 @@ test('PATCH member role rejects an invalid role', async (t) => {
 
 test('PATCH member role blocks self-demotion away from owner', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-patch-3', owner.id, 'free');
@@ -332,7 +332,7 @@ test('PATCH member role blocks self-demotion away from owner', async (t) => {
 
 test('PATCH member role is forbidden for viewers', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-patch-4', owner.id, 'free');
@@ -354,7 +354,7 @@ test('PATCH member role is forbidden for viewers', async (t) => {
 
 test('PATCH member role returns 404 for a non-member target', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-patch-5', owner.id, 'free');
@@ -375,7 +375,7 @@ test('PATCH member role returns 404 for a non-member target', async (t) => {
 
 test('PATCH member role rejects admin self-promotion to owner', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-patch-6', owner.id, 'free');
@@ -400,7 +400,7 @@ test('PATCH member role rejects admin self-promotion to owner', async (t) => {
 
 test('PATCH member role rejects an admin promoting a third party to owner', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-patch-admin-grant', owner.id, 'free');
@@ -427,7 +427,7 @@ test('PATCH member role rejects an admin promoting a third party to owner', asyn
 
 test('PATCH member role rejects an admin demoting the owner', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-patch-7', owner.id, 'free');
@@ -452,7 +452,7 @@ test('PATCH member role rejects an admin demoting the owner', async (t) => {
 
 test('PATCH member role allows owner to promote an admin to owner', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   await seedOrg('org-patch-8', owner.id, 'free');

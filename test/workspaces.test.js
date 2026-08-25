@@ -57,7 +57,7 @@ function createPayload(orgId, recipients) {
 
 test('POST /workspaces persists vaultWrappedKeys and serves it to every member', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('pro');
   const orgId = `org-vk-1-${crypto.randomBytes(4).toString('hex')}`;
@@ -94,7 +94,7 @@ test('POST /workspaces persists vaultWrappedKeys and serves it to every member',
 
 test('POST /workspaces without vaultWrappedKeys stores NULL and GET returns null', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('starter');
   const orgId = `org-vk-2-${crypto.randomBytes(4).toString('hex')}`;
@@ -121,7 +121,7 @@ test('POST /workspaces without vaultWrappedKeys stores NULL and GET returns null
 
 test('POST /workspaces rejects a non-string vaultWrappedKeys', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await register('starter');
   const orgId = `org-vk-3-${crypto.randomBytes(4).toString('hex')}`;

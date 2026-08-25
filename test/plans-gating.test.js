@@ -70,7 +70,7 @@ async function workspaceInject(app, account, payload) {
 
 test('free plan cannot create a cloud workspace', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await register('free');
   const res = await workspaceInject(app, account, {
     nameEncrypted: 'e',
@@ -83,7 +83,7 @@ test('free plan cannot create a cloud workspace', async (t) => {
 
 test('starter plan blocked when already owning one workspace', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await register('starter');
   await seedOrg('org-x', account.id, 'starter');
   await models.Workspace.create({ nameEncrypted: 'e', ownerId: account.id, orgId: 'org-x', createdAt: new Date() });
@@ -98,7 +98,7 @@ test('starter plan blocked when already owning one workspace', async (t) => {
 
 test('starter plan workspace count is per-org', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const account = await register('starter');
   await seedOrg('org-count-a', account.id, 'starter');
   await models.Workspace.create({ nameEncrypted: 'e', ownerId: account.id, orgId: 'org-count-a', createdAt: new Date() });
@@ -114,7 +114,7 @@ test('starter plan workspace count is per-org', async (t) => {
 
 test('member invite with guest role is rejected', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await register('pro');
   await seedOrg('org-members', owner.id, 'free');
   const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-members', createdAt: new Date() });
@@ -132,7 +132,7 @@ test('member invite with guest role is rejected', async (t) => {
 
 test('member invite for a free-plan user is rejected', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await register('pro');
   await seedOrg('org-free-invite', owner.id, 'pro');
   const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-free-invite', createdAt: new Date() });
@@ -151,7 +151,7 @@ test('member invite for a free-plan user is rejected', async (t) => {
 
 test('free-plan user cannot join a workspace via invite', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await register('pro');
   await seedOrg('org-free-join', owner.id, 'pro');
   const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-free-join', createdAt: new Date() });
@@ -177,7 +177,7 @@ test('free-plan user cannot join a workspace via invite', async (t) => {
 
 test('paid user can join a workspace via invite', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await register('pro');
   await seedOrg('org-paid-join', owner.id, 'pro');
   const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-paid-join', createdAt: new Date() });
@@ -203,7 +203,7 @@ test('paid user can join a workspace via invite', async (t) => {
 
 test('workspace audit logs require an enterprise plan', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await register('team');
   await seedOrg('org-audit', owner.id, 'free');
   const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-audit', createdAt: new Date() });
@@ -220,13 +220,13 @@ test('workspace audit logs require an enterprise plan', async (t) => {
 
 test('free plan cannot invite collaborators to a note (share-notes gating)', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await register('free');
   await registerWithEmail('pro', 'paid-target@example.com');
 
   const res = await app.inject({
     method: 'POST',
-    url: '/collaboration/invite/note-share-free',
+    url: '/collaboration/invite/note-share-free-plan',
     headers: { authorization: `Bearer ${signToken(owner.id)}`, 'content-type': 'application/json' },
     payload: { email: 'paid-target@example.com' },
   });
@@ -237,7 +237,7 @@ test('free plan cannot invite collaborators to a note (share-notes gating)', asy
 
 test('free plan cannot create a note invite link (share-notes gating)', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await register('free');
 
   const res = await app.inject({
@@ -253,14 +253,14 @@ test('free plan cannot create a note invite link (share-notes gating)', async (t
 
 test('paid plan can invite collaborators to a note', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const owner = await register('pro');
   const target = await registerWithEmail('free', 'free-collab@example.com');
   await models.Account.updateOne({ _id: target.id }, { $set: { kemPublicKey: 'a'.repeat(1184 * 2) } });
 
   const res = await app.inject({
     method: 'POST',
-    url: '/collaboration/invite/note-share-paid',
+    url: '/collaboration/invite/note-share-paid-plan',
     headers: { authorization: `Bearer ${signToken(owner.id)}`, 'content-type': 'application/json' },
     payload: { email: 'free-collab@example.com' },
   });

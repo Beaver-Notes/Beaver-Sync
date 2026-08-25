@@ -70,16 +70,6 @@ function buildWhere(filter, offset = 1) {
       continue;
     }
 
-    if (key === '$and') {
-      const parts = value.map((sub) => {
-        const { sql: s, params: p } = innerCond(sub);
-        return { s, p };
-      });
-      conds.push('(' + parts.map((x) => x.s).join(' AND ') + ')');
-      for (const p of parts) params.push(...p.p);
-      continue;
-    }
-
     const col = key === '_id' ? 'id' : toSnake(key);
 
     if (isPlainObject(value)) {
@@ -111,15 +101,7 @@ function buildWhere(filter, offset = 1) {
             params.push(...opVal.map(toBindable));
             break;
           }
-          case '$nin': {
-            const placeholders = opVal.map(() => `$${idx++}`).join(',');
-            conds.push(`${col} NOT IN (${placeholders})`);
-            params.push(...opVal.map(toBindable));
-            break;
-          }
-          case '$exists':
-            conds.push(opVal ? `${col} IS NOT NULL` : `${col} IS NULL`);
-            break;
+          // $nin / $exists removed — no callers; add when needed
           default:
             throw new Error(`Unsupported operator: ${op}`);
         }
@@ -156,10 +138,6 @@ function buildUpdate(update, offset = 1) {
       for (const [k, v] of Object.entries(value)) {
         clauses.push(`${toSnake(k)} = ${toSnake(k)} + $${idx++}`);
         params.push(v);
-      }
-    } else if (key === '$unset') {
-      for (const [k] of Object.entries(value)) {
-        clauses.push(`${toSnake(k)} = NULL`);
       }
     } else {
       clauses.push(`${toSnake(key)} = $${idx++}`);

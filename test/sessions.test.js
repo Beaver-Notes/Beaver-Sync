@@ -151,7 +151,7 @@ test('validateSession returns null for idle session (lastSeenAt older than IDLE_
 
 test('GET /auth/sessions returns only the authenticated users sessions', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -192,7 +192,7 @@ test('GET /auth/sessions returns only the authenticated users sessions', async (
 
 test('DELETE /auth/sessions/:id revokes the correct session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -229,7 +229,7 @@ test('DELETE /auth/sessions/:id revokes the correct session', async (t) => {
 
 test('DELETE /auth/sessions/:id returns 403 for another users session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -268,7 +268,7 @@ test('DELETE /auth/sessions/:id returns 403 for another users session', async (t
 
 test('POST /auth/logout invalidates the session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -317,7 +317,7 @@ test('POST /auth/logout invalidates the session', async (t) => {
 
 test('POST /auth/sessions/revoke-all revokes every session except the current one', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -366,7 +366,7 @@ test('POST /auth/sessions/revoke-all revokes every session except the current on
 
 test('POST /auth/sessions/revoke-all without keepCurrent revokes every session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
 
@@ -410,7 +410,7 @@ test('POST /auth/sessions/revoke-all without keepCurrent revokes every session',
 
 test('POST /auth/sessions/revoke-all rejects unauthenticated requests', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'POST',

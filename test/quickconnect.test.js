@@ -78,7 +78,7 @@ async function authHeaderFor(app, userId = 'user-a') {
 
 test('initiate returns a code and a secret', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let stored = null;
   models.QuickConnectCode.create = async (data) => { stored = data; return { ...data }; };
@@ -102,7 +102,7 @@ test('initiate returns a code and a secret', async (t) => {
 
 test('authorize code then connect returns payload', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const code = 'ABC-DEF';
   const secret = crypto.randomBytes(32).toString('hex');
@@ -156,7 +156,7 @@ test('authorize code then connect returns payload', async (t) => {
 
 test('connect without secret returns 400', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'GET',
@@ -168,7 +168,7 @@ test('connect without secret returns 400', async (t) => {
 
 test('connect with unknown secret returns 404', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'GET',
@@ -180,7 +180,7 @@ test('connect with unknown secret returns 404', async (t) => {
 
 test('connect with expired code returns 404', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const secret = crypto.randomBytes(32).toString('hex');
   models.QuickConnectCode.findOne = async (filter) => {
@@ -200,7 +200,7 @@ test('connect with expired code returns 404', async (t) => {
 
 test('authorizing already-authorized code returns 409', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const code = 'ABC-DEF';
   models.QuickConnectCode.findOne = async () => ({

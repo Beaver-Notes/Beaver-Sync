@@ -131,7 +131,7 @@ async function makeApp() {
 
 test('passkey registration begin returns options and stores challenge', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let challengeStored = null;
   models.WebAuthnChallenge.create = async (data) => { challengeStored = data; return { id: 'c1' }; };
@@ -152,10 +152,15 @@ test('passkey registration begin returns options and stores challenge', async (t
 
 test('passkey registration complete verifies and creates credential', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   models.WebAuthnChallenge.findOneAndDelete = async () => ({ challenge: 'test-challenge-1' });
-  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: TEST_EMAIL_HASH, kdfSalt: 'salt1' });
+  models.Account.findOne = async () => ({
+    id: '507f1f77bcf86cd799439011',
+    emailHmac: TEST_EMAIL_HASH,
+    kdfSalt: 'salt1',
+    createdAt: new Date().toISOString(),
+  });
   let credentialCreated = null;
   models.Credential.create = async (data) => { credentialCreated = data; return { id: 'c1' }; };
 
@@ -176,7 +181,7 @@ test('passkey registration complete verifies and creates credential', async (t) 
 
 test('passkey login begin returns options for existing credentials', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   swaImpl.generateAuthenticationOptions = async ({ allowCredentials }) => ({ challenge: 'test-challenge-2', allowCredentials });
   models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: TEST_EMAIL_HASH });
@@ -199,7 +204,7 @@ test('passkey login begin returns options for existing credentials', async (t) =
 
 test('passkey login complete verifies and issues session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   swaImpl.verifyAuthenticationResponse = async () => ({
     verified: true,
@@ -235,7 +240,7 @@ test('passkey login complete verifies and issues session', async (t) => {
 
 test('passkey login rejects replay attack with non-increasing counter', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   swaImpl.verifyAuthenticationResponse = async () => ({
     verified: true,
@@ -267,7 +272,7 @@ test('passkey login rejects replay attack with non-increasing counter', async (t
 
 test('passkey registration rejects expired challenge', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   models.WebAuthnChallenge.findOneAndDelete = async () => null;
 
@@ -285,7 +290,7 @@ test('passkey registration rejects expired challenge', async (t) => {
 
 test('passkey endpoints reject invalid email format', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'POST',

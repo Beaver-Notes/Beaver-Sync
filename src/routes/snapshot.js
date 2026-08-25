@@ -1,7 +1,7 @@
 'use strict';
 
 const r2 = require('../services/r2');
-const { CommitMeta, Subscription, Workspace, CompactionLock } = require('../models');
+const { CommitMeta, Subscription, Workspace, WorkspaceMember, CompactionLock } = require('../models');
 const mlkem = require('../lib/mlkem');
 const { getQuotaBytes } = require('../lib/plans');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
@@ -120,6 +120,10 @@ async function snapshotRoutes(app) {
         const ws = await Workspace.findById(workspaceId, { storageUsedBytes: 1, orgId: 1 }).lean();
         if (!ws) {
           return reply.status(404).send({ error: 'not_found', message: 'Workspace not found.' });
+        }
+        const membership = await WorkspaceMember.findOne({ workspaceId, accountId: userId }).lean();
+        if (!membership) {
+          return reply.status(403).send({ error: 'forbidden', message: 'Not a member of this workspace.' });
         }
         if (effectivePlan === 'team') {
           const quotaBytes = getQuotaBytes('team', seats);

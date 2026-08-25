@@ -61,7 +61,7 @@ test.after(async () => {
 
 test('POST /keypair appends a device key without overwriting others', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => await app.close());
 
   const acct = await makeAccount('devuser');
   const h1 = await authHeaders(acct);
@@ -101,7 +101,7 @@ test('POST /keypair appends a device key without overwriting others', async (t) 
 
 test('POST /keypair replaces only the same deviceId entry (append-only per device)', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => await app.close());
 
   const acct = await makeAccount('repro');
   const h = await authHeaders(acct);

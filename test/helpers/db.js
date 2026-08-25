@@ -24,10 +24,17 @@ function resolveTestDatabaseUrl() {
 // a real dev/prod environment can never make the suite DELETE its data.
 process.env.DATABASE_URL = resolveTestDatabaseUrl();
 
+// Own the storage endpoint: dev .env points MinIO at docker-internal hostnames
+// that never resolve for host-run tests. Module scope, before services/r2 loads.
+process.env.STORAGE_ENDPOINT = 'http://localhost:9000';
+delete process.env.STORAGE_PUBLIC_ENDPOINT;
+
 async function setupTestDb() {
   process.env.DATABASE_URL = resolveTestDatabaseUrl();
 
   process.env.NODE_ENV = process.env.NODE_ENV || 'test';
+  // Dev .env PLAN_OVERRIDE must never leak into the suite's plan gates.
+  delete process.env.PLAN_OVERRIDE;
   process.env.SESSION_HMAC_KEY = process.env.SESSION_HMAC_KEY || 'test-session-hmac-key-at-least-32-characters-long';
   process.env.EMAIL_HMAC_KEY = process.env.EMAIL_HMAC_KEY || 'test-email-hmac-key-at-least-32-characters-long';
   process.env.COOKIE_SECRET = process.env.COOKIE_SECRET || 'test-cookie-secret-at-least-32-chars-long';

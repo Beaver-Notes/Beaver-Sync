@@ -131,6 +131,34 @@ services:
       timeout: 5s
       retries: 3
 
+  # Backups: compressed pg_dump on a schedule; opt-out with BACKUP_INTERVAL_SECONDS=0
+  pg-backup:
+    image: postgres:16-alpine
+    container_name: beaver-sync-pg-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup-postgres.sh:/usr/local/bin/backup-postgres.sh:ro
+    entrypoint: >
+      sh -c "
+        chmod +x /usr/local/bin/backup-postgres.sh 2>/dev/null || true;
+        trap 'exit 0' TERM INT;
+        while true; do
+          if [ \"$${BACKUP_INTERVAL_SECONDS:-86400}\" = \"0\" ]; then echo '[pg-backup] disabled (BACKUP_INTERVAL_SECONDS=0)'; sleep 86400; continue; fi;
+          BACKUP_DIR=/backups /usr/local/bin/backup-postgres.sh || echo '[pg-backup] dump failed';
+          sleep $${BACKUP_INTERVAL_SECONDS:-86400} & wait $$!;
+        done"
+    networks:
+      - beaver-internal
+
 volumes:
   pg_data:
   minio_data:

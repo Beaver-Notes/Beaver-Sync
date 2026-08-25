@@ -55,34 +55,29 @@ function resolveStorageConfig() {
   const usingMinio = provider === "minio";
   const endpoint = firstDefined(
     process.env.STORAGE_ENDPOINT,
-    process.env.S3_ENDPOINT,
     process.env.R2_ENDPOINT,
     usingMinio ? process.env.MINIO_ENDPOINT : undefined,
     usingMinio ? "http://minio:9000" : undefined,
   );
   const region = firstDefined(
     process.env.STORAGE_REGION,
-    process.env.S3_REGION,
     process.env.R2_REGION,
     usingMinio ? "us-east-1" : "auto",
   );
   const bucket = firstDefined(
     process.env.STORAGE_BUCKET_NAME,
-    process.env.S3_BUCKET_NAME,
     process.env.R2_BUCKET_NAME,
     usingMinio ? process.env.MINIO_BUCKET_NAME : undefined,
     usingMinio ? "beaver-sync" : undefined,
   );
   const accessKeyId = firstDefined(
     process.env.STORAGE_ACCESS_KEY_ID,
-    process.env.S3_ACCESS_KEY_ID,
     process.env.R2_ACCESS_KEY_ID,
     usingMinio ? process.env.MINIO_ROOT_USER : undefined,
     usingMinio ? "minioadmin" : undefined,
   );
   const secretAccessKey = firstDefined(
     process.env.STORAGE_SECRET_ACCESS_KEY,
-    process.env.S3_SECRET_ACCESS_KEY,
     process.env.R2_SECRET_ACCESS_KEY,
     usingMinio ? process.env.MINIO_ROOT_PASSWORD : undefined,
     usingMinio ? "minioadmin" : undefined,
@@ -90,7 +85,6 @@ function resolveStorageConfig() {
   const forcePathStyle = parseBoolean(
     firstDefined(
       process.env.STORAGE_FORCE_PATH_STYLE,
-      process.env.S3_FORCE_PATH_STYLE,
       usingMinio ? "true" : "false",
     ),
     usingMinio,

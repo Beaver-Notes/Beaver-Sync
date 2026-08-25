@@ -31,6 +31,17 @@ async function resolveOrgSubscription(orgId, userId) {
   return orgSub;
 }
 
+function orgIdFromReq(req) {
+  const orgId = req.body?.orgId ?? req.params?.orgId ?? req.query?.orgId ?? null;
+  const workspaceId =
+    req.body?.workspaceId ??
+    req.params?.workspaceId ??
+    req.query?.workspaceId ??
+    req.headers?.['x-workspace-id'] ??
+    null;
+  return { orgId, workspaceId };
+}
+
 // Org-first effective plan resolution shared across write paths. Honors
 // req.subscription / req.orgSubscription when the middleware already resolved
 // them, and otherwise resolves org context from the request (body/params/query
@@ -42,13 +53,9 @@ async function resolveEffectivePlan(req, subOverride) {
   const sub = subOverride || req.subscription || (await Subscription.findOne({ accountId: req.userId }).lean());
   let orgSub = req.orgSubscription;
   if (!orgSub) {
-    let orgId = req.body?.orgId ?? req.params?.orgId ?? req.query?.orgId ?? null;
-    const workspaceId =
-      req.body?.workspaceId ??
-      req.params?.workspaceId ??
-      req.query?.workspaceId ??
-      req.headers?.['x-workspace-id'] ??
-      null;
+    const resolved = orgIdFromReq(req);
+    let orgId = resolved.orgId;
+    const workspaceId = resolved.workspaceId;
     if (!orgId && workspaceId && typeof workspaceId === 'string') {
       const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
       if (ws) orgId = ws.orgId;
@@ -59,4 +66,4 @@ async function resolveEffectivePlan(req, subOverride) {
   return { plan, seats: orgSub?.seats ?? 1, orgSub, sub };
 }
 
-module.exports = { resolveEffectivePlan, resolveOrgSubscription, isOrgParticipant };
+module.exports = { resolveEffectivePlan, resolveOrgSubscription, isOrgParticipant, orgIdFromReq };

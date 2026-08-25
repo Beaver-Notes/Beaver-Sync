@@ -54,7 +54,7 @@ test.after(async () => {
 
 test('createEmailAlias stores mapping and returns alias', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id, emailEncrypted } = await registerAccount('alice@example.com');
   const alias = await email.createEmailAlias(id, emailEncrypted);
@@ -71,7 +71,7 @@ test('createEmailAlias stores mapping and returns alias', async (t) => {
 
 test('createEmailAlias with TTL sets expiresAt', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id, emailEncrypted } = await registerAccount('bob@example.com');
   const alias = await email.createEmailAlias(id, emailEncrypted, 3600_000);
@@ -83,7 +83,7 @@ test('createEmailAlias with TTL sets expiresAt', async (t) => {
 
 test('resolveAlias returns decrypted email for valid alias', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id, emailEncrypted } = await registerAccount('carol@example.com');
   const alias = await email.createEmailAlias(id, emailEncrypted);
@@ -96,7 +96,7 @@ test('resolveAlias returns decrypted email for valid alias', async (t) => {
 
 test('resolveAlias returns null for non-existent alias', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const resolved = await email.resolveAlias('nonexistent@notify.test.example.com');
   assert.equal(resolved, null);
@@ -104,7 +104,7 @@ test('resolveAlias returns null for non-existent alias', async (t) => {
 
 test('resolveAlias returns null and deletes expired alias', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id, emailEncrypted } = await registerAccount('dave@example.com');
   const alias = await email.createEmailAlias(id, emailEncrypted, -1);
@@ -118,7 +118,7 @@ test('resolveAlias returns null and deletes expired alias', async (t) => {
 
 test('deleteAlias removes alias from database', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id, emailEncrypted } = await registerAccount('eve@example.com');
   const alias = await email.createEmailAlias(id, emailEncrypted);
@@ -130,7 +130,7 @@ test('deleteAlias removes alias from database', async (t) => {
 
 test('deleteAliasesForAccount removes all aliases for account', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id, emailEncrypted: enc1 } = await registerAccount('frank@example.com');
   const enc2 = await mlkem.encryptMetadata('frank2@example.com');
@@ -147,7 +147,7 @@ test('deleteAliasesForAccount removes all aliases for account', async (t) => {
 
 test('sendWithAlias gracefully skips when no API key', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id } = await registerAccount('sendtest@example.com');
   await email.sendWithAlias(app, id, 'Test', '<p>test</p>');
@@ -156,7 +156,7 @@ test('sendWithAlias gracefully skips when no API key', async (t) => {
 
 test('sendWelcomeEmail gracefully skips when no API key', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id } = await registerAccount('welcome@example.com');
   await emailTemplates.sendWelcomeEmail(app, id);
@@ -190,7 +190,7 @@ test('extractAlias returns null for beavernotes domain', () => {
 
 test('inbound webhook returns handled:false for unknown alias', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({
     method: 'POST',
@@ -210,7 +210,7 @@ test('inbound webhook returns handled:false for unknown alias', async (t) => {
 
 test('inbound webhook resolves valid alias', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id, emailEncrypted } = await registerAccount('grace@example.com');
   const alias = await email.createEmailAlias(id, emailEncrypted);
@@ -233,7 +233,7 @@ test('inbound webhook resolves valid alias', async (t) => {
 
 test('alias cascade deletes with account', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const { id, emailEncrypted } = await registerAccount('hank@example.com');
   const alias = await email.createEmailAlias(id, emailEncrypted);
@@ -246,7 +246,7 @@ test('alias cascade deletes with account', async (t) => {
 
 test('forwardToRealEmail throws for unknown alias', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   await assert.rejects(
     () => email.forwardToRealEmail('ghost@notify.test.example.com', {}),
