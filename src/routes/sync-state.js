@@ -2,7 +2,16 @@
 
 const crypto = require('node:crypto');
 const { z } = require('zod');
-const { query, transaction } = require('../db');
+const {
+  getStatus,
+  listDocuments,
+  getVaultKeyParams,
+  claimInitialization,
+  getInitializationClaim,
+  completeInitialization,
+  resetState,
+  listDownloadableSnapshots,
+} = require('../repositories/syncWorkspaceState');
 const { requireWorkspaceMember, requireWorkspaceOwner } = require('../middleware/org');
 
 const CLAIM_TTL_MS = 30 * 60 * 1000;
@@ -70,27 +79,11 @@ function documentState(row) {
 }
 
 async function readState(workspaceId) {
-  const { rows } = await query('SELECT status, generation FROM sync_workspace_state WHERE workspace_id = $1', [workspaceId]);
-  const state = rows[0];
+  const state = await getStatus(workspaceId);
   if (!state) return null;
-  const { rows: docRows } = await query(`
-    SELECT note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, snapshot_ts
-    FROM sync_document_state WHERE workspace_id = $1
-    UNION
-    SELECT note_id, 0, NULL, 0, 0, 0
-    FROM yjs_doc_updates u WHERE workspace_id = $1
-      AND NOT EXISTS (
-        SELECT 1 FROM sync_document_state s
-        WHERE s.workspace_id = $1 AND s.note_id = u.note_id
-      )
-    ORDER BY note_id
-  `, [workspaceId]);
+  const docRows = await listDocuments(workspaceId);
   const documents = docRows.map(documentState);
-  const { rows: vaultRows } = await query(`
-    SELECT id, owner_id, key_params_blob, created_at, updated_at
-    FROM vault_key_params WHERE workspace_id = $1
-  `, [workspaceId]);
-  const vaultRow = vaultRows[0];
+  const vaultRow = await getVaultKeyParams(workspaceId);
 
   return {
     workspaceId,
@@ -132,13 +125,8 @@ async function syncStateRoutes(app) {
     const token = crypto.randomBytes(32).toString('base64url');
     const expiresAt = new Date(Date.now() + CLAIM_TTL_MS).toISOString();
     const now = new Date().toISOString();
-    const result = await query(`
-      UPDATE sync_workspace_state
-      SET status = 'initializing', initialization_token = $1, initialization_expires_at = $2, updated_at = $3
-      WHERE workspace_id = $4
-        AND (status = 'empty' OR (status = 'initializing' AND initialization_expires_at <= $5))
-    `, [token, expiresAt, now, workspaceId, now]);
-    if (result.rowCount === 0) return reply.status(409).send({ error: 'sync_already_initialized' });
+    const claimed = await claimInitialization({ workspaceId, token, expiresAt, now });
+    if (!claimed) return reply.status(409).send({ error: 'sync_already_initialized' });
     return reply.send({ token, expiresAt });
   });
 
@@ -178,51 +166,7 @@ async function syncStateRoutes(app) {
     }
 
     const now = new Date().toISOString();
-    const complete = await transaction(async (client) => {
-      const { rows } = await client.query(`
-        SELECT initialization_token, initialization_expires_at
-        FROM sync_workspace_state
-        WHERE workspace_id = $1 AND status = 'initializing'
-      `, [workspaceId]);
-      const state = rows[0];
-      if (!state || state.initialization_token !== token) return 'invalid_token';
-      if (!state.initialization_expires_at || state.initialization_expires_at <= now) return 'expired_token';
-
-      if (documents.length > 0) {
-        const columnCount = 8;
-        const placeholders = documents.map((_, i) => {
-          const b = i * columnCount;
-          return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}, $${b + 7}, $${b + 8})`;
-        }).join(', ');
-        const values = [];
-        for (const d of documents) {
-          values.push(
-            workspaceId, d.noteId, d.snapshotGeneration, d.snapshotKey ?? null,
-            d.checkpointTs, d.checkpointSequence, d.snapshotTs ?? 0, now
-          );
-        }
-        const upsertSql = `
-          INSERT INTO sync_document_state
-            (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, snapshot_ts, updated_at)
-          VALUES ${placeholders}
-          ON CONFLICT(workspace_id, note_id) DO UPDATE SET
-            snapshot_generation = excluded.snapshot_generation,
-            snapshot_key = excluded.snapshot_key,
-            checkpoint_ts = excluded.checkpoint_ts,
-            checkpoint_sequence = excluded.checkpoint_sequence,
-            snapshot_ts = excluded.snapshot_ts,
-            updated_at = excluded.updated_at
-        `;
-        await client.query(upsertSql, values);
-      }
-      await client.query(`
-        UPDATE sync_workspace_state
-        SET status = 'initialized', generation = $1, initialization_token = NULL,
-            initialization_expires_at = NULL, updated_at = $2
-        WHERE workspace_id = $3
-      `, [generation, now, workspaceId]);
-      return null;
-    });
+    const complete = await completeInitialization({ workspaceId, token, generation, documents, now });
     if (complete === 'expired_token') return reply.status(403).send({ error: 'initialization_token_expired' });
     if (complete === 'invalid_token') return reply.status(403).send({ error: 'invalid_initialization_token' });
     return reply.send({ ok: true, workspaceId, status: 'initialized', generation });
@@ -242,11 +186,7 @@ async function syncStateRoutes(app) {
     if (reply.sent || !membership) return;
 
     const now = new Date().toISOString();
-    const { rows: claimRows } = await query(`
-      SELECT initialization_token, initialization_expires_at
-      FROM sync_workspace_state WHERE workspace_id = $1 AND status = 'initializing'
-    `, [workspaceId]);
-    const claim = claimRows[0];
+    const claim = await getInitializationClaim(workspaceId);
     if (!claim || claim.initialization_token !== token) {
       return reply.status(403).send({ error: 'invalid_initialization_token' });
     }
@@ -296,11 +236,7 @@ async function syncStateRoutes(app) {
     if (reply.sent || !membership) return;
 
     const now = new Date().toISOString();
-    const { rows: claimRows } = await query(`
-      SELECT initialization_token, initialization_expires_at
-      FROM sync_workspace_state WHERE workspace_id = $1 AND status = 'initializing'
-    `, [workspaceId]);
-    const claim = claimRows[0];
+    const claim = await getInitializationClaim(workspaceId);
     if (!claim || claim.initialization_token !== token) {
       return reply.status(403).send({ error: 'invalid_initialization_token' });
     }
@@ -334,17 +270,7 @@ async function syncStateRoutes(app) {
     if (reply.sent || !membership) return;
 
     const now = new Date().toISOString();
-    await transaction(async (client) => {
-      await client.query(`
-        UPDATE sync_workspace_state
-        SET status = 'empty', generation = 0, initialization_token = NULL,
-            initialization_expires_at = NULL, updated_at = $1
-        WHERE workspace_id = $2
-      `, [now, workspaceId]);
-      await client.query('DELETE FROM sync_document_state WHERE workspace_id = $1', [workspaceId]);
-      await client.query('DELETE FROM yjs_doc_updates WHERE workspace_id = $1', [workspaceId]);
-      await client.query('DELETE FROM vault_key_params WHERE workspace_id = $1', [workspaceId]);
-    });
+    await resetState({ workspaceId, now });
     return reply.send({ ok: true, workspaceId, status: 'empty' });
   });
 
@@ -363,12 +289,7 @@ async function syncStateRoutes(app) {
       return reply.status(503).send({ error: 'storage_unavailable' });
     }
 
-    const { rows } = await query(`
-      SELECT note_id, snapshot_generation, snapshot_key, snapshot_ts
-      FROM sync_document_state
-      WHERE workspace_id = $1 AND note_id = ANY($2)
-        AND snapshot_key IS NOT NULL AND snapshot_key != ''
-    `, [workspaceId, noteIds]);
+    const rows = await listDownloadableSnapshots(workspaceId, noteIds);
 
     const generation = rows[0]?.snapshot_generation ?? 0;
     const urls = {};

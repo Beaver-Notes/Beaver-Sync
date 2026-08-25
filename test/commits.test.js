@@ -18,6 +18,7 @@ process.env.LEGACY_AUTH_ENABLED = 'true';
 
 const { close } = require('../src/db');
 const { setupTestDb } = require('./helpers/db');
+const { authHeaderFor } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const r2 = require('../src/services/r2');
@@ -92,32 +93,11 @@ async function makeApp() {
   return buildApp();
 }
 
-async function authHeaderFor(app, userId = '507f1f77bcf86cd799439011') {
-  const rawId = crypto.randomBytes(32).toString('base64url');
-  const sessionIdHash = hashSessionId(rawId);
-
-  models.Session.findOne = async ({ idHash: h }) => {
-    if (h === sessionIdHash) {
-      return {
-        idHash: h,
-        accountId: userId,
-        revoked: false,
-        expiresAt: new Date(Date.now() + 3600_000),
-        createdAt: new Date(),
-        save: async () => {},
-      };
-    }
-    return null;
-  };
-
-  return `Bearer ${rawId}`;
-}
-
 test('plaintext payload string is rejected with 400', async (t) => {
   const app = await makeApp();
   t.after(async () => { await app.close(); });
 
-  const auth = await authHeaderFor(app);
+  const auth = await authHeaderFor();
 
   const response = await app.inject({
     method: 'POST',
@@ -148,7 +128,7 @@ test('valid aes256gcm-v1 envelope is accepted', async (t) => {
   let storedPayload = null;
   r2.put = async (key, body) => { storedPayload = body.toString('utf8'); };
 
-  const auth = await authHeaderFor(app);
+  const auth = await authHeaderFor();
 
   const response = await app.inject({
     method: 'POST',
@@ -276,7 +256,7 @@ test('envelope missing cipher is rejected with 400', async (t) => {
   const app = await makeApp();
   t.after(async () => { await app.close(); });
 
-  const auth = await authHeaderFor(app);
+  const auth = await authHeaderFor();
 
   const response = await app.inject({
     method: 'POST',

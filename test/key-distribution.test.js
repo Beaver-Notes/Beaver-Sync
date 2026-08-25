@@ -22,23 +22,8 @@ process.env.ENTERPRISE_MODE = 'false';
 
 const { query } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
+const { makeAccount, authHeaders } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
-const { createSession } = require('../src/middleware/auth');
-
-async function makeAccount(tag) {
-  const id = `kdist-${tag}-${crypto.randomUUID()}`;
-  const emailHmac = `kdist-hmac-${tag}-${crypto.randomUUID()}`;
-  await query(
-    'INSERT INTO accounts (id, email_hmac, created_at) VALUES ($1, $2, $3)',
-    [id, emailHmac, new Date().toISOString()]
-  );
-  return id;
-}
-
-async function authHeaders(accountId) {
-  const session = await createSession(accountId, { headers: {} });
-  return { authorization: `Bearer ${session}`, 'content-type': 'application/json' };
-}
 
 // Seed a note owned by a fresh account that is a collaborator on it, so it can
 // exercise the distribution-request routes (which require collaborator

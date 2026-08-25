@@ -16,27 +16,13 @@ process.env.ENTERPRISE_MODE = 'false';
 
 const { close } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
+const { register } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const { createSession } = require('../src/middleware/auth');
 
 test.before(async () => { await setupTestDb(); await cleanTestDb(); });
 test.after(async () => { await close(); });
-
-async function seedAccount(plan) {
-  const account = await models.Account.create({
-    emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY)
-      .update(`${plan}-${crypto.randomBytes(6).toString('hex')}@test.example`).digest('hex'),
-    emailEncrypted: 'e',
-    passwordHash: '$2b$12$test',
-    kdfSalt: crypto.randomBytes(32).toString('hex'),
-  });
-  await models.Subscription.create({
-    accountId: account.id, plan, status: 'active',
-    storageQuotaBytes: plan === 'free' ? 0 : 1024, storageUsedBytes: 0, createdAt: new Date(),
-  });
-  return account;
-}
 
 async function inject(app, session, payload) {
   return app.inject({
@@ -49,8 +35,8 @@ async function inject(app, session, payload) {
 test('verify-session grants editor role to a note collaborator via noteId', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
-  const owner = await seedAccount('pro');
-  const editor = await seedAccount('pro');
+  const owner = await register('pro');
+  const editor = await register('pro');
   await models.NoteInvitation.create({
     noteId: 'note-editor', userId: editor.id, invitedBy: owner.id, role: 'editor', createdAt: new Date(),
   });
@@ -65,8 +51,8 @@ test('verify-session grants editor role to a note collaborator via noteId', asyn
 test('verify-session grants viewer role to a note collaborator via noteId', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
-  const owner = await seedAccount('pro');
-  const viewer = await seedAccount('pro');
+  const owner = await register('pro');
+  const viewer = await register('pro');
   await models.NoteInvitation.create({
     noteId: 'note-viewer', userId: viewer.id, invitedBy: owner.id, role: 'viewer', createdAt: new Date(),
   });
@@ -81,8 +67,8 @@ test('verify-session grants viewer role to a note collaborator via noteId', asyn
 test('verify-session rejects a non-collaborator on a note', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
-  const owner = await seedAccount('pro');
-  const outsider = await seedAccount('pro');
+  const owner = await register('pro');
+  const outsider = await register('pro');
   await models.NoteInvitation.create({
     noteId: 'note-gated', userId: owner.id, invitedBy: owner.id, role: 'editor', createdAt: new Date(),
   });
@@ -97,8 +83,8 @@ test('verify-session rejects a non-collaborator on a note', async (t) => {
 test('verify-session falls through to the collaborator check when a non-member sends workspaceId + noteId', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
-  const owner = await seedAccount('pro');
-  const editor = await seedAccount('pro');
+  const owner = await register('pro');
+  const editor = await register('pro');
   await models.NoteInvitation.create({
     noteId: 'note-collab-ws', userId: editor.id, invitedBy: owner.id, role: 'editor', createdAt: new Date(),
   });
@@ -113,8 +99,8 @@ test('verify-session falls through to the collaborator check when a non-member s
 test('verify-session returns 403 when a non-member sends workspaceId + noteId and is not a collaborator either', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
-  const owner = await seedAccount('pro');
-  const outsider = await seedAccount('pro');
+  const owner = await register('pro');
+  const outsider = await register('pro');
   await models.NoteInvitation.create({
     noteId: 'note-gated-ws', userId: owner.id, invitedBy: owner.id, role: 'editor', createdAt: new Date(),
   });
@@ -129,7 +115,7 @@ test('verify-session returns 403 when a non-member sends workspaceId + noteId an
 test('verify-session rejects an empty-string noteId', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
-  const user = await seedAccount('pro');
+  const user = await register('pro');
 
   const session = await createSession(user.id, { headers: {} });
   const res = await inject(app, session, { token: session, noteId: '' });
@@ -141,7 +127,7 @@ test('verify-session rejects an empty-string noteId', async (t) => {
 test('verify-session rejects an invalid noteId', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
-  const user = await seedAccount('pro');
+  const user = await register('pro');
 
   const session = await createSession(user.id, { headers: {} });
   const res = await inject(app, session, { token: session, noteId: 12345 });
@@ -153,9 +139,9 @@ test('verify-session rejects an invalid noteId', async (t) => {
 test('verify-session still validates workspace membership when noteId is absent', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
-  const owner = await seedAccount('pro');
-  const member = await seedAccount('pro');
-  const outsider = await seedAccount('pro');
+  const owner = await register('pro');
+  const member = await register('pro');
+  const outsider = await register('pro');
   const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, createdAt: new Date() });
   await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: member.id, role: 'viewer', createdAt: new Date() });
 

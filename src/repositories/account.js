@@ -6,6 +6,8 @@ async function deleteAccountData({ userId, accountIdHash }) {
   await transaction(async (client) => {
     await client.query(`DELETE FROM audit_logs WHERE account_id_hash = $1`, [accountIdHash]);
 
+    // Capture owned org IDs BEFORE deleting org_members, since subsequent
+    // deletes reference org_members to find which orgs the account owns.
     const { rows: ownedOrgs } = await client.query(
       `SELECT org_id FROM org_members WHERE account_id = $1 AND role = 'owner'`,
       [userId]

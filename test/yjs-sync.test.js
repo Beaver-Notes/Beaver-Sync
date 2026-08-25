@@ -17,20 +17,11 @@ process.env.ENTERPRISE_MODE = 'false';
 
 const { close, query } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
+const { seedAccount, seedWorkspace } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const { createSession } = require('../src/middleware/auth');
 
 const now = new Date().toISOString();
-
-async function seedAccount(id) {
-  await query('INSERT INTO accounts (id, email_hmac, created_at) VALUES ($1, $2, $3)', [id, `${id}-email`, now]);
-}
-
-async function seedWorkspace(id, ownerId) {
-  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', [id, 'name', ownerId, now]);
-  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', [id, ownerId, 'owner', now]);
-  await query('INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)', [`${ownerId}-sub`, ownerId, 'pro', 'active', 1000000, 0, now]);
-}
 
 async function request(app, session, url, payload, deviceId = 'device-a') {
   return app.inject({

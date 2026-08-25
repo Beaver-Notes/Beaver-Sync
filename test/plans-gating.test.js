@@ -17,48 +17,13 @@ process.env.ENTERPRISE_MODE = 'false';
 
 const { close } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
+const { register, seedOrg } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const { signToken } = require('../src/middleware/auth');
 
 test.before(async () => { await setupTestDb(); await cleanTestDb(); });
 test.after(async () => { await close(); });
-
-async function register(plan) {
-  const account = await models.Account.create({
-    emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY)
-      .update(`${plan}-${crypto.randomBytes(6).toString('hex')}@test.example`).digest('hex'),
-    emailEncrypted: 'e',
-    passwordHash: '$2b$12$test',
-    kdfSalt: crypto.randomBytes(32).toString('hex'),
-  });
-  await models.Subscription.create({
-    accountId: account.id, plan, status: 'active',
-    storageQuotaBytes: plan === 'free' ? 0 : 1024, storageUsedBytes: 0, createdAt: new Date(),
-  });
-  return account;
-}
-
-async function registerWithEmail(plan, email) {
-  const account = await models.Account.create({
-    emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY)
-      .update(email).digest('hex'),
-    emailEncrypted: 'e',
-    passwordHash: '$2b$12$test',
-    kdfSalt: crypto.randomBytes(32).toString('hex'),
-  });
-  await models.Subscription.create({
-    accountId: account.id, plan, status: 'active',
-    storageQuotaBytes: plan === 'free' ? 0 : 1024, storageUsedBytes: 0, createdAt: new Date(),
-  });
-  return account;
-}
-
-async function seedOrg(orgId, ownerId, plan) {
-  await models.Organization.create({ id: orgId, nameEncrypted: 'e', slug: `slug-${orgId}`, createdAt: new Date() });
-  await models.OrgMember.create({ orgId, accountId: ownerId, role: 'owner', createdAt: new Date() });
-  await models.OrgSubscription.create({ id: crypto.randomUUID(), orgId, plan, status: 'active', seats: 1, createdAt: new Date() });
-}
 
 async function workspaceInject(app, account, payload) {
   return app.inject({
@@ -138,7 +103,7 @@ test('member invite for a free-plan user is rejected', async (t) => {
   const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-free-invite', createdAt: new Date() });
   await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
 
-  await registerWithEmail('free', 'free-invite@example.com');
+  await register('free', { email: 'free-invite@example.com' });
   const res = await app.inject({
     method: 'POST', url: `/workspaces/${ws.id}/members`,
     headers: { authorization: `Bearer ${signToken(owner.id)}`, 'content-type': 'application/json' },
@@ -222,7 +187,7 @@ test('free plan cannot invite collaborators to a note (share-notes gating)', asy
   const app = await buildApp();
   t.after(async () => { await app.close(); });
   const owner = await register('free');
-  await registerWithEmail('pro', 'paid-target@example.com');
+  await register('pro', { email: 'paid-target@example.com' });
 
   const res = await app.inject({
     method: 'POST',
@@ -255,7 +220,7 @@ test('paid plan can invite collaborators to a note', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
   const owner = await register('pro');
-  const target = await registerWithEmail('free', 'free-collab@example.com');
+  const target = await register('free', { email: 'free-collab@example.com' });
   await models.Account.updateOne({ _id: target.id }, { $set: { kemPublicKey: 'a'.repeat(1184 * 2) } });
 
   const res = await app.inject({

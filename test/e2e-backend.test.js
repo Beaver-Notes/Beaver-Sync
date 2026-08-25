@@ -12,25 +12,13 @@ process.env.ENTERPRISE_MODE = 'false';
 
 const { close, query } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
+const { seedAccount, seedWorkspace } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const { createSession } = require('../src/middleware/auth');
 const { createMlKem768 } = require('mlkem');
 const { wrapForRecipient } = require('../src/lib/recipient-wrap');
 
 const now = new Date().toISOString();
-
-async function seedAccount(id, kemPublicKey = null) {
-  await query(
-    'INSERT INTO accounts (id, username, email_hmac, created_at, kem_public_key) VALUES ($1, $2, $3, $4, $5)',
-    [id, id, `${id}-email`, now, kemPublicKey]
-  );
-}
-
-async function seedWorkspace(id, ownerId) {
-  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', [id, 'cipher', ownerId, now]);
-  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', [id, ownerId, 'owner', now]);
-  await query('INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)', [`${ownerId}-sub`, ownerId, 'pro', 'active', 1000000, 0, now]);
-}
 
 async function makeKeypair() {
   const k = await createMlKem768();
@@ -53,7 +41,7 @@ test.before(async () => {
   await seedAccount('alice', alice.pk);
   await seedAccount('bob', bob.pk);
   await seedAccount('nokey', null);
-  await seedWorkspace('ws-1', 'alice');
+  await seedWorkspace('ws-1', 'alice', { nameEncrypted: 'cipher' });
 
   app = await buildApp();
   await app.ready();

@@ -45,7 +45,7 @@ function keysToSnake(obj) {
   return r;
 }
 
-function buildWhere(filter, offset = 1) {
+function buildWhere(filter, table, offset = 1) {
   if (!filter || Object.keys(filter).length === 0) return { sql: '', params: [], nextIndex: offset };
 
   const conds = [];
@@ -54,7 +54,7 @@ function buildWhere(filter, offset = 1) {
 
   // inner helper for sub-conditions (returns just the conditions, no WHERE/AND prefix)
   function innerCond(f) {
-    const result = buildWhere(f, idx);
+    const result = buildWhere(f, table, idx);
     idx = result.nextIndex;
     return { sql: result.sql.replace(/^WHERE /, ''), params: result.params };
   }
@@ -70,7 +70,7 @@ function buildWhere(filter, offset = 1) {
       continue;
     }
 
-    const col = key === '_id' ? 'id' : toSnake(key);
+    const col = toColumn(table, key);
 
     if (isPlainObject(value)) {
       for (const [op, opVal] of Object.entries(value)) {
@@ -115,32 +115,33 @@ function buildWhere(filter, offset = 1) {
   return { sql: 'WHERE ' + conds.join(' AND '), params, nextIndex: idx };
 }
 
-function buildSelect(projection) {
+function buildSelect(projection, table) {
   if (!projection || Object.keys(projection).length === 0) return '*';
   const cols = Object.entries(projection)
     .filter(([, v]) => v === 1 || v === true)
-    .map(([k]) => (k === '_id' ? 'id' : toSnake(k)));
+    .map(([k]) => toColumn(table, k));
   return cols.length > 0 ? cols.join(', ') : '*';
 }
 
-function buildUpdate(update, offset = 1) {
+function buildUpdate(update, table) {
   const clauses = [];
   const params = [];
-  let idx = offset;
+  let idx = 1;
 
   for (const [key, value] of Object.entries(update)) {
     if (key === '$set') {
       for (const [k, v] of Object.entries(value)) {
-        clauses.push(`${toSnake(k)} = $${idx++}`);
+        clauses.push(`${toColumn(table, k)} = $${idx++}`);
         params.push(toBindable(v));
       }
     } else if (key === '$inc') {
       for (const [k, v] of Object.entries(value)) {
-        clauses.push(`${toSnake(k)} = ${toSnake(k)} + $${idx++}`);
+        const col = toColumn(table, k);
+        clauses.push(`${col} = ${col} + $${idx++}`);
         params.push(v);
       }
     } else {
-      clauses.push(`${toSnake(key)} = $${idx++}`);
+      clauses.push(`${toColumn(table, key)} = $${idx++}`);
       params.push(toBindable(value));
     }
   }
@@ -173,7 +174,7 @@ class Doc {
     const vals = [];
     let idx = 1;
     for (const [k, v] of Object.entries(changes)) {
-      cols.push(`${toSnake(k)} = $${idx++}`);
+      cols.push(`${toColumn(this._table, k)} = $${idx++}`);
       vals.push(toBindable(v));
     }
     const pkCamel = this._pkField === 'id' ? 'id' : (this._pkField === 'code' ? 'code' : toCamel(this._pkField));
@@ -213,8 +214,8 @@ class SingleQuery {
   }
 
   async _exec() {
-    const select = buildSelect(this._projection);
-    const { sql: whereSql, params } = buildWhere(this._filter);
+    const select = buildSelect(this._projection, this._table);
+    const { sql: whereSql, params } = buildWhere(this._filter, this._table);
     const result = await query(`SELECT ${select} FROM ${this._table} ${whereSql} LIMIT 1`, params);
     const row = result.rows[0];
     if (!row) return null;
@@ -252,13 +253,13 @@ class MultiQuery {
   }
 
   async _exec() {
-    const select = buildSelect(this._projection);
-    const { sql: whereSql, params } = buildWhere(this._filter);
+    const select = buildSelect(this._projection, this._table);
+    const { sql: whereSql, params } = buildWhere(this._filter, this._table);
     let sql = `SELECT ${select} FROM ${this._table} ${whereSql}`;
 
     if (this._sortSpec) {
       const cols = Object.entries(this._sortSpec)
-        .map(([k, v]) => `${toSnake(k)} ${v === -1 ? 'DESC' : 'ASC'}`)
+        .map(([k, v]) => `${toColumn(this._table, k)} ${v === -1 ? 'DESC' : 'ASC'}`)
         .join(', ');
       sql += ` ORDER BY ${cols}`;
     }
@@ -295,6 +296,72 @@ function validateTableName(table) {
   }
 }
 
+// Mirrors src/db/schema.postgres.sql (+ ALTER TABLE additions). Keep in sync.
+const ALLOWED_COLUMNS = {
+  accounts: new Set(['id', 'username', 'email_hmac', 'email_encrypted', 'kem_public_key',
+    'device_keys', 'password_hash', 'recovery_key_hash', 'failed_login_attempts',
+    'locked_until', 'kdf_salt', 'wrapped_aek', 'created_at', 'jwt_revoked_at']),
+  sessions: new Set(['id_hash', 'account_id', 'workspace_id', 'device_label', 'device_id',
+    'device_fingerprint_hash', 'ip_subnet', 'expires_at', 'last_seen_at', 'revoked', 'created_at']),
+  commits: new Set(['commit_id', 'account_id', 'device_id', 'note_id_hash', 'workspace_id',
+    'payload_encrypted', 'clock', 'ts', 'size_bytes', 'created_at']),
+  workspaces: new Set(['id', 'name_encrypted', 'owner_id', 'org_id', 'vault_wrapped_keys',
+    'storage_used_bytes', 'data_residency', 'emoji', 'color', 'created_at']),
+  subscriptions: new Set(['id', 'account_id', 'plan', 'status', 'provider', 'renews_at',
+    'stripe_customer_id', 'stripe_subscription_id', 'apple_original_transaction_id',
+    'google_purchase_token', 'storage_quota_bytes', 'storage_used_bytes', 'created_at']),
+  devices: new Set(['id', 'account_id', 'device_id', 'label', 'last_seen', 'created_at']),
+  credentials: new Set(['id', 'account_id', 'credential_id', 'public_key', 'sign_count',
+    'device_label', 'created_at']),
+  quick_connect_codes: new Set(['code', 'secret', 'authorized', 'payload', 'expires_at', 'created_at']),
+  compaction_locks: new Set(['id', 'locked_at', 'expires_at', 'created_at']),
+  note_keys: new Set(['note_id', 'user_id', 'device_id', 'wrapped_key', 'created_at']),
+  workspace_keys: new Set(['workspace_id', 'user_id', 'wrapped_key', 'created_at']),
+  org_keys: new Set(['org_id', 'user_id', 'wrapped_key', 'created_at']),
+  note_invitations: new Set(['note_id', 'user_id', 'invited_by', 'role', 'created_at']),
+  email_aliases: new Set(['alias', 'account_id', 'email_encrypted', 'created_at', 'expires_at']),
+  webauthn_challenges: new Set(['id', 'email_hmac', 'challenge', 'expires_at', 'created_at']),
+  workspace_members: new Set(['workspace_id', 'account_id', 'role', 'created_at']),
+  workspace_invites: new Set(['token_hash', 'workspace_id', 'role', 'require_approval',
+    'expires_at', 'max_uses', 'used_count', 'created_at']),
+  sso_configs: new Set(['id', 'workspace_id', 'protocol', 'slug', 'idp_entity_id', 'idp_sso_url',
+    'idp_cert_encrypted', 'oidc_issuer', 'oidc_client_id', 'oidc_client_secret_encrypted',
+    'sp_cert', 'sp_private_key_encrypted', 'allowed_email_domains', 'created_at']),
+  sso_oidc_states: new Set(['state', 'code_verifier', 'nonce', 'slug', 'created_at']),
+  audit_logs: new Set(['id', 'account_id_hash', 'workspace_id', 'action', 'metadata_encrypted',
+    'ip_subnet', 'created_at']),
+  yjs_doc_updates: new Set(['id', 'workspace_id', 'note_id', 'update_data', 'update_encrypted',
+    'device_id', 'clock', 'ts', 'created_at']),
+  vault_key_params: new Set(['id', 'workspace_id', 'owner_id', 'passphrase_hash', 'proof_version',
+    'key_params_blob', 'created_at', 'updated_at']),
+  note_invite_links: new Set(['id', 'note_id', 'created_by', 'token_hash', 'role',
+    'require_approval', 'expires_at', 'revoked', 'created_at']),
+  note_comments: new Set(['id', 'note_id', 'thread_id', 'author_id', 'content_encrypted',
+    'content_iv', 'anchor_from', 'anchor_to', 'resolved', 'parent_id', 'mentions',
+    'created_at', 'updated_at']),
+  organizations: new Set(['id', 'name_encrypted', 'slug', 'created_at']),
+  org_members: new Set(['org_id', 'account_id', 'role', 'created_at']),
+  org_subscriptions: new Set(['id', 'org_id', 'plan', 'status', 'seats', 'provider', 'renews_at',
+    'stripe_customer_id', 'stripe_subscription_id', 'storage_quota_bytes', 'storage_used_bytes',
+    'created_at']),
+  org_invites: new Set(['id', 'org_id', 'created_by', 'token_hash', 'role', 'require_approval',
+    'approved_by', 'max_uses', 'used_count', 'expires_at', 'revoked', 'created_at']),
+};
+
+function assertColumn(table, col) {
+  const allowed = ALLOWED_COLUMNS[table];
+  if (!allowed || !allowed.has(col)) {
+    throw new Error(`Invalid column "${col}" for table "${table}"`);
+  }
+}
+
+// Caller-supplied key (_id or camelCase) -> validated snake_case column.
+function toColumn(table, key) {
+  const col = key === '_id' ? 'id' : toSnake(key);
+  assertColumn(table, col);
+  return col;
+}
+
 function createModel(table, pkField) {
   validateTableName(table);
 
@@ -322,14 +389,15 @@ function createModel(table, pkField) {
       const cols = Object.keys(d).join(', ');
       const placeholders = Object.keys(d).map((_, i) => `$${i + 1}`).join(', ');
       const vals = Object.values(d).map(toBindable);
-      
+      for (const c of Object.keys(d)) assertColumn(table, c);
+
       await query(`INSERT INTO ${table} (${cols}) VALUES (${placeholders})`, vals);
       return new Doc(table, keysToCamel(d), pkField || 'id');
     },
 
     async updateOne(filter, update) {
-      const { sql: setSql, params: setParams, nextIndex } = buildUpdate(update);
-      const { sql: whereSql, params: whereParams } = buildWhere(filter, nextIndex);
+      const { sql: setSql, params: setParams, nextIndex } = buildUpdate(update, table);
+      const { sql: whereSql, params: whereParams } = buildWhere(filter, table, nextIndex);
       const result = await query(`UPDATE ${table} SET ${setSql} ${whereSql}`, [...setParams, ...whereParams]);
       return { modifiedCount: result.rowCount };
     },
@@ -339,7 +407,7 @@ function createModel(table, pkField) {
     },
 
     async deleteOne(filter) {
-      const { sql: whereSql, params } = buildWhere(filter);
+      const { sql: whereSql, params } = buildWhere(filter, table);
       const result = await query(`DELETE FROM ${table} ${whereSql}`, params);
       return { deletedCount: result.rowCount };
     },
@@ -349,14 +417,14 @@ function createModel(table, pkField) {
     },
 
     async countDocuments(filter) {
-      const { sql: whereSql, params } = buildWhere(filter);
+      const { sql: whereSql, params } = buildWhere(filter, table);
       const result = await query(`SELECT COUNT(*) AS count FROM ${table} ${whereSql}`, params);
       return Number(result.rows[0].count);
     },
 
     async findOneAndUpdate(filter, update, options) {
       const opts = options || {};
-      const { sql: whereSql, params: whereParams } = buildWhere(filter);
+      const { sql: whereSql, params: whereParams } = buildWhere(filter, table);
       const whereClause = whereSql;
 
       if (opts.upsert) {
@@ -389,6 +457,7 @@ function createModel(table, pkField) {
           }
             if (!insertData.id && (pkField === 'id' || !pkField)) insertData.id = crypto.randomUUID();
           if (insertData.created_at === undefined) insertData.created_at = new Date().toISOString();
+          for (const c of Object.keys(insertData)) assertColumn(table, c);
 
           const cols = Object.keys(insertData).join(', ');
           const placeholders = Object.keys(insertData).map((_, i) => `$${i + 1}`).join(', ');
@@ -413,8 +482,8 @@ function createModel(table, pkField) {
       const existing = existingResult.rows[0];
       if (!existing) return null;
 
-      const { sql: setSql, params: setParams, nextIndex } = buildUpdate(update);
-      const { sql: whereSqlOffset, params: whereParamsOffset } = buildWhere(filter, nextIndex);
+      const { sql: setSql, params: setParams, nextIndex } = buildUpdate(update, table);
+      const { sql: whereSqlOffset, params: whereParamsOffset } = buildWhere(filter, table, nextIndex);
       await query(`UPDATE ${table} SET ${setSql} ${whereSqlOffset}`, [...setParams, ...whereParamsOffset]);
 
       if (opts.new) {
@@ -427,7 +496,7 @@ function createModel(table, pkField) {
     },
 
     async findOneAndDelete(filter) {
-      const { sql: whereSql, params } = buildWhere(filter);
+      const { sql: whereSql, params } = buildWhere(filter, table);
       const whereClause = whereSql;
       const existingResult = await query(`SELECT * FROM ${table} ${whereClause} LIMIT 1`, params);
       const existing = existingResult.rows[0];

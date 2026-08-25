@@ -12,6 +12,7 @@ process.env.ENTERPRISE_MODE = 'false';
 
 const { close, query } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
+const { seedAccount } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const { createSession } = require('../src/middleware/auth');
 
@@ -19,10 +20,8 @@ const now = new Date().toISOString();
 const PUBKEY = 'alice-pub-1';
 const PUBKEY_2 = 'bob-pub-2';
 
-async function seedAccount(id, kemKey) {
-  await query('INSERT INTO accounts (id, email_hmac, kem_public_key, created_at) VALUES ($1, $2, $3, $4)', [id, `${id}-email`, kemKey ?? null, now]);
-}
-
+// Single-use SQL variant without an org subscription row; the models-based
+// factory.seedOrg always creates one, which these assertions never had.
 async function seedOrg(orgId, ownerId) {
   await query('INSERT INTO organizations (id, name_encrypted, slug, created_at) VALUES ($1, $2, $3, $4)', [orgId, 'org-name', `slug-${orgId}`, now]);
   await query('INSERT INTO org_members (org_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', [orgId, ownerId, 'owner', now]);

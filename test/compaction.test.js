@@ -18,10 +18,10 @@ process.env.LEGACY_AUTH_ENABLED = 'true';
 
 const { close } = require('../src/db');
 const { setupTestDb } = require('./helpers/db');
+const { authHeaderFor } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const r2 = require('../src/services/r2');
-const { hashSessionId } = require('../src/lib/crypto');
 
 const originalMethods = {
   CompactionLock: {
@@ -96,27 +96,6 @@ async function makeApp() {
   return buildApp();
 }
 
-async function authHeaderFor(app, userId = '507f1f77bcf86cd799439011') {
-  const rawId = crypto.randomBytes(32).toString('base64url');
-  const sessionIdHash = hashSessionId(rawId);
-
-  models.Session.findOne = async ({ idHash: h }) => {
-    if (h === sessionIdHash) {
-      return {
-        idHash: h,
-        accountId: userId,
-        revoked: false,
-        expiresAt: new Date(Date.now() + 3600_000),
-        createdAt: new Date(),
-        save: async () => {},
-      };
-    }
-    return null;
-  };
-
-  return `Bearer ${rawId}`;
-}
-
 test('concurrent compaction requests: first succeeds, second returns 409', async (t) => {
   const app = await makeApp();
   t.after(async () => { await app.close(); });
@@ -128,7 +107,7 @@ test('concurrent compaction requests: first succeeds, second returns 409', async
     return { id: '507f1f77bcf86cd799439011', lockedAt: new Date(), expiresAt: new Date(Date.now() + 300_000) };
   };
 
-  const auth = await authHeaderFor(app);
+  const auth = await authHeaderFor();
 
   const first = await app.inject({
     method: 'POST',
@@ -170,7 +149,7 @@ test('lock is released after compaction completes', async (t) => {
     return { deletedCount: 1 };
   };
 
-  const auth = await authHeaderFor(app);
+  const auth = await authHeaderFor();
 
   const response = await app.inject({
     method: 'POST',

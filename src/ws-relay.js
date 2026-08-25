@@ -17,14 +17,11 @@ const encoding = require('lib0/encoding');
 const decoding = require('lib0/decoding');
 
 const { createPostgresPersistence } = require('./db/yjs-persistence');
+const { verifySession, verifyTicket } = require('./ws-relay-auth');
+const { MSG_SYNC, MSG_AWARENESS, handleSyncMessage, handleAwarenessMessage } = require('./ws-relay-protocol');
+const { startSyncNotificationListener } = require('./ws-relay-notifications');
 
-const AUTH_BACKEND_URL = process.env.AUTH_BACKEND_URL ?? 'https://beaver-sync.internal:3000';
 const WS_RELAY_PORT = parseInt(process.env.WS_RELAY_PORT ?? '8080', 10);
-const INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET;
-
-// y-websocket message types
-const MSG_SYNC = 0;
-const MSG_AWARENESS = 1;
 
 const { parseRoomName: baseParseRoomName } = require('./persistence/yjs');
 
@@ -123,52 +120,6 @@ function sendText(ws, obj) {
   }
 }
 
-// --- Authentication ---
-
-async function verifySession(token, workspaceId, noteId) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (INTERNAL_API_SECRET) {
-    headers['X-Internal-Secret'] = INTERNAL_API_SECRET;
-  }
-  const body = { token, workspaceId };
-  if (noteId) body.noteId = noteId;
-
-  const response = await fetch(`${AUTH_BACKEND_URL}/auth/verify-session`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    // Bound the auth call so a hung backend can't leave the upgrade socket
-    // open indefinitely (connection-exhaustion DoS surface).
-    signal: AbortSignal.timeout(Number(process.env.WS_RELAY_AUTH_TIMEOUT_MS ?? 10000)),
-  });
-
-  if (response.status === 403) {
-    throw new Error('Not a member of this workspace');
-  }
-  if (!response.ok) {
-    throw new Error('Invalid or expired session token');
-  }
-
-  return response.json();
-}
-
-async function verifyTicket(ticket) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (INTERNAL_API_SECRET) {
-    headers['X-Internal-Secret'] = INTERNAL_API_SECRET;
-  }
-  const response = await fetch(`${AUTH_BACKEND_URL}/auth/verify-ticket`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ ticket }),
-    signal: AbortSignal.timeout(Number(process.env.WS_RELAY_AUTH_TIMEOUT_MS ?? 10000)),
-  });
-  if (!response.ok) {
-    throw new Error('Invalid or expired ticket');
-  }
-  return response.json();
-}
-
 // --- Connection handling ---
 
 function handleUpgrade(req, socket, head) {
@@ -265,10 +216,10 @@ function handleConnection(ws, documentName, ctx) {
 
       switch (messageType) {
         case MSG_SYNC:
-          handleSyncMessage(decoder, room, conn, documentName);
+          handleSyncMessage(decoder, room, conn, documentName, schedulePersist);
           break;
         case MSG_AWARENESS:
-          handleAwarenessMessage(decoder, room, conn);
+          handleAwarenessMessage(decoder, room, conn, wsToClientIds);
           break;
         default:
           // ignore unknown message types
@@ -303,135 +254,6 @@ function handleConnection(ws, documentName, ctx) {
       }, 30_000);
     }
   });
-}
-
-function handleSyncMessage(decoder, room, conn, documentName) {
-  const syncMessageType = decoding.readVarUint(decoder);
-
-  switch (syncMessageType) {
-    case syncProtocol.messageYjsSyncStep1: {
-      // Client sends its state vector; reply with sync step 2 (the diff)
-      const sv = decoding.readVarUint8Array(decoder);
-      const encoder = encoding.createEncoder();
-      encoding.writeVarUint(encoder, MSG_SYNC);
-      syncProtocol.writeSyncStep2(encoder, room.doc, sv);
-      try { conn.ws.send(encoding.toUint8Array(encoder)); } catch { /* ignore */ }
-
-      // Also send our own sync step 1 so the client can send us its diff
-      const svEncoder = encoding.createEncoder();
-      encoding.writeVarUint(svEncoder, MSG_SYNC);
-      syncProtocol.writeSyncStep1(svEncoder, room.doc);
-      try { conn.ws.send(encoding.toUint8Array(svEncoder)); } catch { /* ignore */ }
-      break;
-    }
-    case syncProtocol.messageYjsSyncStep2: {
-      if (conn.ctx.readOnly) break;
-      syncProtocol.readSyncStep2(decoder, room.doc, 'remote');
-      schedulePersist(documentName);
-      break;
-    }
-    case syncProtocol.messageYjsUpdate: {
-      if (conn.ctx.readOnly) break;
-      syncProtocol.readUpdate(decoder, room.doc, 'remote');
-      schedulePersist(documentName);
-      break;
-    }
-  }
-}
-
-function handleAwarenessMessage(decoder, room, conn) {
-  const update = decoding.readVarUint8Array(decoder);
-
-  // Track which awareness client IDs belong to this connection
-  const updateDecoder = decoding.createDecoder(update);
-  const len = decoding.readVarUint(updateDecoder);
-  for (let i = 0; i < len; i++) {
-    const clientID = decoding.readVarUint(updateDecoder);
-    decoding.readVarUint(updateDecoder); // clock
-    decoding.readVarString(updateDecoder); // state JSON
-    if (!wsToClientIds.has(conn.ws)) wsToClientIds.set(conn.ws, new Set());
-    wsToClientIds.get(conn.ws).add(clientID);
-  }
-
-  awarenessProtocol.applyAwarenessUpdate(room.awareness, update, conn);
-}
-
-// --- LISTEN/NOTIFY sync notifications ---
-
-async function startSyncNotificationListener() {
-  let pool;
-  try {
-    const postgres = require('./db/postgres');
-    pool = postgres.getPool();
-  } catch {
-    console.warn('[ws-relay] Postgres pool unavailable — sync notifications disabled');
-    return;
-  }
-
-  let client;
-  let reconnectAttempts = 0;
-  const MAX_DELAY = 30_000;
-
-  async function listen() {
-    if (client) return;
-    try {
-      client = await pool.connect();
-      await client.query('LISTEN sync_notifications');
-      reconnectAttempts = 0;
-      if (process.env.NODE_ENV !== 'production') {
-        console.log('[ws-relay] Listening for sync notifications on Postgres');
-      }
-
-      client.on('notification', (msg) => {
-        try {
-          const { workspaceId, noteIds, excludeDeviceId } = JSON.parse(msg.payload);
-          if (!workspaceId) return;
-
-          let notified = 0;
-          for (const [, room] of rooms) {
-            for (const conn of room.conns) {
-              const ctx = conn.ctx;
-              if (ctx.workspaceId !== workspaceId) continue;
-              if (excludeDeviceId && ctx.deviceId === excludeDeviceId) continue;
-              sendText(conn.ws, {
-                type: 'notification',
-                noteIds,
-                timestamp: Date.now(),
-              });
-              notified++;
-            }
-          }
-          if (notified > 0 && process.env.NODE_ENV !== 'production') {
-            console.log(`[ws-relay] Notified ${notified} client(s) in workspace ${workspaceId} about ${noteIds.length} note(s)`);
-          }
-        } catch (err) {
-          console.warn('[ws-relay] Failed to process sync notification:', err.message);
-        }
-      });
-
-      const teardown = () => {
-        if (client) {
-          client.release(true);
-          client = null;
-        }
-        scheduleReconnect();
-      };
-      client.on('error', teardown);
-      client.on('end', teardown);
-    } catch (err) {
-      console.warn('[ws-relay] Failed to start sync notification listener:', err.message);
-      if (client) { client.release(true); client = null; }
-      scheduleReconnect();
-    }
-  }
-
-  function scheduleReconnect() {
-    const delay = Math.min(5000 * 2 ** reconnectAttempts, MAX_DELAY);
-    reconnectAttempts++;
-    setTimeout(() => { listen().catch((err) => console.warn('[ws-relay] reconnect failed:', err?.message)); }, delay);
-  }
-
-  await listen();
 }
 
 // --- Server startup ---
@@ -469,7 +291,7 @@ async function startWsRelay() {
 
   wss.on('close', () => clearInterval(heartbeatInterval));
 
-  await startSyncNotificationListener();
+  await startSyncNotificationListener(rooms, sendText);
 
   // Graceful shutdown: flush debounced persists (<=1s of edits per room) before exit
   let shuttingDown = false;

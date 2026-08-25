@@ -18,9 +18,9 @@ process.env.LEGACY_AUTH_ENABLED = 'true';
 
 const { close } = require('../src/db');
 const { setupTestDb } = require('./helpers/db');
+const { authHeaderFor } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
-const { hashSessionId } = require('../src/lib/crypto');
 
 const originalMethods = {
   QuickConnectCode: {
@@ -53,27 +53,6 @@ test.after(() => {
 async function makeApp() {
   resetStubs();
   return buildApp();
-}
-
-async function authHeaderFor(app, userId = 'user-a') {
-  const rawId = crypto.randomBytes(32).toString('base64url');
-  const sessionIdHash = hashSessionId(rawId);
-
-  models.Session.findOne = async ({ idHash: h }) => {
-    if (h === sessionIdHash) {
-      return {
-        idHash: h,
-        accountId: userId,
-        revoked: false,
-        expiresAt: new Date(Date.now() + 3600_000),
-        createdAt: new Date(),
-        save: async () => {},
-      };
-    }
-    return null;
-  };
-
-  return `Bearer ${rawId}`;
 }
 
 test('initiate returns a code and a secret', async (t) => {
@@ -122,7 +101,7 @@ test('authorize code then connect returns payload', async (t) => {
     return null;
   };
 
-  const auth = await authHeaderFor(app, 'user-a');
+  const auth = await authHeaderFor('user-a');
 
   const authorizeResponse = await app.inject({
     method: 'POST',
@@ -211,7 +190,7 @@ test('authorizing already-authorized code returns 409', async (t) => {
     expiresAt: new Date(Date.now() + 10 * 60 * 1000),
   });
 
-  const auth = await authHeaderFor(app, 'user-a');
+  const auth = await authHeaderFor('user-a');
 
   const response = await app.inject({
     method: 'POST',

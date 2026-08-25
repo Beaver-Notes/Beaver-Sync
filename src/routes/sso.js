@@ -13,6 +13,21 @@ const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const SSO_STATE_TTL_MS = 10 * 60 * 1000;
 const OIDC_ISSUER_CACHE_TTL_MS = 60 * 60 * 1000;
 
+// One-time exchange codes reuse the ws_tickets table (hash PK + TTL); the
+// completion page swaps ?code= for a session via POST /sso/exchange so tokens
+// never appear in URLs or referrer/history.
+async function issueExchangeCode(accountId) {
+  const { hashSessionId } = require('../lib/crypto');
+  const { getDb } = require('../db');
+  const code = crypto.randomBytes(32).toString('base64url');
+  await getDb().query('DELETE FROM ws_tickets WHERE expires_at < NOW()');
+  await getDb().query(
+    'INSERT INTO ws_tickets (id_hash, account_id, device_id, role, expires_at) VALUES ($1,$2,NULL,NULL, NOW() + make_interval(secs => $3))',
+    [hashSessionId(code), accountId, parseInt(process.env.SSO_EXCHANGE_TTL_SECONDS ?? '60', 10)]
+  );
+  return code;
+}
+
 // OIDC discovery does a network fetch of the well-known document; cache it per
 // issuer so logins don't pay a round-trip on every request.
 const oidcIssuerCache = new Map();
@@ -214,7 +229,8 @@ async function ssoRoutes(app) {
     const redirectTo = safeRedirectTarget(req.query?.RelayState, fallback);
     if (typeof app.setSessionCookie === 'function') app.setSessionCookie(reply, token);
     reply.header('Referrer-Policy', 'no-referrer');
-    return reply.code(302).redirect(`${redirectTo}?token=${encodeURIComponent(token)}`);
+    const code = await issueExchangeCode(account.id);
+    return reply.code(302).redirect(`${redirectTo}?code=${encodeURIComponent(code)}`);
   });
 
   app.get('/sso/:slug/oidc/callback', async (req, reply) => {
@@ -271,7 +287,31 @@ async function ssoRoutes(app) {
     const redirectTo = `${APP_URL}/auth/sso/${config.slug}/complete`;
     if (typeof app.setSessionCookie === 'function') app.setSessionCookie(reply, token);
     reply.header('Referrer-Policy', 'no-referrer');
-    return reply.code(302).redirect(`${redirectTo}?token=${encodeURIComponent(token)}`);
+    const code = await issueExchangeCode(account.id);
+    return reply.code(302).redirect(`${redirectTo}?code=${encodeURIComponent(code)}`);
+  });
+
+  app.post('/sso/exchange', {
+    config: {
+      security: { public: true },
+      rateLimit: { max: 30, timeWindow: '1 minute' },
+    },
+  }, async (req, reply) => {
+    const code = req.body?.code;
+    if (typeof code !== 'string' || code.length < 16) {
+      return reply.status(400).send({ error: 'invalid_code' });
+    }
+    const { hashSessionId } = require('../lib/crypto');
+    const { getDb } = require('../db');
+    const redeemed = await getDb().query(
+      'DELETE FROM ws_tickets WHERE id_hash = $1 AND expires_at > NOW() AND role IS NULL RETURNING account_id',
+      [hashSessionId(code)]
+    );
+    if (redeemed.rowCount === 0) {
+      return reply.status(401).send({ error: 'invalid_code', message: 'Exchange code is invalid or expired.' });
+    }
+    const token = await createSession(redeemed.rows[0].account_id, req);
+    return reply.send({ token });
   });
 }
 

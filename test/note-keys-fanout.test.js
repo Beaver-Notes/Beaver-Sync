@@ -29,27 +29,12 @@ process.env.ENTERPRISE_MODE = 'false';
 
 const { query } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
+const { makeAccount, authHeaders } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
-const { createSession } = require('../src/middleware/auth');
 
 // ML-KEM-768 public keys are 1184 bytes => 2368 hex chars.
 function randomKem() {
   return crypto.randomBytes(1184).toString('hex');
-}
-
-async function makeAccount(tag) {
-  const id = `fanout-${tag}-${crypto.randomUUID()}`;
-  const emailHmac = `fanout-hmac-${tag}-${crypto.randomUUID()}`;
-  await query(
-    'INSERT INTO accounts (id, email_hmac, created_at) VALUES ($1, $2, $3)',
-    [id, emailHmac, new Date().toISOString()]
-  );
-  return id;
-}
-
-async function authHeaders(accountId) {
-  const session = await createSession(accountId, { headers: {} });
-  return { authorization: `Bearer ${session}`, 'content-type': 'application/json' };
 }
 
 // A wrapped key envelope — opaque to the server, so any non-empty string works.
