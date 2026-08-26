@@ -15,10 +15,7 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY src/ws-relay.js ./src/ws-relay.js
-COPY src/db/postgres.js ./src/db/postgres.js
-COPY src/db/yjs-persistence.js ./src/db/yjs-persistence.js
-COPY src/lib/error-monitoring.js ./src/lib/error-monitoring.js
+COPY src/ ./src/
 COPY package.json ./
 
 RUN addgroup -S beaver && adduser -S beaver -G beaver \
