@@ -7,10 +7,10 @@ const { Account, Subscription, Device, Organization, OrgMember, OrgSubscription,
 const { deleteAccountData } = require('../repositories/account');
 const mlkem = require('../lib/mlkem');
 const r2 = require('../services/r2');
-const { hashSessionId, hashRecoveryCode } = require('../lib/crypto');
+const { hashSessionId, hashRecoveryCode, hashVerificationToken } = require('../lib/crypto');
 const { isEnterpriseMode } = require('../lib/license');
 const { getQuotaBytes } = require('../lib/plans');
-const { sendAccountDeletedEmail } = require('../email');
+const { sendAccountDeletedEmail, sendVerifyEmail } = require('../email');
 const { DEVICE_ID_PATTERN } = require('../lib/patterns');
 const { audit } = require('../lib/audit');
 
@@ -36,7 +36,7 @@ async function accountRoutes(app) {
     },
   }, async (req, reply) => {
     const [account, sub, devices, memberships] = await Promise.all([
-      Account.findById(req.userId, { username: 1, emailHmac: 1, emailEncrypted: 1, createdAt: 1, kemPublicKey: 1, deviceKeys: 1 }).lean(),
+      Account.findById(req.userId, { username: 1, emailHmac: 1, emailEncrypted: 1, emailVerified: 1, createdAt: 1, kemPublicKey: 1, deviceKeys: 1 }).lean(),
       Subscription.findOne({ accountId: req.userId }).lean(),
       Device.find({ accountId: req.userId }).sort({ lastSeen: -1 }).lean(),
       OrgMember.find({ account_id: req.userId }).lean(),
@@ -105,13 +105,14 @@ async function accountRoutes(app) {
 
     return reply.send({
       user: {
-        id:          account.id,
-        username:    account.username ?? null,
-        emailHash:   account.emailHmac,
+        id:            account.id,
+        username:      account.username ?? null,
+        emailHash:     account.emailHmac,
         email,
-        createdAt:   account.createdAt,
-        kemPublicKey: account.kemPublicKey ?? null,
-        deviceKeys:   Array.isArray(account.deviceKeys) ? account.deviceKeys : [],
+        emailVerified: Boolean(account.emailVerified),
+        createdAt:     account.createdAt,
+        kemPublicKey:  account.kemPublicKey ?? null,
+        deviceKeys:    Array.isArray(account.deviceKeys) ? account.deviceKeys : [],
       },
       organizations,
       subscription: subscription
@@ -294,6 +295,66 @@ async function accountRoutes(app) {
     await Account.updateOne({ _id: req.userId }, { recoveryCodeHash: hash, recoveryCodeGeneratedAt: now });
     audit(req, 'recovery_code_generated', {});
     return reply.send({ recoveryCode: code, generatedAt: now.toISOString(), warning: 'Store this code securely. It will not be shown again. Regenerating invalidates the previous code. This restores ACCOUNT access only; E2E data needs vault passphrase.' });
+  });
+
+  // 02.3: email verification soft gate — request (authed, throttled) + confirm (unauth, single-use 24h)
+  app.post('/verify-email/request', {
+    ...protect,
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.VERIFY_EMAIL_REQUEST_RATE_LIMIT_PER_MINUTE ?? '5', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const account = await Account.findById(req.userId, { emailVerified: 1, emailEncrypted: 1 }).lean();
+    if (!account) return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
+    if (account.emailVerified) return reply.send({ sent: false, alreadyVerified: true });
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashVerificationToken(rawToken);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await Account.updateOne({ _id: req.userId }, { verificationTokenHash: tokenHash, verificationExpiresAt: expiresAt });
+    let email = null;
+    if (account.emailEncrypted) {
+      try { email = await mlkem.decryptMetadata(account.emailEncrypted); } catch {}
+    }
+    const baseUrl = process.env.VERIFY_EMAIL_URL_BASE || process.env.FRONTEND_URL || 'beaver-notes://verify-email';
+    const verifyUrl = baseUrl.includes('?') ? `${baseUrl}&token=${rawToken}` : `${baseUrl}?token=${rawToken}`;
+    // also support path-based deep link if baseUrl is beaver-notes://verify-email
+    // the query-param form works for both web and deep-link handlers
+    sendVerifyEmail(app, req.userId, { verifyUrl, token: rawToken, email: email || '', expiresIn: '24 hours' });
+    audit(req, 'verification_email_requested', {});
+    return reply.send({ sent: true, expiresAt: expiresAt.toISOString() });
+  });
+
+  app.post('/verify-email/confirm', {
+    config: {
+      security: { public: true },
+      rateLimit: {
+        max: parseInt(process.env.VERIFY_EMAIL_CONFIRM_RATE_LIMIT_PER_MINUTE ?? '10', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const { token } = req.body ?? {};
+    if (!token || typeof token !== 'string' || token.trim().length < 16) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Verification token is required.' });
+    }
+    const raw = token.trim();
+    const tokenHash = hashVerificationToken(raw);
+    const account = await Account.findOne({ verificationTokenHash: tokenHash }).lean();
+    if (!account) {
+      return reply.status(400).send({ error: 'invalid_token', message: 'Invalid or expired verification token.' });
+    }
+    const expiresAt = account.verificationExpiresAt ? new Date(account.verificationExpiresAt) : null;
+    if (!expiresAt || expiresAt < new Date()) {
+      await Account.updateOne({ _id: account.id }, { verificationTokenHash: null, verificationExpiresAt: null });
+      return reply.status(410).send({ error: 'token_expired', message: 'Verification token has expired.' });
+    }
+    await Account.updateOne({ _id: account.id }, { emailVerified: true, verificationTokenHash: null, verificationExpiresAt: null });
+    req.userId = account.id;
+    audit(req, 'email_verified', {});
+    return reply.send({ verified: true });
   });
 
   app.get('/export', {

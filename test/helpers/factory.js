@@ -21,8 +21,8 @@ const NOW = () => new Date().toISOString();
 async function seedAccount(id, kemPublicKey = null) {
   const { query } = require('../../src/db');
   await query(
-    'INSERT INTO accounts (id, username, email_hmac, created_at, kem_public_key) VALUES ($1, $2, $3, $4, $5)',
-    [id, id, `${id}-email`, NOW(), kemPublicKey]
+    'INSERT INTO accounts (id, username, email_hmac, created_at, kem_public_key, email_verified) VALUES ($1, $2, $3, $4, $5, $6)',
+    [id, id, `${id}-email`, NOW(), kemPublicKey, true]
   );
 }
 
@@ -31,8 +31,8 @@ async function makeAccount(tag) {
   const { query } = require('../../src/db');
   const id = `acct-${tag}-${crypto.randomUUID()}`;
   await query(
-    'INSERT INTO accounts (id, email_hmac, created_at) VALUES ($1, $2, $3)',
-    [id, `acct-hmac-${tag}-${crypto.randomUUID()}`, NOW()]
+    'INSERT INTO accounts (id, email_hmac, created_at, email_verified) VALUES ($1, $2, $3, $4)',
+    [id, `acct-hmac-${tag}-${crypto.randomUUID()}`, NOW(), true]
   );
   return id;
 }
@@ -64,7 +64,7 @@ async function seedOrg(orgId, ownerId, plan) {
 
 // Registered account + subscription via the models layer. Pass { email } to
 // control the address (covers the old registerWithEmail variant).
-async function register(plan, { email } = {}) {
+async function register(plan, { email, emailVerified } = {}) {
   const models = require('../../src/models');
   const address = email ?? `${plan}-${crypto.randomBytes(6).toString('hex')}@test.example`;
   const account = await models.Account.create({
@@ -72,6 +72,7 @@ async function register(plan, { email } = {}) {
     emailEncrypted: 'e',
     passwordHash: '$2b$12$test',
     kdfSalt: crypto.randomBytes(32).toString('hex'),
+    emailVerified: emailVerified ?? true,
   });
   await models.Subscription.create({
     accountId: account.id, plan, status: 'active',

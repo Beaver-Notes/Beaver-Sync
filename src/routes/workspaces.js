@@ -224,6 +224,12 @@ async function workspaceRoutes(app) {
   }, async (req, reply) => {
     const workspaceId = req.params.id;
 
+    // 02.3: soft gate — unverified accounts can use app but not invite
+    const inviterAcct = await Account.findById(req.userId, { emailVerified: 1 }).lean();
+    if (!inviterAcct?.emailVerified) {
+      return reply.status(403).send({ error: 'EMAIL_NOT_VERIFIED', message: 'Please verify your email before inviting members.' });
+    }
+
     try {
       await requireMember(app, req.userId, workspaceId, new Set(['owner', 'editor']));
     } catch (err) {

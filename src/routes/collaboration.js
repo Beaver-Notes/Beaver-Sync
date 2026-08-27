@@ -349,6 +349,12 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
+    // 02.3: soft gate
+    const inviterAcct = await Account.findById(req.userId, { emailVerified: 1 }).lean();
+    if (!inviterAcct?.emailVerified) {
+      return reply.status(403).send({ error: 'EMAIL_NOT_VERIFIED', message: 'Please verify your email before inviting collaborators.' });
+    }
+
     if (!(await requirePaidSharePlan(req, reply))) return;
 
     const { username, email } = req.body ?? {};
@@ -481,6 +487,11 @@ async function collaborationRoutes(app) {
   app.post('/links/:noteId', { preHandler: [app.authenticate] }, async (req, reply) => {
     const { noteId } = req.params;
     const { role = 'editor', requireApproval = false, expiresIn } = req.body;
+
+    const linkAcct = await Account.findById(req.userId, { emailVerified: 1 }).lean();
+    if (!linkAcct?.emailVerified) {
+      return reply.status(403).send({ error: 'EMAIL_NOT_VERIFIED', message: 'Please verify your email before creating invite links.' });
+    }
 
     if (!(await requirePaidSharePlan(req, reply))) return;
 

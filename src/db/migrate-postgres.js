@@ -31,6 +31,29 @@ async function ensureSchema() {
     try {
       await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS recovery_code_generated_at TIMESTAMPTZ');
     } catch {}
+    // 02.3: email verification soft gate — bool + single-use hashed token 24h TTL
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verification_token_hash TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMPTZ');
+    } catch {}
+    // backfill for legacy workspaces table created before vault_wrapped_keys/emoji/color existed
+    try {
+      await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS vault_wrapped_keys TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS emoji TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS color TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS org_id TEXT REFERENCES organizations(id)');
+    } catch {}
   } finally {
     try {
       await lockClient.query('SELECT pg_advisory_unlock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
