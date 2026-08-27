@@ -41,6 +41,13 @@ async function ensureSchema() {
     try {
       await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMPTZ');
     } catch {}
+    // 02.4: password reset — single-use hashed token 1h TTL
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_reset_token_hash TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ');
+    } catch {}
     // backfill for legacy workspaces table created before vault_wrapped_keys/emoji/color existed
     try {
       await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS vault_wrapped_keys TEXT');

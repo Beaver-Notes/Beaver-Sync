@@ -10,7 +10,7 @@ const r2 = require('../services/r2');
 const { hashSessionId, hashRecoveryCode, hashVerificationToken } = require('../lib/crypto');
 const { isEnterpriseMode } = require('../lib/license');
 const { getQuotaBytes } = require('../lib/plans');
-const { sendAccountDeletedEmail, sendVerifyEmail } = require('../email');
+const { sendAccountDeletedEmail, sendVerifyEmail, sendPasswordChangedEmail } = require('../email');
 const { DEVICE_ID_PATTERN } = require('../lib/patterns');
 const { audit } = require('../lib/audit');
 
@@ -355,6 +355,48 @@ async function accountRoutes(app) {
     req.userId = account.id;
     audit(req, 'email_verified', {});
     return reply.send({ verified: true });
+  });
+
+  // 02.4: change password — verifies current, rotates, revokes others, sends notification
+  app.patch('/password', {
+    ...protect,
+    config: {
+      rateLimit: { max: parseInt(process.env.PASSWORD_CHANGE_RATE_LIMIT_PER_MINUTE ?? '5', 10), timeWindow: '1 minute' },
+    },
+  }, async (req, reply) => {
+    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+      return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Password authentication has been replaced by passkeys.' });
+    }
+    const { currentPassword, newPassword, current_password, new_password } = req.body ?? {};
+    const cur = typeof currentPassword === 'string' ? currentPassword : (typeof current_password === 'string' ? current_password : '');
+    const nxt = typeof newPassword === 'string' ? newPassword : (typeof new_password === 'string' ? new_password : '');
+    if (!cur || !nxt) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Current and new passwords are required.' });
+    }
+    if (nxt.length < 12) return reply.status(400).send({ error: 'validation_error', message: 'Password must be at least 12 characters.' });
+    if (nxt.length > 128) return reply.status(400).send({ error: 'validation_error', message: 'Password too long.' });
+    const account = await Account.findById(req.userId);
+    if (!account) return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
+    if (!account.passwordHash) return reply.status(400).send({ error: 'password_not_available', message: 'No password set on this account.' });
+    const bcrypt = require('bcrypt');
+    const ok = await bcrypt.compare(cur, account.passwordHash);
+    if (!ok) return reply.status(401).send({ error: 'invalid_credentials', message: 'Current password is incorrect.' });
+    const newHash = await bcrypt.hash(nxt, 12);
+    await Account.updateOne({ _id: req.userId }, { passwordHash: newHash });
+    // revoke other sessions, keep current
+    const { Session } = require('../models');
+    const { hashSessionId } = require('../lib/crypto');
+    let keepHash = null;
+    const authHeader = req.headers['authorization'];
+    const rawId = authHeader && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : (req.cookies?.bsession || null);
+    if (rawId) keepHash = hashSessionId(rawId);
+    const filter = { accountId: req.userId, revoked: false };
+    if (keepHash) filter.idHash = { $ne: keepHash };
+    await Session.updateMany(filter, { revoked: true });
+    const deviceInfo = String(req.headers['x-device-label'] ?? req.headers['user-agent'] ?? 'Unknown device').slice(0, 128);
+    sendPasswordChangedEmail(app, req.userId, { timestamp: new Date().toISOString(), deviceInfo });
+    audit(req, 'password_changed', {});
+    return reply.send({ message: 'Password changed.' });
   });
 
   app.get('/export', {

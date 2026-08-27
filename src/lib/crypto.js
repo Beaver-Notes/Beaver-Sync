@@ -38,10 +38,15 @@ function hashVerificationToken(token) {
   return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(String(token)).digest('hex');
 }
 
+function hashPasswordResetToken(token) {
+  return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(String(token)).digest('hex');
+}
+
 module.exports = {
   createEmailHash,
   hashSessionId,
   createNoteHash,
   hashRecoveryCode,
   hashVerificationToken,
+  hashPasswordResetToken,
 };

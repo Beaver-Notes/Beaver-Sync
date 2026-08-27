@@ -6,9 +6,9 @@ const { Account, Subscription, Workspace, WorkspaceMember, Organization, OrgMemb
 const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { createSession, setSessionCookieIfAvailable } = require('../middleware/auth');
 const { validatePublicKey } = require('../lib/recipient-wrap');
-const { createEmailHash } = require('../lib/crypto');
+const { createEmailHash, hashPasswordResetToken } = require('../lib/crypto');
 const mlkem = require('../lib/mlkem');
-const { sendWelcomeEmail } = require('../email');
+const { sendWelcomeEmail, sendPasswordResetEmail } = require('../email');
 const { audit } = require('../lib/audit');
 const { isEnterpriseMode } = require('../lib/license');
 const { getQuotaBytes } = require('../lib/plans');
@@ -242,6 +242,83 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
       },
       subscription: subscription ?? null,
     });
+  });
+
+  // 02.4: password reset — respects LEGACY_AUTH_ENABLED 410 gating
+  // POST /auth/password/reset-request always 200 decoy
+  app.post('/password/reset-request', {
+    config: {
+      security: { public: true, allowedContentTypes: ['application/json'] },
+      rateLimit: { max: parseInt(process.env.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_MINUTE ?? '5', 10), timeWindow: '1 minute' },
+    },
+  }, async (req, reply) => {
+    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+      return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Password authentication has been replaced by passkeys.' });
+    }
+    const { email } = req.body ?? {};
+    const normalized = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const decoyMessage = 'If an account exists for that email, you will receive a password reset link. Check your inbox (and spam folder).';
+    if (!normalized || !normalized.includes('@')) {
+      return reply.send({ message: decoyMessage });
+    }
+    const emailHash = createEmailHash(normalized);
+    const account = await Account.findOne({ emailHmac: emailHash }).lean();
+    if (account) {
+      const rawToken = require('crypto').randomBytes(32).toString('hex');
+      const tokenHash = hashPasswordResetToken(rawToken);
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+      await Account.updateOne({ _id: account.id }, { passwordResetTokenHash: tokenHash, passwordResetExpiresAt: expiresAt });
+      const baseUrl = process.env.PASSWORD_RESET_URL_BASE || process.env.FRONTEND_URL || 'beaver-notes://reset-password';
+      const resetUrl = baseUrl.includes('?') ? `${baseUrl}&token=${rawToken}` : `${baseUrl}?token=${rawToken}`;
+      sendPasswordResetEmail(app, account.id, { resetUrl, token: rawToken, expiresIn: '1 hour' });
+      audit({ ...req, userId: account.id }, 'password_reset_requested', {});
+    } else {
+      // timing-safe dummy hash to avoid enumeration timing leak
+      try { hashPasswordResetToken('dummy-not-found-' + normalized); } catch {}
+    }
+    return reply.send({ message: decoyMessage });
+  });
+
+  // POST /auth/password/reset-complete — validates, revokes all sessions, clears lockout
+  app.post('/password/reset-complete', {
+    config: {
+      security: { public: true, allowedContentTypes: ['application/json'] },
+      rateLimit: { max: parseInt(process.env.PASSWORD_RESET_COMPLETE_RATE_LIMIT_PER_MINUTE ?? '5', 10), timeWindow: '1 minute' },
+    },
+  }, async (req, reply) => {
+    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+      return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Password authentication has been replaced by passkeys.' });
+    }
+    const { token, password, newPassword } = req.body ?? {};
+    const raw = typeof token === 'string' ? token.trim() : '';
+    const nextPw = typeof newPassword === 'string' ? newPassword : (typeof password === 'string' ? password : '');
+    if (!raw || raw.length < 16) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Reset token is required.' });
+    }
+    if (!nextPw || nextPw.length < 12) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Password must be at least 12 characters.' });
+    }
+    if (nextPw.length > 128) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Password too long.' });
+    }
+    const tokenHash = hashPasswordResetToken(raw);
+    const account = await Account.findOne({ passwordResetTokenHash: tokenHash }).lean();
+    if (!account) {
+      return reply.status(400).send({ error: 'invalid_token', message: 'Invalid or expired reset token.' });
+    }
+    const expiresAt = account.passwordResetExpiresAt ? new Date(account.passwordResetExpiresAt) : null;
+    if (!expiresAt || expiresAt < new Date()) {
+      await Account.updateOne({ _id: account.id }, { passwordResetTokenHash: null, passwordResetExpiresAt: null });
+      return reply.status(410).send({ error: 'token_expired', message: 'Reset token has expired.' });
+    }
+    const newHash = await bcrypt.hash(nextPw, BCRYPT_ROUNDS);
+    await Account.updateOne({ _id: account.id }, { passwordHash: newHash, passwordResetTokenHash: null, passwordResetExpiresAt: null, failedLoginAttempts: 0, lockedUntil: null });
+    const { Session } = require('../models');
+    await Session.updateMany({ accountId: account.id }, { revoked: true });
+    try { const { getDb } = require('../db'); await getDb().query('DELETE FROM ws_tickets WHERE account_id = $1', [account.id]); } catch {}
+    req.userId = account.id;
+    audit(req, 'password_reset_complete', {});
+    return reply.send({ message: 'Password has been reset. You can now sign in.' });
   });
 }
 
