@@ -48,6 +48,26 @@ async function ensureSchema() {
     try {
       await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ');
     } catch {}
+    // 02.5: TOTP 2FA encrypted secret + pending + replay protection
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_secret_encrypted TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_secret_encrypted TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_expires_at TIMESTAMPTZ');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_last_timestep BIGINT');
+    } catch {}
+    try {
+      await query(`CREATE TABLE IF NOT EXISTS mfa_challenges (
+        id_hash TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL
+      )`);
+    } catch {}
     // backfill for legacy workspaces table created before vault_wrapped_keys/emoji/color existed
     try {
       await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS vault_wrapped_keys TEXT');

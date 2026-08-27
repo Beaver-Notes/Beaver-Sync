@@ -65,7 +65,7 @@ const TABLES = [
   'note_comments', 'note_invite_links', 'note_invitations', 'note_keys',
   'vault_key_params', 'vault_proof_challenges',
   'workspace_members', 'workspace_invites', 'workspace_keys',
-  'compaction_locks', 'subscriptions', 'commits', 'sessions', 'ws_tickets',
+  'compaction_locks', 'subscriptions', 'commits', 'sessions', 'ws_tickets', 'mfa_challenges',
   'devices', 'credentials', 'webauthn_challenges', 'quick_connect_codes',
   'email_aliases', 'audit_logs', 'sso_oidc_states', 'sso_configs',
   'workspaces',

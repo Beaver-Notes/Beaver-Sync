@@ -299,7 +299,7 @@ function validateTableName(table) {
 // Mirrors src/db/schema.postgres.sql (+ ALTER TABLE additions). Keep in sync.
 const ALLOWED_COLUMNS = {
   accounts: new Set(['id', 'username', 'email_hmac', 'email_encrypted', 'kem_public_key',
-    'device_keys', 'password_hash', 'recovery_key_hash', 'recovery_code_hash', 'recovery_code_generated_at', 'email_verified', 'verification_token_hash', 'verification_expires_at', 'password_reset_token_hash', 'password_reset_expires_at', 'failed_login_attempts',
+    'device_keys', 'password_hash', 'recovery_key_hash', 'recovery_code_hash', 'recovery_code_generated_at', 'email_verified', 'verification_token_hash', 'verification_expires_at', 'password_reset_token_hash', 'password_reset_expires_at', 'totp_secret_encrypted', 'totp_pending_secret_encrypted', 'totp_pending_expires_at', 'totp_last_timestep', 'failed_login_attempts',
     'locked_until', 'kdf_salt', 'wrapped_aek', 'created_at', 'jwt_revoked_at']),
   sessions: new Set(['id_hash', 'account_id', 'workspace_id', 'device_label', 'device_id',
     'device_fingerprint_hash', 'ip_subnet', 'expires_at', 'last_seen_at', 'revoked', 'created_at']),

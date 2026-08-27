@@ -213,6 +213,21 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
       { failedLoginAttempts: 0, lockedUntil: null }
     );
 
+    // 02.5: TOTP MFA branch — if TOTP enabled, return single-use ticket instead of session
+    if (account.totpSecretEncrypted) {
+      const { hashSessionId } = require('../lib/crypto');
+      const { getDb } = require('../db');
+      const ticket = require('crypto').randomBytes(32).toString('base64url');
+      const ttlSeconds = parseInt(process.env.MFA_CHALLENGE_TTL_SECONDS ?? '300', 10);
+      try { await getDb().query('DELETE FROM mfa_challenges WHERE expires_at < NOW()'); } catch {}
+      await getDb().query(
+        'INSERT INTO mfa_challenges (id_hash, account_id, expires_at) VALUES ($1,$2,NOW() + make_interval(secs => $3))',
+        [hashSessionId(ticket), account.id, ttlSeconds]
+      );
+      audit({ ...req, userId: account.id }, 'login_mfa_required', {});
+      return reply.send({ mfaRequired: true, mfaChallenge: ticket, challenge: ticket });
+    }
+
     const token = await createSession(account.id, req);
     req.userId = account.id;
     audit(req, 'login', { method: 'password' });
@@ -242,6 +257,107 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
       },
       subscription: subscription ?? null,
     });
+  });
+
+  // 02.5: POST /auth/token/mfa — verifies timestep with replay protection, recovery code path via 02.2
+  app.post('/token/mfa', {
+    config: {
+      security: { public: true, allowedContentTypes: ['application/json'] },
+      rateLimit: { max: parseInt(process.env.MFA_RATE_LIMIT_PER_MINUTE ?? '10', 10), timeWindow: '1 minute' },
+    },
+  }, async (req, reply) => {
+    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+      return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Password authentication has been replaced by passkeys.' });
+    }
+    const { challenge, mfaChallenge, code, recoveryCode } = req.body ?? {};
+    const ticket = typeof challenge === 'string' ? challenge : (typeof mfaChallenge === 'string' ? mfaChallenge : '');
+    if (!ticket || ticket.length < 16) {
+      return reply.status(400).send({ error: 'validation_error', message: 'MFA challenge is required.' });
+    }
+    const hasCode = typeof code === 'string' && code.trim().length > 0;
+    const hasRecovery = typeof recoveryCode === 'string' && recoveryCode.trim().length > 0;
+    if (!hasCode && !hasRecovery) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Code or recoveryCode is required.' });
+    }
+    const { hashSessionId, hashRecoveryCode } = require('../lib/crypto');
+    const { getDb } = require('../db');
+    const idHash = hashSessionId(ticket);
+    const consumed = await getDb().query(
+      'DELETE FROM mfa_challenges WHERE id_hash = $1 AND expires_at > NOW() RETURNING account_id',
+      [idHash]
+    );
+    if (consumed.rows.length === 0) {
+      return reply.status(401).send({ error: 'invalid_challenge', message: 'MFA challenge is invalid, used, or expired.' });
+    }
+    const accountId = consumed.rows[0].account_id;
+    const account = await Account.findById(accountId);
+    if (!account) return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
+
+    // recovery code path
+    if (hasRecovery) {
+      const raw = recoveryCode.trim();
+      const h = hashRecoveryCode(raw);
+      const stored = account.recoveryCodeHash;
+      let valid = false;
+      if (stored) {
+        try {
+          const a = Buffer.from(stored, 'hex');
+          const b = Buffer.from(h, 'hex');
+          valid = a.length === b.length && require('crypto').timingSafeEqual(a, b);
+        } catch { valid = false; }
+      } else {
+        try { const d = hashRecoveryCode('dummy-recovery-not-found-0000000000000000'); require('crypto').timingSafeEqual(Buffer.from(d,'hex'), Buffer.from(h,'hex')); } catch {}
+      }
+      if (!valid) {
+        // re-insert challenge? no, single-use consumed — need new login
+        app.recordSecurityEvent(req, 'mfa_recovery_failure', { userId: account.id });
+        return reply.status(401).send({ error: 'invalid_recovery_code', message: 'Invalid recovery code.' });
+      }
+      // consumed-on-use per 02.2 semantics
+      await Account.updateOne({ _id: account.id }, { recoveryCodeHash: null, recoveryCodeGeneratedAt: null });
+      const token = await createSession(account.id, req);
+      req.userId = account.id;
+      audit(req, 'login_mfa_recovery', {});
+      let subscription = await Subscription.findOne({ accountId: account.id }, { plan: 1, status: 1, renewsAt: 1, storageUsedBytes: 1, storageQuotaBytes: 1 }).lean();
+      if (isEnterpriseMode()) {
+        if (!subscription) subscription = { plan: 'enterprise', status: 'active', renewsAt: null, storageUsedBytes: 0, storageQuotaBytes: getQuotaBytes('enterprise') };
+        else { subscription.plan = 'enterprise'; subscription.storageQuotaBytes = getQuotaBytes('enterprise'); }
+      }
+      setSessionCookieIfAvailable(app, reply, token);
+      return reply.send({ token, user: { id: account.id, emailHash: account.emailHmac, kdfSalt: account.kdfSalt, kemPublicKey: account.kemPublicKey || null }, subscription: subscription ?? null });
+    }
+
+    // TOTP path
+    const rawCode = String(code).trim();
+    if (!/^\d{6}$/.test(rawCode)) {
+      return reply.status(401).send({ error: 'invalid_code', message: 'Invalid TOTP code.' });
+    }
+    if (!account.totpSecretEncrypted) {
+      return reply.status(400).send({ error: 'totp_not_enabled', message: 'TOTP is not enabled on this account.' });
+    }
+    let secret;
+    try { secret = await require('../lib/mlkem').decryptMetadata(account.totpSecretEncrypted); } catch { return reply.status(500).send({ error: 'decrypt_failed', message: 'Failed to decrypt TOTP secret.' }); }
+    const { totpVerify } = require('../lib/totp');
+    const timestep = totpVerify(secret, rawCode, 1);
+    if (timestep === null) {
+      app.recordSecurityEvent(req, 'mfa_totp_failure', { userId: account.id });
+      return reply.status(401).send({ error: 'invalid_code', message: 'Invalid TOTP code.' });
+    }
+    // replay protection
+    if (account.totpLastTimestep != null && Number(account.totpLastTimestep) === Number(timestep)) {
+      return reply.status(401).send({ error: 'code_reused', message: 'Code has already been used. Wait for the next code.' });
+    }
+    await Account.updateOne({ _id: account.id }, { totpLastTimestep: timestep });
+    const token = await createSession(account.id, req);
+    req.userId = account.id;
+    audit(req, 'login_mfa_totp', {});
+    let subscription = await Subscription.findOne({ accountId: account.id }, { plan: 1, status: 1, renewsAt: 1, storageUsedBytes: 1, storageQuotaBytes: 1 }).lean();
+    if (isEnterpriseMode()) {
+      if (!subscription) subscription = { plan: 'enterprise', status: 'active', renewsAt: null, storageUsedBytes: 0, storageQuotaBytes: getQuotaBytes('enterprise') };
+      else { subscription.plan = 'enterprise'; subscription.storageQuotaBytes = getQuotaBytes('enterprise'); }
+    }
+    setSessionCookieIfAvailable(app, reply, token);
+    return reply.send({ token, user: { id: account.id, emailHash: account.emailHmac, kdfSalt: account.kdfSalt, kemPublicKey: account.kemPublicKey || null }, subscription: subscription ?? null });
   });
 
   // 02.4: password reset — respects LEGACY_AUTH_ENABLED 410 gating
