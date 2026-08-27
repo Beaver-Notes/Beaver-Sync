@@ -7,11 +7,12 @@ const { Account, Subscription, Device, Organization, OrgMember, OrgSubscription,
 const { deleteAccountData } = require('../repositories/account');
 const mlkem = require('../lib/mlkem');
 const r2 = require('../services/r2');
-const { hashSessionId } = require('../lib/crypto');
+const { hashSessionId, hashRecoveryCode } = require('../lib/crypto');
 const { isEnterpriseMode } = require('../lib/license');
 const { getQuotaBytes } = require('../lib/plans');
 const { sendAccountDeletedEmail } = require('../email');
 const { DEVICE_ID_PATTERN } = require('../lib/patterns');
+const { audit } = require('../lib/audit');
 
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{3,32}$/;
 
@@ -275,6 +276,24 @@ async function accountRoutes(app) {
     });
 
     return reply.send({ deleted: true, message: 'Beaver Account and all data deleted.' });
+  });
+
+  // 02.2: single high-entropy recovery code, HMAC-hashed, regenerate-invalidates-old
+  app.post('/recovery-code', {
+    ...protect,
+    config: {
+      rateLimit: {
+        max: parseInt(process.env.RECOVERY_CODE_RATE_LIMIT_PER_MINUTE ?? '10', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const code = crypto.randomBytes(32).toString('hex');
+    const hash = hashRecoveryCode(code);
+    const now = new Date();
+    await Account.updateOne({ _id: req.userId }, { recoveryCodeHash: hash, recoveryCodeGeneratedAt: now });
+    audit(req, 'recovery_code_generated', {});
+    return reply.send({ recoveryCode: code, generatedAt: now.toISOString(), warning: 'Store this code securely. It will not be shown again. Regenerating invalidates the previous code. This restores ACCOUNT access only; E2E data needs vault passphrase.' });
   });
 
   app.get('/export', {

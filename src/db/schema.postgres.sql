@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   locked_until          TEXT,
   kdf_salt              TEXT,
   wrapped_aek           TEXT,
+  recovery_code_hash    TEXT,
+  recovery_code_generated_at TIMESTAMPTZ,
   created_at            TEXT NOT NULL
 );
 

@@ -224,6 +224,66 @@ async function authRoutes(app) {
     return reply.send(out);
   });
 
+  // 02.2: recovery code → session requiresPasskeyEnroll, consumed-on-use
+  app.post('/recover', {
+    config: {
+      security: { public: true, allowedContentTypes: ['application/json'], maxContentLength: AUTH_BODY_LIMIT_BYTES },
+      rateLimit: { max: parseInt(process.env.RECOVERY_RATE_LIMIT_PER_MINUTE ?? '5', 10), timeWindow: '1 minute' },
+    },
+    bodyLimit: AUTH_BODY_LIMIT_BYTES,
+  }, async (req, reply) => {
+    const { email, code } = req.body ?? {};
+    if (!email || typeof email !== 'string' || !code || typeof code !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'Email and code are required.' });
+    }
+    const normalized = email.trim().toLowerCase();
+    if (!normalized.includes('@')) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Invalid email.' });
+    }
+    if (code.length < 16) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Invalid recovery code.' });
+    }
+    const { createEmailHash, hashRecoveryCode } = require('../lib/crypto');
+    const { createSession, setSessionCookieIfAvailable } = require('../middleware/auth');
+    const emailHash = createEmailHash(normalized);
+    const codeHash = hashRecoveryCode(code);
+    // dummy hash ensures constant-time path even when account missing
+    const dummyHash = hashRecoveryCode('dummy-recovery-code-not-found-0000000000000000');
+
+    const account = await Account.findOne({ emailHmac: emailHash }).lean();
+    let storedHash = account?.recoveryCodeHash || null;
+    let isValid = false;
+    if (account && storedHash) {
+      try {
+        const aBuf = Buffer.from(storedHash, 'hex');
+        const bBuf = Buffer.from(codeHash, 'hex');
+        isValid = aBuf.length === bBuf.length && crypto.timingSafeEqual(aBuf, bBuf);
+      } catch { isValid = false; }
+    } else {
+      // always do timing-safe compare to avoid enumeration timing leak
+      try {
+        const aBuf = Buffer.from(dummyHash, 'hex');
+        const bBuf = Buffer.from(codeHash, 'hex');
+        crypto.timingSafeEqual(aBuf, bBuf);
+      } catch {}
+      isValid = false;
+    }
+
+    if (!isValid) {
+      if (account) app.recordSecurityEvent(req, 'recovery_failure', { userId: account.id });
+      return reply.status(401).send({ error: 'invalid_recovery_code', message: 'Invalid email or recovery code.' });
+    }
+
+    // consumed-on-use: invalidate immediately before issuing session
+    await Account.updateOne({ _id: account.id }, { recoveryCodeHash: null, recoveryCodeGeneratedAt: null });
+
+    const rawId = await createSession(account.id, req);
+    req.userId = account.id;
+    audit(req, 'account_recovered', {});
+    setSessionCookieIfAvailable(app, reply, rawId);
+    return reply.send({ token: rawId, sessionToken: rawId, requiresPasskeyEnroll: true, message: 'Account recovered. Please enroll a new passkey. This restores ACCOUNT access only; E2E data needs vault passphrase.' });
+  });
+
   await registerSessionRoutes(app);
 }
 

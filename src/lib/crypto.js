@@ -30,8 +30,13 @@ function createNoteHash(noteId) {
   return crypto.createHmac('sha256', NOTE_HMAC_KEY).update(noteId).digest('hex');
 }
 
+function hashRecoveryCode(code) {
+  return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(String(code)).digest('hex');
+}
+
 module.exports = {
   createEmailHash,
   hashSessionId,
   createNoteHash,
+  hashRecoveryCode,
 };

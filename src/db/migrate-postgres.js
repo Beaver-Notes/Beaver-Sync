@@ -24,6 +24,13 @@ async function ensureSchema() {
     try {
       await query('DROP INDEX IF EXISTS accounts_username_key');
     } catch {}
+    // 02.2: recovery code — single active per account, HMAC-hashed
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS recovery_code_hash TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS recovery_code_generated_at TIMESTAMPTZ');
+    } catch {}
   } finally {
     try {
       await lockClient.query('SELECT pg_advisory_unlock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
