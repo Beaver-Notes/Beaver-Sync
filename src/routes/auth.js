@@ -7,6 +7,7 @@ const { validatePublicKey } = require('../lib/recipient-wrap');
 const { audit } = require('../lib/audit');
 const { registerLegacyPasswordRoutes } = require('./auth-password');
 const { registerSessionRoutes } = require('./auth-sessions');
+const { query } = require('../db');
 
 const AUTH_BODY_LIMIT_BYTES = parseInt(process.env.AUTH_BODY_LIMIT_BYTES ?? '16384', 10);
 
@@ -23,13 +24,39 @@ function timingSafeEqualStr(a, b) {
 // Returns { role } or { error: { status, payload } }.
 async function resolveAuthRole(userId, workspaceId, noteId) {
   if (!workspaceId && !noteId) return {};
-  if (workspaceId) {
+
+  // Workspace-only: require active membership, full stop.
+  if (workspaceId && !noteId) {
     const membership = await WorkspaceMember.findOne({ workspaceId, accountId: userId }).lean();
     if (membership) return { role: membership.role };
-    if (noteId === undefined) {
-      return { error: { status: 403, payload: { error: 'forbidden', message: 'Not a member of this workspace.' } } };
-    }
+    return { error: { status: 403, payload: { error: 'forbidden', message: 'Not a member of this workspace.' } } };
   }
+
+  // Note-only (no workspaceId): allow via note collaboration.
+  if (!workspaceId && noteId) {
+    const { NoteInvitation } = require('../models');
+    const collab = await NoteInvitation.findOne({ noteId, userId }).lean();
+    if (!collab) {
+      return { error: { status: 403, payload: { error: 'forbidden', message: 'Not a collaborator on this note.' } } };
+    }
+    return { role: collab.role === 'viewer' ? 'viewer' : 'editor' };
+  }
+
+  // Both workspaceId and noteId provided (note room):
+  // 1. Workspace membership grants access.
+  const membership = await WorkspaceMember.findOne({ workspaceId, accountId: userId }).lean();
+  if (membership) return { role: membership.role };
+
+  // 2. Not a workspace member — verify note actually belongs to this workspace.
+  const { rows } = await query(
+    'SELECT 1 FROM sync_document_state WHERE workspace_id = $1 AND note_id = $2 LIMIT 1',
+    [workspaceId, noteId]
+  );
+  if (rows.length === 0) {
+    return { error: { status: 403, payload: { error: 'forbidden', message: 'Note not found in this workspace.' } } };
+  }
+
+  // 3. Note belongs to workspace — now check note collaboration.
   const { NoteInvitation } = require('../models');
   const collab = await NoteInvitation.findOne({ noteId, userId }).lean();
   if (!collab) {

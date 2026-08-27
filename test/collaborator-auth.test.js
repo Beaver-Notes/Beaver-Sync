@@ -80,7 +80,7 @@ test('verify-session rejects a non-collaborator on a note', async (t) => {
   assert.equal(res.json().error, 'forbidden');
 });
 
-test('verify-session falls through to the collaborator check when a non-member sends workspaceId + noteId', async (t) => {
+test('verify-session denies cross-workspace access: non-member with noteId not in workspace', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
   const owner = await register('pro');
@@ -92,8 +92,9 @@ test('verify-session falls through to the collaborator check when a non-member s
   const session = await createSession(editor.id, { headers: {} });
   const res = await inject(app, session, { token: session, workspaceId: 'some-ws', noteId: 'note-collab-ws' });
 
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json(), { userId: editor.id, role: 'editor', deviceId: null });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
+  assert.match(res.json().message, /Note not found in this workspace/);
 });
 
 test('verify-session returns 403 when a non-member sends workspaceId + noteId and is not a collaborator either', async (t) => {
@@ -153,4 +154,117 @@ test('verify-session still validates workspace membership when noteId is absent'
   const outsiderSession = await createSession(outsider.id, { headers: {} });
   const outsiderRes = await inject(app, outsiderSession, { token: outsiderSession, workspaceId: ws.id });
   assert.equal(outsiderRes.statusCode, 403);
+});
+
+// --- Regression tests for Task 03.3: Room authorization fall-through ---
+
+test('verify-session allows valid (workspaceId, noteId) pair when note belongs to workspace and user is collaborator', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const owner = await register('pro');
+  const editor = await register('pro');
+  
+  // Create workspace and associate note with it via sync_document_state
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+  
+  const noteId = 'note-valid-pair';
+  await models.NoteInvitation.create({
+    noteId, userId: editor.id, invitedBy: owner.id, role: 'editor', createdAt: new Date(),
+  });
+  
+  // Associate note with workspace in sync_document_state
+  const { query } = require('../src/db');
+  await query(
+    `INSERT INTO sync_document_state (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, updated_at)
+     VALUES ($1, $2, 0, '', 0, 0, NOW())
+     ON CONFLICT (workspace_id, note_id) DO NOTHING`,
+    [ws.id, noteId]
+  );
+
+  const session = await createSession(editor.id, { headers: {} });
+  const res = await inject(app, session, { token: session, workspaceId: ws.id, noteId });
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { userId: editor.id, role: 'editor', deviceId: null });
+});
+
+test('verify-session denies access when collaborator removed from note in workspace', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const owner = await register('pro');
+  const editor = await register('pro');
+  
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+  
+  const noteId = 'note-removed-collab';
+  await models.NoteInvitation.create({
+    noteId, userId: editor.id, invitedBy: owner.id, role: 'editor', createdAt: new Date(),
+  });
+  
+  // Associate note with workspace
+  const { query } = require('../src/db');
+  await query(
+    `INSERT INTO sync_document_state (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, updated_at)
+     VALUES ($1, $2, 0, '', 0, 0, NOW())
+     ON CONFLICT (workspace_id, note_id) DO NOTHING`,
+    [ws.id, noteId]
+  );
+
+  // Remove collaborator
+  await models.NoteInvitation.deleteOne({ noteId, userId: editor.id });
+
+  const session = await createSession(editor.id, { headers: {} });
+  const res = await inject(app, session, { token: session, workspaceId: ws.id, noteId });
+
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
+  assert.match(res.json().message, /Not a collaborator on this note/);
+});
+
+test('verify-session allows workspace member access to note room without note collaboration', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const owner = await register('pro');
+  const member = await register('pro');
+  
+  const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: member.id, role: 'editor', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
+  
+  const noteId = 'note-member-access';
+  // Note belongs to workspace but member is NOT a note collaborator
+  const { query } = require('../src/db');
+  await query(
+    `INSERT INTO sync_document_state (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, updated_at)
+     VALUES ($1, $2, 0, '', 0, 0, NOW())
+     ON CONFLICT (workspace_id, note_id) DO NOTHING`,
+    [ws.id, noteId]
+  );
+
+  const session = await createSession(member.id, { headers: {} });
+  const res = await inject(app, session, { token: session, workspaceId: ws.id, noteId });
+
+  // Workspace membership should grant access even without note collaboration
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().role, 'editor');
+});
+
+test('verify-session denies note-only access when user not collaborator', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const owner = await register('pro');
+  const outsider = await register('pro');
+  
+  const noteId = 'note-no-collab';
+  await models.NoteInvitation.create({
+    noteId, userId: owner.id, invitedBy: owner.id, role: 'editor', createdAt: new Date(),
+  });
+
+  const session = await createSession(outsider.id, { headers: {} });
+  const res = await inject(app, session, { token: session, noteId });
+
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'forbidden');
 });
