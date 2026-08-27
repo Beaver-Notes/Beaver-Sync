@@ -144,7 +144,7 @@ async function authRoutes(app) {
       if (resolved.error) {
         return reply.status(resolved.error.status).send(resolved.error.payload);
       }
-      return reply.send({ userId: result.userId, role: resolved.role });
+      return reply.send({ userId: result.userId, role: resolved.role, deviceId: result.deviceId });
     }
 
     if (noteId !== undefined) {
@@ -159,10 +159,10 @@ async function authRoutes(app) {
       if (resolved.error) {
         return reply.status(resolved.error.status).send(resolved.error.payload);
       }
-      return reply.send({ userId: result.userId, role: resolved.role });
+      return reply.send({ userId: result.userId, role: resolved.role, deviceId: result.deviceId });
     }
 
-    return reply.send({ userId: result.userId });
+    return reply.send({ userId: result.userId, deviceId: result.deviceId });
   });
 
   // One-time short-lived ticket so session tokens never appear in WS URLs (L-1).

@@ -45,7 +45,7 @@ test('verify-session grants editor role to a note collaborator via noteId', asyn
   const res = await inject(app, session, { token: session, noteId: 'note-editor' });
 
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json(), { userId: editor.id, role: 'editor' });
+  assert.deepEqual(res.json(), { userId: editor.id, role: 'editor', deviceId: null });
 });
 
 test('verify-session grants viewer role to a note collaborator via noteId', async (t) => {
@@ -61,7 +61,7 @@ test('verify-session grants viewer role to a note collaborator via noteId', asyn
   const res = await inject(app, session, { token: session, noteId: 'note-viewer' });
 
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json(), { userId: viewer.id, role: 'viewer' });
+  assert.deepEqual(res.json(), { userId: viewer.id, role: 'viewer', deviceId: null });
 });
 
 test('verify-session rejects a non-collaborator on a note', async (t) => {
@@ -93,7 +93,7 @@ test('verify-session falls through to the collaborator check when a non-member s
   const res = await inject(app, session, { token: session, workspaceId: 'some-ws', noteId: 'note-collab-ws' });
 
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json(), { userId: editor.id, role: 'editor' });
+  assert.deepEqual(res.json(), { userId: editor.id, role: 'editor', deviceId: null });
 });
 
 test('verify-session returns 403 when a non-member sends workspaceId + noteId and is not a collaborator either', async (t) => {
@@ -148,7 +148,7 @@ test('verify-session still validates workspace membership when noteId is absent'
   const memberSession = await createSession(member.id, { headers: {} });
   const memberRes = await inject(app, memberSession, { token: memberSession, workspaceId: ws.id });
   assert.equal(memberRes.statusCode, 200);
-  assert.deepEqual(memberRes.json(), { userId: member.id, role: 'viewer' });
+  assert.deepEqual(memberRes.json(), { userId: member.id, role: 'viewer', deviceId: null });
 
   const outsiderSession = await createSession(outsider.id, { headers: {} });
   const outsiderRes = await inject(app, outsiderSession, { token: outsiderSession, workspaceId: ws.id });

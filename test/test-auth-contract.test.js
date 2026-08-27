@@ -60,36 +60,36 @@ test.after(async () => {
 
 // --- Phase 1: INTERNAL_API_SECRET unset -------------------------------------
 
-test('valid session + workspaceId returns { userId, role }', async () => {
-  const token = await createSession('contract-user', {});
+test('valid session + workspaceId returns { userId, role, deviceId }', async () => {
+  const token = await createSession('contract-user', { headers: { 'x-device-id': 'contract-device' } });
   const res = await post({ token, workspaceId: 'contract-ws' });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json(), { userId: 'contract-user', role: 'owner' });
+  assert.deepEqual(res.json(), { userId: 'contract-user', role: 'owner', deviceId: 'contract-device' });
 });
 
-test('valid session without workspaceId/noteId returns only userId', async () => {
-  const token = await createSession('contract-user', {});
+test('valid session without workspaceId/noteId returns userId and deviceId', async () => {
+  const token = await createSession('contract-user', { headers: { 'x-device-id': 'contract-device' } });
   const res = await post({ token });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json(), { userId: 'contract-user' });
+  assert.deepEqual(res.json(), { userId: 'contract-user', deviceId: 'contract-device' });
 });
 
 test('noteId-only: viewer stays viewer, non-viewer becomes editor, outsider 403', async () => {
   await models.NoteInvitation.create({
     noteId: 'contract-note-v', userId: 'contract-user', invitedBy: 'contract-user', role: 'viewer', createdAt: new Date(),
   });
-  const viewerToken = await createSession('contract-user', {});
+  const viewerToken = await createSession('contract-user', { headers: { 'x-device-id': 'contract-device' } });
 
   const viewer = await post({ token: viewerToken, noteId: 'contract-note-v' });
   assert.equal(viewer.statusCode, 200);
-  assert.deepEqual(viewer.json(), { userId: 'contract-user', role: 'viewer' });
+  assert.deepEqual(viewer.json(), { userId: 'contract-user', role: 'viewer', deviceId: 'contract-device' });
 
   await models.NoteInvitation.create({
     noteId: 'contract-note-e', userId: 'contract-user', invitedBy: 'contract-user', role: 'editor', createdAt: new Date(),
   });
   const editor = await post({ token: viewerToken, noteId: 'contract-note-e' });
   assert.equal(editor.statusCode, 200);
-  assert.deepEqual(editor.json(), { userId: 'contract-user', role: 'editor' });
+  assert.deepEqual(editor.json(), { userId: 'contract-user', role: 'editor', deviceId: 'contract-device' });
 
   const outsider = await registerOutsider();
   const res = await post({ token: outsider.token, noteId: 'contract-note-e' });
@@ -131,7 +131,7 @@ test('with secret set: missing/incorrect x-internal-secret is 403, correct passe
       { 'x-internal-secret': SECRET }
     );
     assert.equal(ok.statusCode, 200);
-    assert.deepEqual(ok.json(), { userId: 'contract-user', role: 'owner' });
+    assert.deepEqual(ok.json(), { userId: 'contract-user', role: 'owner', deviceId: null });
   } finally {
     delete process.env.INTERNAL_API_SECRET;
   }
@@ -140,7 +140,7 @@ test('with secret set: missing/incorrect x-internal-secret is 403, correct passe
 // --- ws-ticket issue/redeem ---------------------------------------------------
 
 test('ws-ticket + verify-ticket round trip; redemption is single-use', async () => {
-  const token = await createSession('contract-user', {});
+  const token = await createSession('contract-user', { headers: { 'x-device-id': 'contract-device' } });
 
   const issued = await app.inject({
     method: 'POST',
@@ -162,6 +162,7 @@ test('ws-ticket + verify-ticket round trip; redemption is single-use', async () 
   const body = redeem.json();
   assert.equal(body.userId, 'contract-user');
   assert.equal(body.role, 'owner');
+  assert.equal(body.deviceId, 'contract-device');
 
   // Single-use: the atomic DELETE ... RETURNING already consumed the row.
   const second = await app.inject({
@@ -175,7 +176,7 @@ test('ws-ticket + verify-ticket round trip; redemption is single-use', async () 
 });
 
 test('verify-ticket honors x-internal-secret when set', async () => {
-  const token = await createSession('contract-user', {});
+  const token = await createSession('contract-user', { headers: { 'x-device-id': 'contract-device' } });
   const issued = await app.inject({
     method: 'POST',
     url: '/auth/ws-ticket',

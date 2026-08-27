@@ -157,9 +157,10 @@ function handleUpgrade(req, socket, head) {
     .then((auth) => {
       const userId = auth.userId;
       const role = auth.role ?? 'editor';
+      const deviceId = auth.deviceId ?? null;
       const readOnly = role === 'viewer' || role === 'guest';
       if (process.env.NODE_ENV !== 'production') {
-        console.log(`[ws-relay] upgrade accepted: ${documentName} user=${userId} role=${role}`);
+        console.log(`[ws-relay] upgrade accepted: ${documentName} user=${userId} role=${role}${deviceId ? ` deviceId=${deviceId}` : ''}`);
       }
 
       wss.handleUpgrade(req, socket, head, (ws) => {
@@ -172,6 +173,7 @@ function handleUpgrade(req, socket, head) {
           noteId: room.noteId,
           role,
           readOnly,
+          deviceId,
           clientId: Math.random().toString(36).slice(2),
         };
         ws._wsCtx = ctx;
