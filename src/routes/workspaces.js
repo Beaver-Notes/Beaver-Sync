@@ -533,6 +533,7 @@ async function workspaceRoutes(app) {
         role: m.role,
         hasWrappedKey: keySet.has(m.accountId),
         hasKeyPair: !!accountMap[m.accountId]?.kemPublicKey,
+        kemPublicKey: accountMap[m.accountId]?.kemPublicKey || null,
         username: accountMap[m.accountId]?.username ?? null,
         displayName: accountMap[m.accountId]?.displayName ?? null,
       })),

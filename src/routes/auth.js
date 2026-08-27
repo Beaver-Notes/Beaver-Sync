@@ -84,6 +84,16 @@ async function authRoutes(app) {
     return reply.send({ ok: true, deviceId: did, deviceCount: next.length });
   });
 
+  app.get('/keypair', {
+    ...authRateLimit,
+    preHandler: [app.authenticate],
+  }, async (req, reply) => {
+    const targetId = req.query?.userId ? String(req.query.userId) : req.userId;
+    const account = await Account.findById(targetId, { kemPublicKey: 1, deviceKeys: 1 }).lean();
+    if (!account) return reply.status(404).send({ error: 'not_found', message: 'User not found.' });
+    return reply.send({ kemPublicKey: account.kemPublicKey || null, deviceKeys: account.deviceKeys || [] });
+  });
+
   app.post('/verify-session', {
     config: {
       security: {
