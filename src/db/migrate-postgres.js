@@ -90,4 +90,84 @@ async function ensureSchema() {
   }
 }
 
-module.exports = { ensureSchema };
+/**
+ * One-shot migration: fold yjs_documents rows into yjs_doc_updates journal.
+ * Runs under advisory lock; idempotent (skips if journal already has data >= snapshot generation).
+ * Returns migration counts for recording.
+ */
+async function migrateYjsDocumentsToJournal() {
+  const lockClient = await getPool().connect();
+  try {
+    await lockClient.query('SELECT pg_advisory_lock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
+
+    // Check if yjs_documents table exists and has rows
+    const { rows: docRows } = await lockClient.query(`
+      SELECT doc_name, blob, updated_at FROM yjs_documents
+    `)
+
+    if (docRows.length === 0) {
+      return { migrated: 0, skipped: 0, deleted: 0 }
+    }
+
+    const { parseRoomName } = require('../persistence/yjs')
+    let migrated = 0
+    let skipped = 0
+    let deleted = 0
+
+    for (const row of docRows) {
+      const parsed = parseRoomName(row.doc_name)
+      if (!parsed || !parsed.noteId) {
+        console.warn(`[migration] Skipping invalid doc_name: ${row.doc_name}`)
+        skipped++
+        continue
+      }
+
+      const { workspaceId, noteId } = parsed
+
+      // Check if journal already has data for this document (idempotency)
+      const { rows: journalRows } = await lockClient.query(`
+        SELECT COUNT(*)::int AS count FROM yjs_doc_updates
+        WHERE workspace_id = $1 AND note_id = $2
+      `, [workspaceId, noteId])
+
+      if (journalRows[0]?.count > 0) {
+        console.log(`[migration] Journal already has data for ${workspaceId}/${noteId}, skipping`)
+        skipped++
+        // Still delete the yjs_documents row since journal is authoritative
+        await lockClient.query('DELETE FROM yjs_documents WHERE doc_name = $1', [row.doc_name])
+        deleted++
+        continue
+      }
+
+      // Insert the blob as a journal update
+      // Use a synthetic device_id/clock to represent the pre-migration state
+      const deviceId = 'relay'
+      const clock = Math.floor(new Date(row.updated_at).getTime() / 1000) // seconds since epoch
+      const ts = clock * 1000 // milliseconds
+      const updateId = `migration-${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+      await lockClient.query(`
+        INSERT INTO yjs_doc_updates (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (workspace_id, note_id, device_id, clock) DO NOTHING
+      `, [updateId, workspaceId, noteId, row.blob, 0, deviceId, clock, ts, row.updated_at])
+
+      // Delete the yjs_documents row
+      await lockClient.query('DELETE FROM yjs_documents WHERE doc_name = $1', [row.doc_name])
+
+      migrated++
+      deleted++
+      console.log(`[migration] Migrated ${row.doc_name} -> journal (${row.blob?.byteLength ?? 0} bytes)`)
+    }
+
+    return { migrated, skipped, deleted }
+  } finally {
+    try {
+      await lockClient.query('SELECT pg_advisory_unlock($1)', [SCHEMA_ADVISORY_LOCK_KEY])
+    } finally {
+      lockClient.release()
+    }
+  }
+}
+
+module.exports = { ensureSchema, migrateYjsDocumentsToJournal };

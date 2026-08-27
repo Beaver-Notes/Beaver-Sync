@@ -288,6 +288,7 @@ const ALLOWED_TABLES = new Set([
   'note_comments',
   // New org tables
   'organizations', 'org_members', 'org_subscriptions', 'org_invites',
+  // yjs_documents removed after migration to journal (Task 03.1) — table kept in schema for one release
 ]);
 
 function validateTableName(table) {
