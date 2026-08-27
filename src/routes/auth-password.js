@@ -18,6 +18,15 @@ const MAX_FAILED_ATTEMPTS = 10;
 const LOCKOUT_MINUTES = 15;
 const DUMMY_BCRYPT_HASH = '$2b$12$' + 'a'.repeat(53);
 
+function sanitizeUsername(raw) {
+  if (raw == null) return null;
+  if (typeof raw !== 'string') return null;
+  let v = raw.trim().replace(/[\x00-\x1F\x7F]/g, '').trim();
+  if (!v) return null;
+  if (v.length > 50) v = v.slice(0, 50);
+  return v;
+}
+
 const RegisterSchema = z.object({
   email:    z.string().email('Invalid email address').max(254),
   password: z
@@ -25,6 +34,7 @@ const RegisterSchema = z.object({
     .min(12, 'Password must be at least 12 characters')
     .max(128, 'Password too long'),
   kemPublicKey: z.string().max(4096).optional(),
+  username: z.string().max(50).optional(),
 });
 
 const LoginSchema = z.object({
@@ -70,8 +80,10 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
     if (kemPublicKey && !validatePublicKey(kemPublicKey)) {
       return reply.status(400).send({ error: 'validation_error', message: 'Invalid kemPublicKey.' });
     }
+    const sanitizedUsername = sanitizeUsername(parsed.data.username);
     const accountData = { emailHmac: emailHash, emailEncrypted, passwordHash, kdfSalt };
     if (kemPublicKey) accountData.kemPublicKey = kemPublicKey;
+    if (sanitizedUsername) accountData.username = sanitizedUsername;
     const account = await Account.create(accountData);
 
     const plan = isEnterpriseMode() ? 'enterprise' : 'free';
@@ -83,7 +95,8 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
     if (plan !== 'free') {
       orgId = require('crypto').randomUUID();
       const orgName = account.username || email.split('@')[0];
-      const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const slugBase = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'org';
+      const slug = `${slugBase}-${account.id.slice(0, 8)}`;
 
       await Organization.create({ id: orgId, nameEncrypted: '', slug, createdAt: new Date() });
       await OrgMember.create({ orgId, accountId: account.id, role: 'owner', createdAt: new Date() });
@@ -104,13 +117,20 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
     audit(req, 'register', {});
 
     setSessionCookieIfAvailable(app, reply, token);
+    const profileUsername = sanitizedUsername || null;
     return reply.status(201).send({
       token,
       user: {
         id:    account.id,
+        username: profileUsername,
         emailHash: account.emailHmac,
         kdfSalt: account.kdfSalt,
         kemPublicKey: account.kemPublicKey || null,
+      },
+      profile: {
+        id: account.id,
+        username: profileUsername,
+        emailHash: account.emailHmac,
       },
       organization: orgId ? {
         id: orgId,

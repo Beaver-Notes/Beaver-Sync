@@ -2,7 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS accounts (
   id                    TEXT PRIMARY KEY,
-  username              TEXT UNIQUE,
+  username              TEXT,
   email_hmac            TEXT NOT NULL UNIQUE,
   email_encrypted       TEXT,
   kem_public_key        TEXT,

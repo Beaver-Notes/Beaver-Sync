@@ -17,6 +17,13 @@ async function ensureSchema() {
     await lockClient.query('SELECT pg_advisory_lock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
     const schema = fs.readFileSync(schemaPath, 'utf8');
     await query(schema);
+    // 02.1: username is a display label, not unique — drop legacy UNIQUE constraint
+    try {
+      await query('ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_username_key');
+    } catch {}
+    try {
+      await query('DROP INDEX IF EXISTS accounts_username_key');
+    } catch {}
   } finally {
     try {
       await lockClient.query('SELECT pg_advisory_unlock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
