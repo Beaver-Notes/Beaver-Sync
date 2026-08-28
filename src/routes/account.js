@@ -1,6 +1,9 @@
 'use strict';
 
 const crypto = require('crypto');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const archiver = require('archiver');
 
 const { Account, Subscription, Device, Organization, OrgMember, OrgSubscription, Workspace } = require('../models');
@@ -527,37 +530,45 @@ async function accountRoutes(app) {
       });
     }
 
-    const zipBuf = await new Promise((resolve, reject) => {
-      const archive = archiver('zip', { zlib: { level: 0 } });
-      const chunks = [];
-
-      archive.on('data', (c) => { chunks.push(c); });
-      archive.on('end', () => resolve(Buffer.concat(chunks)));
-      archive.on('error', (err) => reject(err));
-
-      (async () => {
-        try {
-          const CONCURRENT = 8;
-          for (let i = 0; i < exportKeys.length; i += CONCURRENT) {
-            const chunk = exportKeys.slice(i, i + CONCURRENT);
-            const datas = await Promise.all(chunk.map((key) => r2.get(key).catch(() => null)));
-            for (let j = 0; j < chunk.length; j++) {
-              if (datas[j]) {
-                archive.append(datas[j], { name: chunk[j].slice(req.userId.length + 1) });
-              }
-            }
-          }
-        } catch (err) {
-          archive.emit('error', err);
-          return;
-        }
-        archive.finalize();
-      })().catch((err) => archive.emit('error', err));
-    });
-
     const exportId = crypto.randomUUID();
     const ek = r2.exportKey(req.userId, exportId);
-    await r2.put(ek, zipBuf, 'application/zip');
+    const tmpPath = path.join(os.tmpdir(), `beaver-export-${exportId}.zip`);
+    let sizeBytes;
+    try {
+      await new Promise((resolve, reject) => {
+        const output = fs.createWriteStream(tmpPath);
+        const archive = typeof archiver === 'function' ? archiver('zip', { zlib: { level: 0 } }) : new archiver.ZipArchive({ zlib: { level: 0 } });
+        output.on('close', resolve);
+        output.on('error', reject);
+        archive.on('error', reject);
+        archive.pipe(output);
+
+        (async () => {
+          try {
+            const CONCURRENT = 8;
+            for (let i = 0; i < exportKeys.length; i += CONCURRENT) {
+              const chunk = exportKeys.slice(i, i + CONCURRENT);
+              const datas = await Promise.all(chunk.map((key) => r2.get(key).catch(() => null)));
+              for (let j = 0; j < chunk.length; j++) {
+                if (datas[j]) {
+                  archive.append(datas[j], { name: chunk[j].slice(req.userId.length + 1) });
+                }
+              }
+            }
+          } catch (err) {
+            archive.emit('error', err);
+            return;
+          }
+          archive.finalize();
+        })().catch((err) => archive.emit('error', err));
+      });
+
+      const stat = await fs.promises.stat(tmpPath);
+      sizeBytes = stat.size;
+      await r2.put(ek, fs.createReadStream(tmpPath), 'application/zip');
+    } finally {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+    }
 
     const url = await r2.presignGet(ek, EXPORT_URL_TTL);
 
@@ -565,7 +576,7 @@ async function accountRoutes(app) {
       url,
       expiresInSeconds: EXPORT_URL_TTL,
       objectCount: exportKeys.length,
-      sizeBytes: zipBuf.length,
+      sizeBytes,
       note: 'This export URL will expire and the archive will be deleted automatically.',
     });
   });
