@@ -267,6 +267,14 @@ async function buildApp() {
     });
   });
 
+  // Scheduled YJS GC/compaction (D18) — env-toggled, advisory-locked
+  try {
+    const { startGcScheduler } = require('./jobs/yjs-gc');
+    startGcScheduler(app);
+  } catch (err) {
+    app.log.warn({ err: err.message }, '[yjs-gc] scheduler init failed (non-fatal)');
+  }
+
   return app;
 }
 
