@@ -289,6 +289,8 @@ const ALLOWED_TABLES = new Set([
   // New org tables
   'organizations', 'org_members', 'org_subscriptions', 'org_invites',
   // yjs_documents removed after migration to journal (Task 03.1) — table kept in schema for one release
+  'yjs_documents',
+  'asset_reservations',
 ]);
 
 function validateTableName(table) {
@@ -347,6 +349,7 @@ const ALLOWED_COLUMNS = {
     'created_at']),
   org_invites: new Set(['id', 'org_id', 'created_by', 'token_hash', 'role', 'require_approval',
     'approved_by', 'max_uses', 'used_count', 'expires_at', 'revoked', 'created_at']),
+  asset_reservations: new Set(['id', 'account_id', 'workspace_id', 'asset_key', 'size_bytes', 'status', 'expires_at', 'created_at']),
 };
 
 function assertColumn(table, col) {

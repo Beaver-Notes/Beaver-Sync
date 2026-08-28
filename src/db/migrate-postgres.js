@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { query, getPool } = require('./postgres');
 
 const SCHEMA_ADVISORY_LOCK_KEY = 930743;
@@ -81,6 +82,21 @@ async function ensureSchema() {
     try {
       await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS org_id TEXT REFERENCES organizations(id)');
     } catch {}
+    // 04.1: asset quota reservations (presign preflight + reap)
+    try {
+      await query(`CREATE TABLE IF NOT EXISTS asset_reservations (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+        asset_key TEXT NOT NULL,
+        size_bytes BIGINT NOT NULL CHECK(size_bytes >= 0),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed')),
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL
+      )`);
+    } catch {}
+    try { await query('CREATE INDEX IF NOT EXISTS idx_asset_reservations_account ON asset_reservations(account_id, status, expires_at)'); } catch {}
+    try { await query('CREATE INDEX IF NOT EXISTS idx_asset_reservations_expires ON asset_reservations(expires_at) WHERE status = \'pending\''); } catch {}
   } finally {
     try {
       await lockClient.query('SELECT pg_advisory_unlock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
@@ -144,7 +160,7 @@ async function migrateYjsDocumentsToJournal() {
       const deviceId = 'relay'
       const clock = Math.floor(new Date(row.updated_at).getTime() / 1000) // seconds since epoch
       const ts = clock * 1000 // milliseconds
-      const updateId = `migration-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      const updateId = `migration-${crypto.randomUUID()}`
 
       await lockClient.query(`
         INSERT INTO yjs_doc_updates (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at)

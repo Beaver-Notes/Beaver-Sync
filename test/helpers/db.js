@@ -68,6 +68,7 @@ const TABLES = [
   'compaction_locks', 'subscriptions', 'commits', 'sessions', 'ws_tickets', 'mfa_challenges',
   'devices', 'credentials', 'webauthn_challenges', 'quick_connect_codes',
   'email_aliases', 'audit_logs', 'sso_oidc_states', 'sso_configs',
+  'asset_reservations',
   'workspaces',
   'org_keys', 'org_subscriptions', 'org_invites', 'org_members',
   'organizations',

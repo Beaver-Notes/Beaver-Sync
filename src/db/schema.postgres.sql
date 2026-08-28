@@ -431,3 +431,17 @@ CREATE TABLE IF NOT EXISTS yjs_documents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_yjs_documents_updated ON yjs_documents(updated_at);
+
+CREATE TABLE IF NOT EXISTS asset_reservations (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+  asset_key TEXT NOT NULL,
+  size_bytes BIGINT NOT NULL CHECK(size_bytes >= 0),
+  status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed')),
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_reservations_account ON asset_reservations(account_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_asset_reservations_expires ON asset_reservations(expires_at) WHERE status = 'pending';

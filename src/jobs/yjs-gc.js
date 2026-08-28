@@ -156,11 +156,20 @@ async function runGc(opts = {}) {
   const now = opts.now ?? Date.now();
   const start = Date.now();
 
+  // Piggyback: reap expired asset reservations (04.1). Best-effort, advisory-locked inside helper.
+  let reapedReservations = 0;
+  try {
+    const { reapExpiredReservations } = require('../db/asset-reservations');
+    reapedReservations = await reapExpiredReservations();
+  } catch (err) {
+    console.warn('[yjs-gc] asset reservation reap failed:', err.message);
+  }
+
   // Global advisory lock so scale-out instances don't double-run batch
   const locked = await tryGlobalLock();
   if (!locked) {
     console.log('[yjs-gc] skipped: gc already running (advisory lock held)');
-    return { skipped: true, reason: 'locked' };
+    return { skipped: true, reason: 'locked', reapedReservations };
   }
 
   let docsCompacted = 0;
@@ -208,8 +217,8 @@ async function runGc(opts = {}) {
     const swept = await sweepOrphanedRelayArtifacts();
 
     const duration = Date.now() - start;
-    console.log(`[yjs-gc] workspaces=${workspacesProcessed} notes=${notesProcessed} compacted=${docsCompacted} reclaimed=${bytesReclaimed} swept=${swept} duration=${duration}ms`);
-    return { workspacesProcessed, notesProcessed, docsCompacted, bytesReclaimed, swept, duration };
+    console.log(`[yjs-gc] workspaces=${workspacesProcessed} notes=${notesProcessed} compacted=${docsCompacted} reclaimed=${bytesReclaimed} swept=${swept} reapedReservations=${reapedReservations} duration=${duration}ms`);
+    return { workspacesProcessed, notesProcessed, docsCompacted, bytesReclaimed, swept, reapedReservations, duration };
   } finally {
     await unlockGlobal();
   }
