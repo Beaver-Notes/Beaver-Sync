@@ -71,7 +71,15 @@ This starts Postgres, MinIO, the API, the WebSocket relay (`ws-relay`), and a sc
 docker compose -f docker-compose.enterprise.yml up -d
 ```
 
-Includes Postgres, MinIO, GlitchTip, the API, and the WebSocket relay. All features (SSO, audit logs, admin, workspaces, real-time collab) work offline with `ENTERPRISE_MODE=true`. Optional license key validation via `LICENSE_SECRET`.
+Includes Postgres, MinIO, GlitchTip, the API, and the WebSocket relay. Offline HMAC licenses: `BL<base64url(payload)>.<base64url(HMAC-SHA256(payload, LICENSE_SECRET))>` with canonical JSON `{licensee, plan:'enterprise', seats?, expiry}`. Verification is timing-safe; expired licenses have a 14-day grace period (warning logged). Seats is a soft limit (warn only).
+
+- **Development:** `ENTERPRISE_MODE=true` alone unlocks enterprise features.
+- **Production (`NODE_ENV=production`):** a valid license is required — set `LICENSE_KEY` (the `BL...` token) and `LICENSE_SECRET` (HMAC secret). `ENTERPRISE_MODE=true` alone is insufficient. Generate a license offline:
+  ```bash
+  LICENSE_SECRET=$(openssl rand -hex 32) node scripts/generate-license.js --licensee "Acme Corp" --expiry 2027-08-30 --seats 50
+  # then set LICENSE_SECRET and LICENSE_KEY in .env
+  ```
+  The generator (`scripts/generate-license.js`) also accepts `LICENSEE`/`EXPIRY`/`SEATS` env vars or `--stdin` JSON; it is excluded from Docker images via `.dockerignore` and only `src/lib/license.js` reads `LICENSE_SECRET` at runtime.
 
 ## Deployment (VPS)
 

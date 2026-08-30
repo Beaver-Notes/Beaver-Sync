@@ -86,6 +86,24 @@ async function buildApp() {
   const mlkem = require('./lib/mlkem');
   await mlkem.init();
 
+  // Enterprise license grace/expiry warnings (offline HMAC, 14d grace, seats soft-warn)
+  if (process.env.ENTERPRISE_MODE === 'true') {
+    try {
+      const lic = require('./lib/license');
+      const s = lic.getLicenseStatus();
+      if (process.env.NODE_ENV === 'production' && !s.valid) {
+        console.warn(`[license] ENTERPRISE_MODE=true but license invalid (${s.reason}) — enterprise features disabled`);
+      } else if (s.valid && s.inGrace) {
+        console.warn(`[license] license for ${s.payload.licensee} expired ${new Date(s.expiryMs).toISOString().slice(0,10)} — in ${lic.GRACE_DAYS}d grace (${s.graceDaysLeft}d left)`);
+      } else if (s.valid && s.expiringSoon) {
+        console.warn(`[license] license for ${s.payload.licensee} expires ${s.payload.expiry} — within ${lic.GRACE_DAYS}d grace window`);
+      }
+      if (s.valid && s.payload?.seats) {
+        // soft-warn only; caller checks via checkSeats for actual usage
+      }
+    } catch (_) {}
+  }
+
   const app = Fastify({
     logger: {
       level: process.env.NODE_ENV === 'production' ? 'warn' : 'info',

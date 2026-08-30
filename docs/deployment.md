@@ -15,11 +15,12 @@ The stack includes Postgres, MinIO (object storage), the API, the WebSocket rela
 
 ```bash
 cp .env.example .env
-# Set ENTERPRISE_MODE=true and LICENSE_SECRET in .env
+# Set ENTERPRISE_MODE=true, LICENSE_SECRET and LICENSE_KEY in .env
+# Generate a license: LICENSE_SECRET=$(openssl rand -hex 32) node scripts/generate-license.js --licensee "Acme" --expiry 2027-08-30 --seats 50
 docker compose -f docker-compose.enterprise.yml up -d
 ```
 
-Adds GlitchTip (error monitoring) to the stack. All features work offline.
+Adds GlitchTip (error monitoring) to the stack. Licenses are offline HMAC (`BL<base64url(payload)>.<base64url(HMAC)>)`, canonical JSON `{licensee, plan:'enterprise', seats?, expiry}`), timing-safe verified, 14-day grace after expiry, seats soft-warn. In development `ENTERPRISE_MODE=true` alone unlocks enterprise; in production (`NODE_ENV=production`) a valid `LICENSE_KEY` is required — `ENTERPRISE_MODE=true` alone is insufficient. Only `src/lib/license.js` reads `LICENSE_SECRET` at runtime; `scripts/generate-license.js` is excluded from images via `.dockerignore`.
 
 ## VPS Deployment
 
