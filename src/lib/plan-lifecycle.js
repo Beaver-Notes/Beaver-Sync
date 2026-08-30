@@ -51,6 +51,25 @@ async function checkDowngrade(accountId, fromPlan, toPlan) {
   return { ok: true };
 }
 
+async function downgradeAtPeriodEnd(accountId) {
+  const sub = await Subscription.findOne({ accountId }).lean();
+  if (!sub || sub.plan === 'free') return { alreadyFree: true, ok: true };
+  const renewsAtMs = sub.renewsAt ? new Date(sub.renewsAt).getTime() : 0;
+  if (renewsAtMs && renewsAtMs > Date.now()) {
+    return { pending: true, renewsAt: sub.renewsAt, ok: false };
+  }
+  const check = await checkDowngrade(accountId, sub.plan, 'free');
+  if (!check.ok) return check;
+  await Subscription.updateOne({ accountId }, { $set: { plan: 'free', status: 'expired', storageQuotaBytes: getQuotaBytes('free') } });
+  try {
+    const owned = await OrgMember.find({ accountId, role: 'owner' }).lean();
+    for (const m of owned) {
+      await OrgSubscription.updateOne({ orgId: m.orgId }, { $set: { plan: 'free', status: 'expired', storageQuotaBytes: getQuotaBytes('free') } });
+    }
+  } catch (_) {}
+  return { ok: true };
+}
+
 // Lower bound (epoch ms) for serving history to a plan. null days (enterprise)
 // means unlimited history → returns 0 so no clamp applies.
 function historyCutoffTs(plan, now = Date.now()) {
@@ -77,4 +96,4 @@ async function historyCutoffForAccount(accountId, workspaceId = null) {
   return { plan, cutoffTs: historyCutoffTs(plan) };
 }
 
-module.exports = { ensurePaidProvisioning, checkDowngrade, historyCutoffTs, historyCutoffForAccount };
+module.exports = { ensurePaidProvisioning, checkDowngrade, downgradeAtPeriodEnd, historyCutoffTs, historyCutoffForAccount };
