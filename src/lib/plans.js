@@ -56,6 +56,23 @@ const PLANS = {
 
 const VALID_PLANS = new Set(Object.keys(PLANS));
 
+const VALID_INTERVALS = new Set(['monthly', 'yearly']);
+const SELF_SERVE_PLANS = new Set(['starter', 'pro', 'team']);
+
+function getStripePriceId(plan, interval) {
+  if (!plan || !interval) return null;
+  const key = `STRIPE_PRICE_${String(plan).toUpperCase()}_${String(interval).toUpperCase()}`;
+  return process.env[key] || null;
+}
+
+function isSelfServePlan(plan) {
+  return SELF_SERVE_PLANS.has(plan);
+}
+
+function isValidInterval(interval) {
+  return VALID_INTERVALS.has(interval);
+}
+
 function getPlan(plan) {
   return PLANS[plan] || PLANS.free;
 }
@@ -99,6 +116,8 @@ function resolvePlanForAccount({ orgSub, sub } = {}) {
 }
 
 module.exports = {
-  VALID_PLANS, getPlan, getQuotaBytes, getHistoryDays,
+  VALID_PLANS, VALID_INTERVALS, SELF_SERVE_PLANS,
+  getPlan, getQuotaBytes, getHistoryDays,
   getDeviceLimit, getFlags, isFreePlan, isPaidPlan, resolvePlanForAccount,
+  getStripePriceId, isSelfServePlan, isValidInterval,
 };

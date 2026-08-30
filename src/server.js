@@ -195,6 +195,7 @@ async function buildApp() {
   await app.register(require('./routes/snapshot'),    { prefix: '/snapshot' });
   await app.register(require('./routes/account'),     { prefix: '/account' });
   await app.register(require('./routes/plans'),       { prefix: '/plans' });
+  await app.register(require('./routes/billing'),     { prefix: '/billing' });
   await app.register(require('./routes/email'),      { prefix: '' });
   await app.register(require('./routes/collaboration'), { prefix: '/collaboration' });
   await app.register(require('./routes/workspaces'),   { prefix: '/workspaces' });
