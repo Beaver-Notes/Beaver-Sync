@@ -19,7 +19,7 @@ const decoding = require('lib0/decoding');
 const { createPostgresPersistence } = require('./db/yjs-persistence');
 const { verifySession, verifyTicket } = require('./ws-relay-auth');
 const { MSG_SYNC, MSG_AWARENESS, handleSyncMessage, handleAwarenessMessage } = require('./ws-relay-protocol');
-const { startSyncNotificationListener } = require('./ws-relay-notifications');
+const { startSyncNotificationListener, stopSyncNotificationListener } = require('./ws-relay-notifications');
 
 const WS_RELAY_PORT = parseInt(process.env.WS_RELAY_PORT ?? '8080', 10);
 
@@ -246,7 +246,7 @@ function handleConnection(ws, documentName, ctx) {
     if (room.conns.size === 0) {
       schedulePersist(documentName);
       // Don't destroy doc immediately — keep for persistence
-      setTimeout(() => {
+      const t = setTimeout(() => {
         const current = rooms.get(documentName);
         if (current && current.conns.size === 0) {
           current.awareness.destroy();
@@ -254,6 +254,7 @@ function handleConnection(ws, documentName, ctx) {
           rooms.delete(documentName);
         }
       }, 30_000);
+      if (t.unref) t.unref();
     }
   });
 }
@@ -261,6 +262,8 @@ function handleConnection(ws, documentName, ctx) {
 // --- Server startup ---
 
 let wss;
+let _httpServer;
+let _heartbeatInterval;
 
 async function startWsRelay() {
   const postgres = require('./db/postgres');
@@ -275,23 +278,27 @@ async function startWsRelay() {
   });
 
   wss = new WebSocketServer({ noServer: true });
-
-  server.listen(WS_RELAY_PORT, () => {
-    console.log(`[ws-relay] listening on port ${WS_RELAY_PORT}`);
-  });
-
-  server.on('upgrade', handleUpgrade);
-
-  // Heartbeat to detect dead connections
-  const heartbeatInterval = setInterval(() => {
+  _httpServer = server;
+  _heartbeatInterval = setInterval(() => {
     wss.clients.forEach((ws) => {
       if (!ws.isAlive) return ws.terminate();
       ws.isAlive = false;
       ws.ping();
     });
   }, 30_000);
+  if (_heartbeatInterval.unref) _heartbeatInterval.unref();
 
-  wss.on('close', () => clearInterval(heartbeatInterval));
+  server.listen(WS_RELAY_PORT, () => {
+    console.log(`[ws-relay] listening on port ${WS_RELAY_PORT}`);
+  });
+  if (server.unref) server.unref();
+
+  server.on('upgrade', handleUpgrade);
+
+  wss.on('close', () => {
+    clearInterval(_heartbeatInterval);
+    try { stopSyncNotificationListener(); } catch {}
+  });
 
   await startSyncNotificationListener(rooms, sendText);
 
@@ -301,7 +308,7 @@ async function startWsRelay() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[ws-relay] Received ${signal} — flushing persists`);
-    try { clearInterval(heartbeatInterval); } catch {}
+    try { clearInterval(_heartbeatInterval); } catch {}
     // Flush every pending debounce timer immediately
     for (const timer of persistTimers.values()) clearTimeout(timer);
     persistTimers.clear();
@@ -330,7 +337,27 @@ async function startWsRelay() {
   return wss;
 }
 
-module.exports = { startWsRelay, parseRoomName };
+async function stopWsRelay() {
+  try { clearInterval(_heartbeatInterval); } catch {}
+  for (const t of persistTimers.values()) clearTimeout(t);
+  persistTimers.clear();
+  try { stopSyncNotificationListener(); } catch {}
+  // terminate all ws clients
+  try { wss?.clients?.forEach((c) => { try { c.terminate(); } catch {} }); } catch {}
+  try { wss?.close(); } catch {}
+  try { await new Promise((res) => _httpServer ? _httpServer.close(res) : res()); } catch {}
+  _httpServer = null;
+  // destroy all room docs immediately so no 30s timer remains
+  for (const [, room] of rooms) {
+    try { room.awareness.destroy(); } catch {}
+    try { room.doc.destroy(); } catch {}
+  }
+  rooms.clear();
+  for (const c of wsToClientIds.keys()) wsToClientIds.delete(c);
+  wss = null;
+}
+
+module.exports = { startWsRelay, stopWsRelay, parseRoomName };
 
 if (require.main === module) {
   startWsRelay().catch((err) => {

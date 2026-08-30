@@ -35,6 +35,7 @@ function parseRoomName(documentName) {
 
 let app;
 let wsRelayServer;
+let stopRelay;
 let apiPort;
 let startWsRelay;
 let verifyTicket;
@@ -114,6 +115,7 @@ test.before(async () => {
   // Now require ws-relay after AUTH_BACKEND_URL is set
   const wsRelay = require('../src/ws-relay');
   startWsRelay = wsRelay.startWsRelay;
+  stopRelay = wsRelay.stopWsRelay;
   const wsRelayAuth = require('../src/ws-relay-auth');
   verifyTicket = wsRelayAuth.verifyTicket;
 
@@ -124,9 +126,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  if (wsRelayServer) {
-    wsRelayServer.close();
-  }
+  try { if (stopRelay) await stopRelay(); else if (wsRelayServer) wsRelayServer.close(); } catch {}
   await app.close();
   await close();
 });

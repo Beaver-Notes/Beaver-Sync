@@ -4,7 +4,12 @@
 // relay clients in the affected workspace. Receives the relay's room map and
 // text sender rather than reaching into relay module state.
 
+let _notifyClient = null;
+let _notifyReconnectTimer = null;
+let _stopping = false;
+
 async function startSyncNotificationListener(rooms, sendText) {
+  _stopping = false;
   let pool;
   try {
     const postgres = require('./db/postgres');
@@ -22,6 +27,7 @@ async function startSyncNotificationListener(rooms, sendText) {
     if (client) return;
     try {
       client = await pool.connect();
+      _notifyClient = client;
       await client.query('LISTEN sync_notifications');
       reconnectAttempts = 0;
       if (process.env.NODE_ENV !== 'production') {
@@ -56,8 +62,10 @@ async function startSyncNotificationListener(rooms, sendText) {
       });
 
       const teardown = () => {
+        if (_stopping) return;
         if (client) {
-          client.release(true);
+          try { client.release(true); } catch {}
+          if (_notifyClient === client) _notifyClient = null;
           client = null;
         }
         scheduleReconnect();
@@ -66,18 +74,33 @@ async function startSyncNotificationListener(rooms, sendText) {
       client.on('end', teardown);
     } catch (err) {
       console.warn('[ws-relay] Failed to start sync notification listener:', err.message);
-      if (client) { client.release(true); client = null; }
-      scheduleReconnect();
+      if (client) { try { client.release(true); } catch {} client = null; }
+      if (!_stopping) scheduleReconnect();
     }
   }
 
   function scheduleReconnect() {
     const delay = Math.min(5000 * 2 ** reconnectAttempts, MAX_DELAY);
     reconnectAttempts++;
-    setTimeout(() => { listen().catch((err) => console.warn('[ws-relay] reconnect failed:', err?.message)); }, delay);
+    _notifyReconnectTimer = setTimeout(() => { listen().catch((err) => console.warn('[ws-relay] reconnect failed:', err?.message)); }, delay);
   }
 
   await listen();
 }
 
-module.exports = { startSyncNotificationListener };
+function stopSyncNotificationListener() {
+  _stopping = true;
+  try { if (_notifyReconnectTimer) clearTimeout(_notifyReconnectTimer); } catch {}
+  _notifyReconnectTimer = null;
+  if (_notifyClient) {
+    try {
+      _notifyClient.removeAllListeners('notification');
+      _notifyClient.removeAllListeners('error');
+      _notifyClient.removeAllListeners('end');
+      _notifyClient.release(true);
+    } catch {}
+    _notifyClient = null;
+  }
+}
+
+module.exports = { startSyncNotificationListener, stopSyncNotificationListener };
