@@ -316,3 +316,5 @@ async function syncStateRoutes(app) {
 }
 
 module.exports = syncStateRoutes;
+module.exports.getObjectStorage = getObjectStorage;
+module.exports.snapshotKeyFor = snapshotKeyFor;

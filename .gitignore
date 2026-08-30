@@ -5,6 +5,11 @@ node_modules/
 .test-data/
 mlkem-seed.hex
 fly/.env.secrets
+backups/*.sql.gz
+backups/*.dump
 
 # Email preview output
 .email-preview/
+
+# Local planning docs - NEVER commit
+docs/plans/

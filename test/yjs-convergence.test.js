@@ -76,11 +76,7 @@ test('cross-path convergence: relay-only edit is visible to REST puller', async 
   const relayText = relayDoc.getText('content');
 
   // Bind state - this should load from journal (which now has the migrated snapshot)
-  await new Promise((resolve, reject) => {
-    relayPersistence.bindState(docName, relayDoc);
-    // Give it a moment to load async
-    setTimeout(resolve, 100);
-  });
+  await relayPersistence.bindState(docName, relayDoc);
 
   // Verify initial content loaded from migration
   assert.equal(relayText.toString(), 'initial relay content');
@@ -126,10 +122,7 @@ test('relay bindState reconstructs from S3 snapshot + journal tail', async () =>
   // Note: Full S3 integration requires storage service, so we test the journal path
 
   const relayDoc = new Y.Doc();
-  await new Promise((resolve) => {
-    relayPersistence.bindState(docName, relayDoc);
-    setTimeout(resolve, 100);
-  });
+  await relayPersistence.bindState(docName, relayDoc);
 
   // Should not throw, doc should be empty (no prior data)
   const relayText = relayDoc.getText('content');
@@ -149,15 +142,12 @@ test('quota netting applies to relay-originated updates via journal', async () =
 
   const relayDoc = new Y.Doc();
   const relayText = relayDoc.getText('content');
-  relayText.insert(0, 'quota test');
 
   // bindState must be called first to register the doc and set dirty tracking
-  await new Promise((resolve) => {
-    relayPersistence.bindState(docName, relayDoc);
-    setTimeout(resolve, 50);
-  });
+  await relayPersistence.bindState(docName, relayDoc);
 
-  // Now make it dirty and persist
+  // Now make edits and persist
+  relayText.insert(0, 'quota test');
   relayText.insert(relayText.length, ' more');
   await relayPersistence.writeState(docName, relayDoc);
 

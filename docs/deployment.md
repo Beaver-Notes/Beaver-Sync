@@ -9,7 +9,7 @@
 5. `docker compose up -d`
 6. Access at http://localhost:4000
 
-The stack includes Postgres, MinIO (object storage), API, and Hocuspocus (WebSocket). Data persists in Docker volumes.
+The stack includes Postgres, MinIO (object storage), the API, the WebSocket relay (`ws-relay`, port 8080), and a scheduled Postgres backup sidecar. Data persists in Docker volumes.
 
 ### Enterprise Self-Host
 
@@ -21,75 +21,67 @@ docker compose -f docker-compose.enterprise.yml up -d
 
 Adds GlitchTip (error monitoring) to the stack. All features work offline.
 
-## Fly.io
+## VPS Deployment
 
 ### Prerequisites
 
-1. [Fly.io](https://fly.io) account + `flyctl` CLI installed
-2. Cloudflare R2 bucket created with API token
-3. DNS records pointing to Fly for your custom domain
-4. Fly Postgres cluster (or external Postgres)
+1. A VPS with Docker + Docker Compose
+2. DNS records pointing your domain at the VPS
+3. External or co-located Postgres reachable via `DATABASE_URL`
+4. Cloudflare R2 bucket (or self-hosted MinIO) for blob storage
 
 ### Deploy
 
 ```bash
-# 1. Install flyctl and authenticate
-curl -L https://fly.io/install.sh | sh
-fly auth login
+# 1. Configure secrets
+cp .env.example .env
+bash scripts/generate-keys.sh   # JWT signing keys + ML-KEM seed
+# Edit .env with real values (including DATABASE_URL)
 
-# 2. Configure secrets
-cp fly/.env.secrets.example fly/.env.secrets
-# Edit fly/.env.secrets with real values (including DATABASE_URL)
-
-# 3. Run deploy script
-bash fly/deploy.sh
+# 2. Start the stack
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-The deploy script:
-- Creates Fly apps (API, Hocuspocus, GlitchTip)
-- Sets all secrets via `fly secrets set`
-- Deploys with rolling strategy (`--strategy immediate`)
-- Initializes JWT keys on the API volume
-- Configures your custom domain TLS certificate
+CI/CD: on push to `main`, GitHub Actions runs lint + tests against Postgres, then — when the repo variable `DEPLOY_TARGET=vps` is set and secrets `VPS_HOST` / `VPS_USERNAME` / `VPS_SSH_KEY` are configured — pulls and redeploys on the VPS over SSH.
 
-### Update
+### Update / Rollback
 
 ```bash
-# Deploy individual services
-fly deploy fly/api/
-fly deploy fly/hocuspocus/
-fly deploy fly/glitchtip/
+git pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-### Rollback
+Rollback: check out the previous release tag/commit and redeploy the same way. Both processes handle SIGTERM gracefully (in-flight Yjs persists are flushed before exit).
+
+### Scaling
+
+The API is stateless and scales horizontally via the scale overlay, which adds Redis as the shared rate-limit store:
 
 ```bash
-fly releases rollback -a <app-name>
+export REDIS_URL=redis://redis:6379
+docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale api=3
 ```
 
-## Scaling
+The WebSocket relay must remain a single instance — collaboration rooms live in memory (`ws-relay.js`). Caddy's sticky-cookie routing keeps clients pinned to it; do not run multiple relay replicas without adding a room-routing layer first.
 
-### Add API replica
+### Backups
+
+The `pg-backup` sidecar dumps Postgres on a schedule:
+
+- `BACKUP_INTERVAL_SECONDS` — cadence (set `0` to disable)
+- `BACKUP_RETENTION_DAYS` — prune window (newest dump always kept)
+- Dumps land in `./backups` as gzipped `pg_dump` files
+
+Restore drill (run quarterly):
 
 ```bash
-fly m clone --app beaver-sync-api
+scripts/restore-postgres.sh backups/pg-<timestamp>.sql.gz <scratch-db>
 ```
 
-### Upgrade machine
+### Monitor
 
 ```bash
-fly m scale shared-cpu-2x --app beaver-sync-api
-```
-
-### Scale Postgres to 3-node
-
-```bash
-fly mpg scale --plan basic --replicas 3
-```
-
-## Monitor
-
-```bash
-fly logs -a beaver-sync-api
-fly status --app beaver-sync-api
+docker compose logs -f api ws-relay
+docker compose ps
+curl -fsS http://localhost:4000/health   # 503 when the DB is unreachable
 ```

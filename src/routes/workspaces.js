@@ -10,6 +10,53 @@ const { isEnterpriseMode } = require('../lib/license');
 const { resolveOrgSubscription } = require('../lib/plan-resolution');
 const { hashSessionId } = require('../lib/crypto');
 
+const EMOJI_ALLOWLIST = Object.freeze([
+  '📁', '📂', '🗂️', '📋', '📝', '📄', '📃', '📑', '📦', '🎒',
+  '💼', '🗃️', '🗄️', '📊', '📈', '📉', '🧮', '📐', '📏', '✏️',
+  '📌', '📍', '🏷️', '🔖', '🏷️', '🗒️', '🗓️', '📅', '📆', '📇',
+  '📰', '📜', '📖', '📕', '📗', '📘', '📙', '📚', '📓', '📔',
+  '🎯', '🎲', '🎮', '🕹️', '🧩', '🎨', '🖼️', '🎪', '🎭', '🎬',
+  '🏠', '🏢', '🏭', '🏫', '🏥', '🏦', '🏛️', '⛪', '🕌', '🕍',
+  '⛩️', '🏟️', '🎡', '🎢', '💒', '🏰', '🏯', '🏰', '🗼', '🗽',
+  '⭐', '🌟', '✨', '💫', '⚡', '🔥', '💎', '💍', '🏆', '🥇',
+  '🥈', '🥉', '🏅', '🎖️', '🏵️', '🎗️', '🎀', '🎁', '🎊', '🎉',
+  '🌈', '☀️', '🌤️', '⛅', '🌥️', '☁️', '🌦️', '🌧️', '⛈️', '🌩️',
+  '🌨️', '❄️', '☃️', '⛄', '☄️', '🌙', '🌙', '🌛', '🌜', '☀️',
+  '🪐', '⭐', '🌌', '🌠', '☄️', '🚀', '🛸', '🛰️', '🌍', '🌎',
+  '🌏', '🌐', '🗺️', '🧭', '⛰️', '🏔️', '🌋', '🗻', '🏕️', '⛺',
+  '🌲', '🌳', '🌴', '🌵', '🌿', '☘️', '🍀', '🍁', '🍂', '🍃',
+  '🍄', '🌾', '💐', '🌷', '🌹', '🥀', '🌺', '🌸', '🌼', '🌻',
+  '🌱', '🌿', '🌵', '🎄', '🎋', '🎍', '🎍', '🍂', '🍃', '🍁',
+]);
+
+const COLOR_SWATCHES = Object.freeze([
+  '#6366f1', '#8b5cf6', '#d946ef', '#ec4899', '#f43f5e',
+  '#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16',
+  '#22c55e', '#10b981', '#14b8a6', '#06b6d4', '#0ea5e9',
+  '#3b82f6', '#6366f1', '#8b5cf6', '#a855f7', '#d946ef',
+]);
+
+function validateEmoji(emoji) {
+  if (!emoji || typeof emoji !== 'string') return null;
+  const trimmed = emoji.trim();
+  if (!trimmed) return null;
+  if (EMOJI_ALLOWLIST.includes(trimmed)) return trimmed;
+  // Accept only single Unicode codepoint emojis (no ZWJ sequences, no skin tone modifiers)
+  if (trimmed.length === 1 && /^[\u{1F300}-\u{1FAFF}]$/u.test(trimmed)) return trimmed;
+  return null;
+}
+
+function validateColor(color) {
+  if (!color || typeof color !== 'string') return null;
+  const trimmed = color.trim();
+  if (!/^#[0-9A-Fa-f]{6}$/.test(trimmed)) return null;
+  if (!COLOR_SWATCHES.includes(trimmed.toLowerCase())) return null;
+  return trimmed.toLowerCase();
+}
+
+const DEFAULT_EMOJI = EMOJI_ALLOWLIST[0];
+const DEFAULT_COLOR = COLOR_SWATCHES[0];
+
 const BODY_LIMIT = parseInt(process.env.WORKSPACE_BODY_LIMIT_BYTES ?? '8192', 10);
 
 async function getMembership(userId, workspaceId) {
@@ -47,7 +94,7 @@ async function workspaceRoutes(app) {
     ...rateLimit,
     ...protect,
   }, async (req, reply) => {
-    const { nameEncrypted, recipients, orgId, vaultWrappedKeys } = req.body ?? {};
+    const { nameEncrypted, recipients, orgId, vaultWrappedKeys, emoji, color } = req.body ?? {};
     if (!nameEncrypted || typeof nameEncrypted !== 'string' || nameEncrypted.length > 8192) {
       return reply.status(400).send({ error: 'validation_error', message: 'Encrypted workspace name is required.' });
     }
@@ -66,6 +113,24 @@ async function workspaceRoutes(app) {
     for (const r of recipients) {
       if (!r || typeof r.userId !== 'string' || typeof r.wrappedKey !== 'string' || !r.wrappedKey) {
         return reply.status(400).send({ error: 'validation_error', message: 'Each recipient needs userId and wrappedKey.' });
+      }
+    }
+
+    // Validate emoji if provided; optional, defaults to first allowlist glyph
+    let validatedEmoji = DEFAULT_EMOJI;
+    if (emoji !== undefined) {
+      validatedEmoji = validateEmoji(emoji);
+      if (!validatedEmoji) {
+        return reply.status(400).send({ error: 'validation_error', message: 'Invalid emoji. Must be from allowlist or a single Unicode emoji codepoint.' });
+      }
+    }
+
+    // Validate color if provided; optional, defaults to first swatch
+    let validatedColor = DEFAULT_COLOR;
+    if (color !== undefined) {
+      validatedColor = validateColor(color);
+      if (!validatedColor) {
+        return reply.status(400).send({ error: 'validation_error', message: 'Invalid color. Must be a valid hex color from the swatch palette.' });
       }
     }
 
@@ -97,7 +162,7 @@ async function workspaceRoutes(app) {
       return reply.status(403).send({ error: 'not_org_member' });
     }
 
-    const workspace = await Workspace.create({ nameEncrypted, ownerId: req.userId, orgId, vaultWrappedKeys: normalizedVaultWrappedKeys, createdAt: new Date() });
+    const workspace = await Workspace.create({ nameEncrypted, ownerId: req.userId, orgId, vaultWrappedKeys: normalizedVaultWrappedKeys, emoji: validatedEmoji, color: validatedColor, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: workspace.id, accountId: req.userId, role: 'owner', createdAt: new Date() });
 
     const { WorkspaceKey } = require('../models');
@@ -113,9 +178,9 @@ async function workspaceRoutes(app) {
     await createEmptyState(workspace.id);
 
     app.log.info({ workspaceId: workspace.id, userId: req.userId }, 'Workspace created');
-    audit(req, 'workspace_created', { workspaceId: workspace.id });
+    audit(req, 'workspace_created', { workspaceId: workspace.id, emoji: validatedEmoji, color: validatedColor });
 
-    return reply.status(201).send({ id: workspace.id, nameEncrypted, role: 'owner', vaultWrappedKeys: normalizedVaultWrappedKeys, createdAt: workspace.createdAt });
+    return reply.status(201).send({ id: workspace.id, nameEncrypted, role: 'owner', vaultWrappedKeys: normalizedVaultWrappedKeys, emoji: validatedEmoji, color: validatedColor, createdAt: workspace.createdAt });
   });
 
   app.get('/', {
@@ -176,20 +241,41 @@ async function workspaceRoutes(app) {
       return reply.status(403).send({ error: 'not_workspace_member' });
     }
     if (membership.role !== 'owner' && membership.role !== 'admin') {
-      return reply.status(403).send({ error: 'insufficient_permissions', message: 'Only owners or admins can rename workspaces.' });
+      return reply.status(403).send({ error: 'insufficient_permissions', message: 'Only owners or admins can update workspaces.' });
     }
 
-    const { nameEncrypted } = req.body ?? {};
-    if (!nameEncrypted || typeof nameEncrypted !== 'string' || nameEncrypted.length > 8192) {
-      return reply.status(400).send({ error: 'validation_error', message: 'Encrypted workspace name is required.' });
+    const { nameEncrypted, emoji, color } = req.body ?? {};
+    const hasName = nameEncrypted && typeof nameEncrypted === 'string' && nameEncrypted.length > 0 && nameEncrypted.length <= 8192;
+    const validatedEmoji = emoji !== undefined ? validateEmoji(emoji) : null;
+    const validatedColor = color !== undefined ? validateColor(color) : null;
+    const hasEmoji = emoji !== undefined && validatedEmoji !== null;
+    const hasColor = color !== undefined && validatedColor !== null;
+
+    if (!hasName && !hasEmoji && !hasColor) {
+      return reply.status(400).send({ error: 'validation_error', message: 'At least one of nameEncrypted, emoji, or color is required.' });
+    }
+    if (emoji !== undefined && !hasEmoji) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Invalid emoji. Must be from allowlist or a single Unicode emoji codepoint.' });
+    }
+    if (color !== undefined && !hasColor) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Invalid color. Must be a valid hex color from the swatch palette.' });
     }
 
-    await Workspace.updateOne({ _id: workspaceId }, { $set: { nameEncrypted } });
+    const update = {};
+    if (hasName) update.nameEncrypted = nameEncrypted;
+    if (hasEmoji) update.emoji = validatedEmoji;
+    if (hasColor) update.color = validatedColor;
 
-    app.log.info({ workspaceId, userId: req.userId }, 'Workspace renamed');
-    audit(req, 'workspace_renamed', { workspaceId });
+    await Workspace.updateOne({ _id: workspaceId }, { $set: update });
 
-    return reply.send({ id: workspaceId, nameEncrypted });
+    // Fetch updated workspace to return full state
+    const updated = await Workspace.findById(workspaceId, { emoji: 1, color: 1, nameEncrypted: 1 }).lean();
+
+    const action = hasName ? 'workspace_renamed' : 'workspace_decorated';
+    app.log.info({ workspaceId, userId: req.userId, ...update }, 'Workspace updated');
+    audit(req, action, { workspaceId, ...update });
+
+    return reply.send({ id: workspaceId, nameEncrypted: updated.nameEncrypted, emoji: updated.emoji, color: updated.color });
   });
 
   app.delete('/:id', {
