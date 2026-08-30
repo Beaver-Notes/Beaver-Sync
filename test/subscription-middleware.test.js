@@ -76,7 +76,7 @@ test('requirePaidWrite allows starter', async (t) => {
   assert.equal(reply._sent, undefined);
 });
 
-test('checkDeviceLimit enforces starter limit of 5', async (t) => {
+test('checkDeviceLimit allows unlimited devices on starter (limit removed)', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('starter');
@@ -93,7 +93,7 @@ test('checkDeviceLimit enforces starter limit of 5', async (t) => {
   const req = { userId: account.id, subscription: sub, headers: { 'x-device-id': 'new-device' } };
   const reply = { status: () => ({ send: (body) => { reply._sent = body; } }) };
   await app.checkDeviceLimit(req, reply);
-  assert.equal(reply._sent.error, 'device_limit_reached');
+  assert.equal(reply._sent, undefined);
 });
 
 test('requirePaidWrite allows a free personal sub when the org is paid', async (t) => {

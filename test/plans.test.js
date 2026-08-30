@@ -37,7 +37,7 @@ test('getHistoryDays per tier', () => {
 });
 
 test('getDeviceLimit per tier', () => {
-  assert.equal(getDeviceLimit('starter'), 5);
+  assert.equal(getDeviceLimit('starter'), null);
   assert.equal(getDeviceLimit('free'), null);
   assert.equal(getDeviceLimit('pro'), null);
   assert.equal(getDeviceLimit('team'), null);

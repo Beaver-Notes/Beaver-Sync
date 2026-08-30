@@ -15,7 +15,7 @@
 // │ Self-hosted            │  ✗    │   ✗     │  ✗   │  ✗   │     ✓      │
 // │ Cloud storage          │  0    │ 10 GB   │ 50 GB│100GB+25GB×seats│Contractual│
 // │ Version history        │  ✗    │ 30 days │ 1 yr │ 1 yr │ Contractual│
-// │ Device limit           │Unlim  │    5    │Unlim │ Unlim│   Unlim    │
+// │ Device limit           │Unlim  │  Unlim  │Unlim │ Unlim│   Unlim    │
 // └────────────────────────┴───────┴─────────┴──────┴──────┴────────────┘
 
 const GB = 1024 * 1024 * 1024;
@@ -30,7 +30,7 @@ const PLANS = {
   starter: {
     quotaBytes: 10 * GB,
     historyDays: 30,
-    devices: 5,
+    devices: null,
     flags: { shareNotes: true, teamWorkspaces: false, collaborators: false, dashboard: false, audit: false, sso: false, selfHosted: false },
   },
   pro: {

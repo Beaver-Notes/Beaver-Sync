@@ -39,7 +39,7 @@ test('GET /plans resolves flags for a starter subscription', async (t) => {
   assert.equal(body.plan, 'starter');
   assert.equal(body.quotaBytes, 10 * 1024 ** 3);
   assert.equal(body.historyDays, 30);
-  assert.equal(body.deviceLimit, 5);
+  assert.equal(body.deviceLimit, null);
   assert.equal(body.flags.dashboard, false);
 });
 
