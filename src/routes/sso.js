@@ -242,7 +242,7 @@ async function ssoRoutes(app) {
 
     if (!state) return reply.status(400).send({ error: 'missing_state' });
 
-    const stateRow = await SsoOidcState.findOneAndDelete({ state }).lean();
+    const stateRow = await SsoOidcState.findOneAndDelete({ state });
     if (!stateRow) return reply.status(400).send({ error: 'invalid_state' });
 
     if (Date.now() - new Date(stateRow.createdAt).getTime() > SSO_STATE_TTL_MS) {

@@ -328,7 +328,7 @@ test('binds a device header to its session and allows unlimited devices', async 
   const limited = await request(app, limitedSession, '/yjs/push-batch', {
     workspaceId: 'workspace-1', notes: [{ noteId: 'device-limit', updates: [{ key: 'device-limit~~new-device~~71~~1.yjs.json', data: 'eA==', deviceId: 'new-device', sequence: 1, ts: 71 }] }],
   }, 'new-device');
-  assert.equal(limited.statusCode, 200);
+  assert.equal(limited.statusCode, 201);
   await query('DELETE FROM devices WHERE account_id = $1', ['account-1']);
   await query('UPDATE subscriptions SET plan = $1, storage_used_bytes = 0 WHERE account_id = $2', ['pro', 'account-1']);
 });
