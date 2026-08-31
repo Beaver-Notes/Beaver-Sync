@@ -93,6 +93,8 @@ services:
       EMAIL_ENABLED: "false"
       PLAN_OVERRIDE: ${PLAN_OVERRIDE:-free}
       ENTERPRISE_MODE: ${ENTERPRISE_MODE:-false}
+      LICENSE_SECRET: ${LICENSE_SECRET:-ci-smoke-license-secret-32-chars-long!!}
+      LICENSE_KEY: ${LICENSE_KEY:-BLeyJleHBpcnkiOiIyMDM1LTAxLTAxIiwibGljZW5zZWUiOiJCZWF2ZXIgQ0kgU21va2UiLCJwbGFuIjoiZW50ZXJwcmlzZSJ9.q9Mj_otTJWKIIhwfE4qV0NzhuQ_KV7HuXVlUtG9F7Eo}
       SESSION_HMAC_KEY: ${SESSION_HMAC_KEY:-ci-smoke-session-hmac-key-32-chars-long!}
       EMAIL_HMAC_KEY: ${EMAIL_HMAC_KEY:-ci-smoke-email-hmac-key-32-chars-long!!}
       COOKIE_SECRET: ${COOKIE_SECRET:-ci-smoke-cookie-secret-32-chars-long!!!}

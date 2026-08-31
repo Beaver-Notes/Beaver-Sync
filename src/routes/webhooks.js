@@ -163,7 +163,7 @@ async function webhookRoutes(app) {
                   const c = await checkDowngrade(accountId, existing.plan, 'free');
                   if (!c.ok) app.log.info({ accountId, reason: c.reason }, 'downgrade blocked by quota');
                 }
-              } catch (_) {}
+              } catch {}
             } else {
               app.log.info({ accountId, renewsAt }, 'subscription downgrade deferred until period end');
             }
@@ -185,7 +185,7 @@ async function webhookRoutes(app) {
                 await SubscriptionModel.updateOne({ accountId }, { $set: { plan: 'free', status: 'expired', storageQuotaBytes: getQuotaBytes('free') } });
               }
             }
-          } catch (_) {}
+          } catch {}
           break;
         }
         case 'invoice.paid':
@@ -207,7 +207,7 @@ async function webhookRoutes(app) {
             if (sub && sub.status !== 'active') {
               await SubscriptionModel.updateOne({ accountId }, { $set: { status: 'active' } });
             }
-          } catch (_) {}
+          } catch {}
           break;
         }
         case 'invoice.payment_failed': {

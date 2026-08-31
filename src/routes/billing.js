@@ -43,14 +43,12 @@ async function billingRoutes(app) {
         if (decrypted && typeof decrypted === 'string' && decrypted.includes('@')) {
           email = decrypted;
         }
-      } catch (_) {
-        // fall through to fallback
+      } catch {
+        // decrypt failed — email stays null and handler returns 500 below
       }
     }
     if (!email) {
-      // Test fixtures use placeholder 'e' for emailEncrypted; synthesize a valid email for Stripe.
-      // Production accounts will have a real encrypted email and reach the branch above.
-      email = `${req.userId}@example.com`;
+      return reply.status(500).send({ error: 'email_unavailable', message: 'Account email unavailable — contact support.' });
     }
 
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);

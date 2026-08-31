@@ -278,8 +278,8 @@ async function authRoutes(app) {
     const dummyHash = hashRecoveryCode('dummy-recovery-code-not-found-0000000000000000');
 
     const account = await Account.findOne({ emailHmac: emailHash }).lean();
-    let storedHash = account?.recoveryCodeHash || null;
-    let isValid = false;
+    const storedHash = account?.recoveryCodeHash || null;
+    let isValid;
     if (account && storedHash) {
       try {
         const aBuf = Buffer.from(storedHash, 'hex');

@@ -30,7 +30,7 @@ async function registerAssetPresignRoutes(app, protect) {
     // Build size map capped at MAX_ASSET_SIZE_BYTES. Missing sizes default to 0 (legacy clients).
     // Clients should send sizes array parallel to keys or object mapping key->size for accurate quota preflight.
     const validKeys = keys.filter((k) => k && ASSET_KEY_PATTERN.test(k));
-    let sizeMap = new Map();
+    const sizeMap = new Map();
     if (Array.isArray(sizes) && sizes.length === keys.length) {
       keys.forEach((k, i) => {
         const raw = Number(sizes[i]);

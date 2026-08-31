@@ -89,9 +89,9 @@ async function resolveQuotaAndUsed(accountId, workspaceId, client) {
 
   // Personal/account scope
   const { rows: subRows } = await q('SELECT plan, status, storage_used_bytes, storage_quota_bytes FROM subscriptions WHERE account_id=$1', [accountId]);
-  let sub = subRows[0] || null;
+  const sub = subRows[0] || null;
   let plan = sub?.plan ?? 'free';
-  let seats = 1;
+  const seats = 1;
   // Try org fallback via orgIdFromReq-style: if no workspace, plan is just sub plan
   if (process.env.NODE_ENV !== 'production' && process.env.PLAN_OVERRIDE) {
     const { VALID_PLANS } = require('../lib/plans');

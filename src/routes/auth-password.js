@@ -21,6 +21,7 @@ const DUMMY_BCRYPT_HASH = '$2b$12$' + 'a'.repeat(53);
 function sanitizeUsername(raw) {
   if (raw == null) return null;
   if (typeof raw !== 'string') return null;
+  // eslint-disable-next-line no-control-regex
   let v = raw.trim().replace(/[\x00-\x1F\x7F]/g, '').trim();
   if (!v) return null;
   if (v.length > 50) v = v.slice(0, 50);

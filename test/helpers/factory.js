@@ -67,9 +67,17 @@ async function seedOrg(orgId, ownerId, plan) {
 async function register(plan, { email, emailVerified } = {}) {
   const models = require('../../src/models');
   const address = email ?? `${plan}-${crypto.randomBytes(6).toString('hex')}@test.example`;
+  let emailEncrypted = 'e';
+  try {
+    const mlkem = require('../../src/lib/mlkem');
+    emailEncrypted = await mlkem.encryptMetadata(address);
+  } catch (_) {
+    // mlkem not initialized yet (unit tests without buildApp) — fallback keeps fixture usable
+    emailEncrypted = 'e';
+  }
   const account = await models.Account.create({
     emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY).update(address).digest('hex'),
-    emailEncrypted: 'e',
+    emailEncrypted,
     passwordHash: '$2b$12$test',
     kdfSalt: crypto.randomBytes(32).toString('hex'),
     emailVerified: emailVerified ?? true,

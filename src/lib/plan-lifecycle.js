@@ -66,7 +66,7 @@ async function downgradeAtPeriodEnd(accountId) {
     for (const m of owned) {
       await OrgSubscription.updateOne({ orgId: m.orgId }, { $set: { plan: 'free', status: 'expired', storageQuotaBytes: getQuotaBytes('free') } });
     }
-  } catch (_) {}
+  } catch {}
   return { ok: true };
 }
 

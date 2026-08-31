@@ -101,7 +101,7 @@ async function buildApp() {
       if (s.valid && s.payload?.seats) {
         // soft-warn only; caller checks via checkSeats for actual usage
       }
-    } catch (_) {}
+    } catch {}
   }
 
   const app = Fastify({
