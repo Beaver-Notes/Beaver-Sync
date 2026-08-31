@@ -22,6 +22,7 @@ const { MSG_SYNC, MSG_AWARENESS, handleSyncMessage, handleAwarenessMessage } = r
 const { startSyncNotificationListener, stopSyncNotificationListener } = require('./ws-relay-notifications');
 
 const WS_RELAY_PORT = parseInt(process.env.WS_RELAY_PORT ?? '8080', 10);
+let redisRelay = null;
 
 const { parseRoomName: baseParseRoomName } = require('./persistence/yjs');
 
@@ -112,6 +113,8 @@ function broadcastToRoom(documentName, msg, excludeWs) {
       try { conn.ws.send(msg); } catch { /* ignore */ }
     }
   }
+  // cross-instance fan-out when REDIS_URL is set (no-op otherwise)
+  try { redisRelay?.publish(documentName, msg); } catch {}
 }
 
 function sendText(ws, obj) {
@@ -301,6 +304,10 @@ async function startWsRelay() {
   });
 
   await startSyncNotificationListener(rooms, sendText);
+  try {
+    const { init } = require('./ws-relay-redis');
+    redisRelay = init(rooms, broadcastToRoom);
+  } catch {}
 
   // Graceful shutdown: flush debounced persists (<=1s of edits per room) before exit
   let shuttingDown = false;
@@ -309,6 +316,7 @@ async function startWsRelay() {
     shuttingDown = true;
     console.log(`[ws-relay] Received ${signal} — flushing persists`);
     try { clearInterval(_heartbeatInterval); } catch {}
+    try { await redisRelay?.close(); } catch {}
     // Flush every pending debounce timer immediately
     for (const timer of persistTimers.values()) clearTimeout(timer);
     persistTimers.clear();
@@ -339,6 +347,8 @@ async function startWsRelay() {
 
 async function stopWsRelay() {
   try { clearInterval(_heartbeatInterval); } catch {}
+  try { await redisRelay?.close(); } catch {}
+  redisRelay = null;
   for (const t of persistTimers.values()) clearTimeout(t);
   persistTimers.clear();
   try { stopSyncNotificationListener(); } catch {}

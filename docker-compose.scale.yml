@@ -1,17 +1,17 @@
 # docker-compose.scale.yml — horizontal scaling on a single VPS.
 #
 # The default stack (docker-compose.yml + prod.yml) runs one api + one ws-relay.
-# This overlay adds a Redis for shared rate-limit state so you can run N api
-# replicas behind Caddy. The ws-relay holds rooms in-memory and stays at 1
-# replica unless you add Redis pub/sub for cross-instance fan-out (future).
+# This overlay adds Redis for shared rate-limit state (api) and pub/sub fan-out
+# (ws-relay). With REDIS_URL set, both api and ws-relay scale horizontally;
+# without it ws-relay stays single-instance (in-memory rooms).
 #
 # Usage (opt-in, backwards compatible):
 #   # single (default, no Redis):
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
-#   # scaled: 3 api replicas + Redis
+#   # scaled: 3 api + 2 ws-relay replicas + Redis
 #   REDIS_URL=redis://redis:6379 \
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.scale.yml up -d --scale api=3
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.scale.yml up -d --scale api=3 --scale ws-relay=2
 #
 # Compose `scale` requires removing container_name from the scaled service.
 # This overlay removes it so `docker compose up --scale api=3` works; Caddy
@@ -32,6 +32,14 @@ services:
 
   api:
     # Drop pinned container_name so compose can create api-1, api-2, …
+    container_name: !reset null
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  ws-relay:
     container_name: !reset null
     environment:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}

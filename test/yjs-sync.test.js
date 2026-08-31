@@ -332,3 +332,40 @@ test('binds a device header to its session and allows unlimited devices', async 
   await query('DELETE FROM devices WHERE account_id = $1', ['account-1']);
   await query('UPDATE subscriptions SET plan = $1, storage_used_bytes = 0 WHERE account_id = $2', ['pro', 'account-1']);
 });
+
+test('sparse sequence gaps are stored exactly, not collapsed by max clock', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const session = await createSession('account-1', { headers: {} });
+  const base = Date.now();
+  // device-a pushes sparse clocks 1, 50, 1000 — gaps must not be treated as duplicates
+  const sparse = await request(app, session, '/yjs/push-batch', {
+    workspaceId: 'workspace-1',
+    notes: [{ noteId: 'sparse-clock-note', updates: [
+      { key: `sparse-clock-note~~device-a~~${base}~~1.yjs.json`, data: 'YQ==', deviceId: 'device-a', sequence: 1, ts: base },
+      { key: `sparse-clock-note~~device-a~~${base + 1}~~50.yjs.json`, data: 'Yg==', deviceId: 'device-a', sequence: 50, ts: base + 1 },
+      { key: `sparse-clock-note~~device-a~~${base + 2}~~1000.yjs.json`, data: 'Yw==', deviceId: 'device-a', sequence: 1000, ts: base + 2 },
+    ] }],
+  });
+  assert.equal(sparse.statusCode, 201);
+  assert.equal(sparse.json().accepted, 3);
+  assert.equal(sparse.json().duplicate, 0);
+  // pull without checkpoint must return all 3, ordered by ts/clock
+  const pulled = await request(app, session, '/yjs/pull-batch', { workspaceId: 'workspace-1', notes: [{ noteId: 'sparse-clock-note', checkpoint: null, limit: 10 }] });
+  assert.equal(pulled.statusCode, 200);
+  const keys = pulled.json().notes['sparse-clock-note'].updates.map((u) => u.key);
+  assert.deepEqual(keys, [
+    `sparse-clock-note~~device-a~~${base}~~1.yjs.json`,
+    `sparse-clock-note~~device-a~~${base + 1}~~50.yjs.json`,
+    `sparse-clock-note~~device-a~~${base + 2}~~1000.yjs.json`,
+  ]);
+  // gap fill: inserting clock 2 after sparse max must not collide with max
+  const gapFill = await request(app, session, '/yjs/push-batch', {
+    workspaceId: 'workspace-1',
+    notes: [{ noteId: 'sparse-clock-note', updates: [{ key: `sparse-clock-note~~device-a~~${base + 3}~~2.yjs.json`, data: 'ZA==', deviceId: 'device-a', sequence: 2, ts: base + 3 }] }],
+  });
+  assert.equal(gapFill.statusCode, 201);
+  assert.equal(gapFill.json().accepted, 1);
+  const count = (await query('SELECT COUNT(*)::int c FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2', ['workspace-1', 'sparse-clock-note'])).rows[0].c;
+  assert.equal(count, 4);
+});

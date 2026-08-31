@@ -16,9 +16,13 @@ function getPool() {
     throw new Error('DATABASE_URL environment variable is required');
   }
 
+  // PgBouncer (transaction mode) sits in front of Postgres when DB queue
+  // p95 >50ms: point DATABASE_URL at the bouncer and tune pool via
+  // DATABASE_POOL_MAX (default 20, lower to 5-10 behind a bouncer).
+  // Pool 20 is direct-Postgres; no code change needed for bouncer.
   pool = new Pool({
     connectionString,
-    max: 20,
+    max: parseInt(process.env.DATABASE_POOL_MAX ?? '20', 10),
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
     allowExitOnIdle: true,

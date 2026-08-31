@@ -63,7 +63,16 @@ export REDIS_URL=redis://redis:6379
 docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale api=3
 ```
 
-The WebSocket relay must remain a single instance — collaboration rooms live in memory (`ws-relay.js`). Caddy's sticky-cookie routing keeps clients pinned to it; do not run multiple relay replicas without adding a room-routing layer first.
+With `REDIS_URL` set, the WebSocket relay also scales horizontally (`src/ws-relay-redis.js` publishes Yjs/awareness broadcasts via Redis pub/sub `beaver:ws-relay`); fan-out falls back to in-memory when Redis is absent. Without `REDIS_URL`, keep `ws-relay` at one replica (rooms live in memory).
+
+```bash
+# scaled relay (requires REDIS_URL)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.scale.yml up -d --scale api=3 --scale ws-relay=2
+```
+
+### Database — PgBouncer
+
+Direct Postgres Pool is `max:20` (`DATABASE_POOL_MAX`, `src/db/postgres.js:19`). When DB queue wait p95 >50ms, front Postgres with PgBouncer (transaction mode) and point `DATABASE_URL` at the bouncer; lower `DATABASE_POOL_MAX` to 5–10 per app replica. No code change needed — `pg` Pool works transparently through the bouncer.
 
 ### Backups
 
