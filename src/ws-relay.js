@@ -36,8 +36,6 @@ function parseRoomName(documentName) {
 
 let persistence = null;
 
-// --- Per-room state ---
-
 /** @type {Map<string, { doc: Y.Doc, awareness: awarenessProtocol.Awareness, conns: Set<{ ws: import('ws').WebSocket, ctx: object }>, persistenceDirty: boolean }>} */
 const rooms = new Map();
 
@@ -52,7 +50,6 @@ function getOrCreateRoom(documentName) {
   const room = { doc, awareness, conns };
   rooms.set(documentName, room);
 
-  // Broadcast doc updates to other connections in the room
   doc.on('update', (update, origin) => {
     if (origin === 'persistence') return;
     const encoder = encoding.createEncoder();
@@ -62,7 +59,6 @@ function getOrCreateRoom(documentName) {
     broadcastToRoom(documentName, msg, null);
   });
 
-  // Broadcast awareness changes to other connections in the room
   awareness.on('update', ({ added, updated, removed }, origin) => {
     if (origin === 'persistence') return;
     const changedClients = added.concat(updated).concat(removed);
@@ -75,7 +71,6 @@ function getOrCreateRoom(documentName) {
     broadcastToRoom(documentName, msg, null);
   });
 
-  // Load persisted state from Postgres via adapter
   if (persistence) {
     persistence.bindState(documentName, doc);
   }
@@ -83,7 +78,6 @@ function getOrCreateRoom(documentName) {
   return room;
 }
 
-// Debounced persistence per room
 const persistTimers = new Map();
 
 /** @type {WeakMap<import('ws').WebSocket, Set<number>>} */
@@ -113,7 +107,6 @@ function broadcastToRoom(documentName, msg, excludeWs) {
       try { conn.ws.send(msg); } catch { /* ignore */ }
     }
   }
-  // cross-instance fan-out when REDIS_URL is set (no-op otherwise)
   try { redisRelay?.publish(documentName, msg); } catch {}
 }
 
@@ -122,8 +115,6 @@ function sendText(ws, obj) {
     try { ws.send(JSON.stringify(obj)); } catch { /* ignore */ }
   }
 }
-
-// --- Connection handling ---
 
 function handleUpgrade(req, socket, head) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -151,7 +142,6 @@ function handleUpgrade(req, socket, head) {
     return;
   }
 
-  // Authenticate before upgrading
   const workspaceId = room.workspaceId;
   const authPromise = ticket
     ? verifyTicket(ticket)
@@ -199,10 +189,8 @@ function handleConnection(ws, documentName, ctx) {
 
   room.conns.add(conn);
 
-  // Send auth info
   sendText(ws, { type: 'auth', readOnly: ctx.readOnly, role: ctx.role });
 
-  // Send full awareness state to new connection
   const awarenessStates = room.awareness.getStates();
   if (awarenessStates.size > 0) {
     const clients = Array.from(awarenessStates.keys());
@@ -227,7 +215,6 @@ function handleConnection(ws, documentName, ctx) {
           handleAwarenessMessage(decoder, room, conn, wsToClientIds);
           break;
         default:
-          // ignore unknown message types
           break;
       }
     } catch (err) {
@@ -238,14 +225,12 @@ function handleConnection(ws, documentName, ctx) {
   ws.on('close', () => {
     room.conns.delete(conn);
 
-    // Remove awareness state for disconnected client
     const clientIds = wsToClientIds.get(ws);
     if (clientIds && clientIds.size > 0) {
       awarenessProtocol.removeAwarenessStates(room.awareness, Array.from(clientIds), null);
     }
     wsToClientIds.delete(ws);
 
-    // Cleanup empty rooms
     if (room.conns.size === 0) {
       schedulePersist(documentName);
       // Don't destroy doc immediately — keep for persistence
@@ -261,8 +246,6 @@ function handleConnection(ws, documentName, ctx) {
     }
   });
 }
-
-// --- Server startup ---
 
 let wss;
 let _httpServer;
@@ -352,7 +335,6 @@ async function stopWsRelay() {
   for (const t of persistTimers.values()) clearTimeout(t);
   persistTimers.clear();
   try { stopSyncNotificationListener(); } catch {}
-  // terminate all ws clients
   try { wss?.clients?.forEach((c) => { try { c.terminate(); } catch {} }); } catch {}
   try { wss?.close(); } catch {}
   try { await new Promise((res) => _httpServer ? _httpServer.close(res) : res()); } catch {}
