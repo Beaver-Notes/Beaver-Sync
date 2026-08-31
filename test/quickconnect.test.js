@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const repoRoot = path.resolve(__dirname, '..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -17,9 +16,11 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../src/db');
+const { setupTestDb } = require('./helpers/db');
+const { authHeaderFor } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
-const { hashSessionId } = require('../src/lib/crypto');
 
 const originalMethods = {
   QuickConnectCode: {
@@ -39,9 +40,14 @@ function resetStubs() {
   models.Session.findOne = async () => null;
 }
 
+test.before(async () => {
+  await setupTestDb();
+});
+
 test.after(() => {
   Object.assign(models.QuickConnectCode, originalMethods.QuickConnectCode);
   Object.assign(models.Session, originalMethods.Session);
+  return close();
 });
 
 async function makeApp() {
@@ -49,30 +55,9 @@ async function makeApp() {
   return buildApp();
 }
 
-async function authHeaderFor(app, userId = 'user-a') {
-  const rawId = crypto.randomBytes(32).toString('base64url');
-  const sessionIdHash = hashSessionId(rawId);
-
-  models.Session.findOne = async ({ idHash: h }) => {
-    if (h === sessionIdHash) {
-      return {
-        idHash: h,
-        accountId: userId,
-        revoked: false,
-        expiresAt: new Date(Date.now() + 3600_000),
-        createdAt: new Date(),
-        save: async () => {},
-      };
-    }
-    return null;
-  };
-
-  return `Bearer ${rawId}`;
-}
-
 test('initiate returns a code and a secret', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let stored = null;
   models.QuickConnectCode.create = async (data) => { stored = data; return { ...data }; };
@@ -96,7 +81,7 @@ test('initiate returns a code and a secret', async (t) => {
 
 test('authorize code then connect returns payload', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const code = 'ABC-DEF';
   const secret = crypto.randomBytes(32).toString('hex');
@@ -116,7 +101,7 @@ test('authorize code then connect returns payload', async (t) => {
     return null;
   };
 
-  const auth = await authHeaderFor(app, 'user-a');
+  const auth = await authHeaderFor('user-a');
 
   const authorizeResponse = await app.inject({
     method: 'POST',
@@ -150,7 +135,7 @@ test('authorize code then connect returns payload', async (t) => {
 
 test('connect without secret returns 400', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'GET',
@@ -162,7 +147,7 @@ test('connect without secret returns 400', async (t) => {
 
 test('connect with unknown secret returns 404', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'GET',
@@ -174,7 +159,7 @@ test('connect with unknown secret returns 404', async (t) => {
 
 test('connect with expired code returns 404', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const secret = crypto.randomBytes(32).toString('hex');
   models.QuickConnectCode.findOne = async (filter) => {
@@ -194,7 +179,7 @@ test('connect with expired code returns 404', async (t) => {
 
 test('authorizing already-authorized code returns 409', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const code = 'ABC-DEF';
   models.QuickConnectCode.findOne = async () => ({
@@ -205,7 +190,7 @@ test('authorizing already-authorized code returns 409', async (t) => {
     expiresAt: new Date(Date.now() + 10 * 60 * 1000),
   });
 
-  const auth = await authHeaderFor(app, 'user-a');
+  const auth = await authHeaderFor('user-a');
 
   const response = await app.inject({
     method: 'POST',

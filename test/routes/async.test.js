@@ -1,13 +1,14 @@
 'use strict';
 
-const { describe, it } = require('node:test');
+// SMOKE TEST ONLY: asserts route handlers are exported as functions.
+// It does NOT exercise any route behavior — do not treat as route coverage.
+const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '../..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -16,7 +17,18 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../../src/db');
+const { setupTestDb, cleanTestDb } = require('../helpers/db');
+
 describe('Async routes', () => {
+  before(async () => {
+    await setupTestDb();
+    await cleanTestDb();
+  });
+
+  after(() => {
+    return close();
+  });
   it('account route handler is async', () => {
     const accountRoutes = require('../../src/routes/account');
     assert(typeof accountRoutes === 'function');

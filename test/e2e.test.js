@@ -3,14 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 
 const repoRoot = path.resolve(__dirname, '..');
-const testDbDir = path.join(repoRoot, '.test-data');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long-e2e';
@@ -19,6 +16,8 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long-e2
 process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../src/db');
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { QuickConnectCode, Account, WebAuthnChallenge, Credential } = require('../src/models');
 const { createEmailHash } = require('../src/lib/crypto');
 
@@ -49,20 +48,18 @@ require.cache[swaPath] = { id: swaPath, filename: swaPath, loaded: true, exports
 
 const { buildApp } = require('../src/server');
 
-test.before(() => {
-  fs.mkdirSync(testDbDir, { recursive: true });
+test.before(async () => {
+  await setupTestDb();
+  await cleanTestDb();
 });
 
-test.after(() => {
-  const dbPath = process.env.DATABASE_PATH;
-  try { fs.unlinkSync(dbPath); } catch {}
-  try { fs.unlinkSync(dbPath + '-wal'); } catch {}
-  try { fs.unlinkSync(dbPath + '-shm'); } catch {}
+test.after(async () => {
+  await close();
 });
 
 test('POST /auth/register creates a new account and returns a session token', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({
     method: 'POST',
@@ -80,7 +77,7 @@ test('POST /auth/register creates a new account and returns a session token', as
 
 test('POST /auth/register rejects duplicate email', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({
     method: 'POST',
@@ -95,7 +92,7 @@ test('POST /auth/register rejects duplicate email', async (t) => {
 
 test('POST /auth/register validates email and password requirements', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const noEmail = await app.inject({
     method: 'POST',
@@ -116,7 +113,7 @@ test('POST /auth/register validates email and password requirements', async (t) 
 
 test('POST /auth/token logs in with correct credentials', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({
     method: 'POST',
@@ -133,7 +130,7 @@ test('POST /auth/token logs in with correct credentials', async (t) => {
 
 test('POST /auth/token rejects wrong password', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({
     method: 'POST',
@@ -148,7 +145,7 @@ test('POST /auth/token rejects wrong password', async (t) => {
 
 test('POST /auth/token rejects unknown email', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({
     method: 'POST',
@@ -162,7 +159,7 @@ test('POST /auth/token rejects unknown email', async (t) => {
 
 test('GET /auth/sessions returns sessions for authenticated user', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const login = await app.inject({
     method: 'POST',
@@ -186,7 +183,7 @@ test('GET /auth/sessions returns sessions for authenticated user', async (t) => 
 
 test('POST /auth/logout revokes session', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const login = await app.inject({
     method: 'POST',
@@ -213,7 +210,7 @@ test('POST /auth/logout revokes session', async (t) => {
 
 test('GET /health returns ok with db connected', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({ method: 'GET', url: '/health' });
   assert.equal(res.statusCode, 200);
@@ -223,12 +220,12 @@ test('GET /health returns ok with db connected', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// QuickConnect e2e tests (real SQLite)
+// QuickConnect e2e tests (real Postgres)
 // ---------------------------------------------------------------------------
 
-test('quickconnect: initiate stores code and secret in SQLite', async (t) => {
+test('quickconnect: initiate stores code and secret in the database', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({
     method: 'POST',
@@ -252,7 +249,7 @@ test('quickconnect: initiate stores code and secret in SQLite', async (t) => {
 
 test('quickconnect: full flow initiate → authorize → connect', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const suffix = crypto.randomBytes(4).toString('hex');
   const email = `qc-flow-${suffix}@example.com`;
@@ -310,7 +307,7 @@ test('quickconnect: full flow initiate → authorize → connect', async (t) => 
 
 test('quickconnect: authorize already-authorized code returns 409', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const suffix = crypto.randomBytes(4).toString('hex');
   const email = `qc-conflict-${suffix}@example.com`;
@@ -351,7 +348,7 @@ test('quickconnect: authorize already-authorized code returns 409', async (t) =>
 
 test('quickconnect: connect with unknown secret returns 404', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const res = await app.inject({
     method: 'GET',
@@ -361,12 +358,12 @@ test('quickconnect: connect with unknown secret returns 404', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// Passkey e2e tests (real SQLite, mocked WebAuthn)
+// Passkey e2e tests (real Postgres, mocked WebAuthn)
 // ---------------------------------------------------------------------------
 
-test('passkey: register begin stores challenge in SQLite', async (t) => {
+test('passkey: register begin stores challenge in the database', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
   const emailHash = createEmailHash(email);
@@ -390,7 +387,7 @@ test('passkey: register begin stores challenge in SQLite', async (t) => {
 
 test('passkey: register complete creates credential and returns session', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
   const emailHash = createEmailHash(email);
@@ -427,7 +424,7 @@ test('passkey: register complete creates credential and returns session', async 
 
 test('passkey: register complete with missing challenge returns 400', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
 
@@ -444,7 +441,7 @@ test('passkey: register complete with missing challenge returns 400', async (t) 
 
 test('passkey: login begin returns options for existing credentials', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
 
@@ -481,7 +478,7 @@ test('passkey: login begin returns options for existing credentials', async (t) 
 
 test('passkey: login complete verifies and issues session', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const email = `user-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`;
   const emailHash = createEmailHash(email);

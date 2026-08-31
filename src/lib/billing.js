@@ -1,14 +1,14 @@
 'use strict';
 
 const { Subscription } = require('../models');
-const { PLAN_QUOTAS } = require('./plans');
+const { getQuotaBytes } = require('./plans');
 
 function planFromPrice(priceId, productId) {
   const id = (priceId + productId).toLowerCase();
   if (id.includes('enterprise')) return 'enterprise';
   if (id.includes('team')) return 'team';
   if (id.includes('pro')) return 'pro';
-  return 'basic';
+  return 'starter';
 }
 
 function planFromProductId(productId) {
@@ -16,7 +16,7 @@ function planFromProductId(productId) {
   if (p.includes('enterprise')) return 'enterprise';
   if (p.includes('team')) return 'team';
   if (p.includes('pro')) return 'pro';
-  return 'basic';
+  return 'starter';
 }
 
 async function upsertSubscription({
@@ -29,7 +29,7 @@ async function upsertSubscription({
   stripeCustomerId,
 })
 {
-  const storageBytes = PLAN_QUOTAS[plan] ?? 0;
+  const storageBytes = getQuotaBytes(plan);
 
   const existing = await Subscription.findOne({ accountId }).lean();
   if (existing) {

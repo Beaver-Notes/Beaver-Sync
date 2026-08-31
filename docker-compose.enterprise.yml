@@ -6,14 +6,15 @@ version: '3.9'
 # All traffic stays within the Docker internal network.
 #
 # Usage:
-#   cp .env.example .env && fill in SECRET_KEY, LICENSE_SECRET, etc.
+#   cp .env.example .env && fill in SECRET_KEY, LICENSE_SECRET, LICENSE_KEY, etc.
 #   docker compose -f docker-compose.enterprise.yml up -d
 #
 # First-time setup:
-#   1. Set ENTERPRISE_MODE=true and LICENSE_SECRET in your .env
+#   1. Set ENTERPRISE_MODE=true, LICENSE_SECRET and LICENSE_KEY in your .env
+#      Generate: LICENSE_SECRET=$(openssl rand -hex 32) node scripts/generate-license.js --licensee "Acme" --expiry 2027-08-30 --seats 50
 #   2. docker compose -f docker-compose.enterprise.yml up -d
-#   3. Access the API at http://localhost:3000
-#   4. Generate license keys via src/lib/license.js:generateLicenseKey()
+#   3. Access the API at http://localhost:4000
+#   4. Licenses are offline HMAC BL... tokens (canonical JSON, timing-safe verify, 14d grace, seats soft-warn)
 
 networks:
   beaver-internal:
@@ -137,6 +138,7 @@ services:
     environment:
       ENTERPRISE_MODE: "true"
       LICENSE_SECRET: ${LICENSE_SECRET}
+      LICENSE_KEY: ${LICENSE_KEY:-${BEAVER_LICENSE:-${LICENSE:-}}}
       DATABASE_URL: postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
       NODE_ENV: production
       HOST: 0.0.0.0
@@ -156,9 +158,9 @@ services:
       STORAGE_FORCE_PATH_STYLE: "true"
       WEBAUTHN_RPID: ${WEBAUTHN_RPID:-localhost}
       WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-http://localhost:3000}
-      APP_URL: ${APP_URL:-http://localhost:3000}
+      APP_URL: ${APP_URL:-http://localhost:4000}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:${API_PORT:-4000}:3000"
     volumes:
       - beaver_data:/app/keys
     networks:
@@ -170,12 +172,12 @@ services:
       retries: 3
       start_period: 10s
 
-  # ── Hocuspocus WebSocket Relay ───────────────────────────────────
-  hocuspocus:
+  # ── WebSocket Relay ─────────────────────────────────────────────
+  ws-relay:
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: beaver-sync-hocuspocus
+      dockerfile: Dockerfile.ws-relay
+    container_name: beaver-sync-ws-relay
     restart: unless-stopped
     depends_on:
       api:
@@ -183,12 +185,12 @@ services:
     env_file: .env
     environment:
       ENTERPRISE_MODE: "true"
-      HOCUSPOCUS_PORT: "8080"
+      WS_RELAY_PORT: "8080"
       AUTH_BACKEND_URL: http://api:3000
       SESSION_HMAC_KEY: ${SESSION_HMAC_KEY}
       MLKEM_SEED: ${MLKEM_SEED}
       GLITCHTIP_DSN: http://glitchtip:8000/glitchtip-dsn
-    command: ["node", "src/hocuspocus.js"]
+    command: ["node", "src/ws-relay.js"]
     ports:
       - "127.0.0.1:8080:8080"
     networks:

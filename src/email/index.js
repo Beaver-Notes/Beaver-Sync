@@ -13,8 +13,6 @@ async function sendWelcomeEmail(app, userId, data = {}) {
   return sendWithAlias(app, userId, 'Welcome to Beaver Sync', html);
 }
 
-// Intentionally deferred: there is no email-verification flow (registration does not gate on
-// email verification), so this sender has no natural call site yet.
 async function sendVerifyEmail(app, userId, data) {
   const html = render('verify', buildData(data));
   if (!html) return;

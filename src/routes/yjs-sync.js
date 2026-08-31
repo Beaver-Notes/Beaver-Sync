@@ -2,13 +2,17 @@
 
 const { z } = require('zod');
 const persistence = require('../persistence/yjs');
-const { Device, WorkspaceMember } = require('../models');
+const { Device } = require('../models');
 const { audit } = require('../lib/audit');
+const { historyCutoffForAccount } = require('../lib/plan-lifecycle');
+const { resolveEffectivePlan } = require('../lib/plan-resolution');
+const { getPool } = require('../db/postgres');
+const { DEVICE_ID_PATTERN } = require('../lib/patterns');
+const { requireWorkspaceMember, requireWorkspaceWriter } = require('../middleware/org');
 
 const MAX_UPDATES_PER_PUSH = 200;
 const MAX_UPDATES_PER_PULL = 500;
 const MAX_BODY_BYTES = Math.min(parseInt(process.env.YJS_SYNC_BODY_LIMIT_BYTES ?? '10485760', 10), 10485760);
-const DEVICE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const SYNC_KEY_PATTERN = /^([a-zA-Z0-9_-]{1,256})~~([a-zA-Z0-9_-]{1,128})~~([0-9]+)~~([0-9]+)\.yjs\.json$/;
 
 const UpdateSchema = z.object({
@@ -60,43 +64,31 @@ function getDeviceId(req, reply) {
   return deviceId;
 }
 
-async function requireWorkspaceRole(req, reply, workspaceId, write) {
-  const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
-  if (!membership) {
-    reply.status(403).send({ error: 'not_workspace_member' });
-    return null;
-  }
-  if (write && !['owner', 'editor'].includes(membership.role)) {
-    reply.status(403).send({ error: 'workspace_write_forbidden' });
-    return null;
-  }
-  return membership;
-}
-
 function validateUpdateKey(noteId, update, headerDeviceId) {
+  const logVal = (v) => String(v).slice(0, 128);
   const match = SYNC_KEY_PATTERN.exec(update.key);
   if (!match) {
-    console.error('[validateUpdateKey] key regex failed for key:', update.key);
+    console.error('[validateUpdateKey] key regex failed for key:', logVal(update.key));
     return false;
   }
   if (match[1] !== noteId) {
-    console.error('[validateUpdateKey] noteId mismatch: key has', match[1], 'but body has', noteId);
+    console.error('[validateUpdateKey] noteId mismatch: key has', logVal(match[1]), 'but body has', logVal(noteId));
     return false;
   }
   if (match[2] !== update.deviceId) {
-    console.error('[validateUpdateKey] deviceId mismatch: key has', match[2], 'but update has', update.deviceId);
+    console.error('[validateUpdateKey] deviceId mismatch: key has', logVal(match[2]), 'but update has', logVal(update.deviceId));
     return false;
   }
   if (match[2] !== headerDeviceId) {
-    console.error('[validateUpdateKey] header deviceId mismatch: key has', match[2], 'but header has', headerDeviceId);
+    console.error('[validateUpdateKey] header deviceId mismatch: key has', logVal(match[2]), 'but header has', logVal(headerDeviceId));
     return false;
   }
   if (Number(match[3]) !== update.ts) {
-    console.error('[validateUpdateKey] ts mismatch: key has', match[3], 'but update has', update.ts);
+    console.error('[validateUpdateKey] ts mismatch: key has', logVal(match[3]), 'but update has', update.ts);
     return false;
   }
   if (Number(match[4]) !== update.sequence) {
-    console.error('[validateUpdateKey] seq mismatch: key has', match[4], 'but update has', update.sequence);
+    console.error('[validateUpdateKey] seq mismatch: key has', logVal(match[4]), 'but update has', update.sequence);
     return false;
   }
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(update.data)) {
@@ -127,7 +119,6 @@ function summarizeStoredBatch(result) {
 
 async function yjsSyncRoutes(app) {
   await app.register(require('../middleware/auth'));
-  await app.register(require('../middleware/subscription'));
 
   const protect = { preHandler: [app.authenticate] };
   const protectWrite = { preHandler: [app.authenticate, app.requireActiveSync, app.requirePaidWrite, app.checkDeviceLimit] };
@@ -148,7 +139,7 @@ async function yjsSyncRoutes(app) {
       return reply.status(403).send({ error: 'device_session_mismatch' });
     }
     const { workspaceId, notes } = parsed.data;
-    if (!await requireWorkspaceRole(req, reply, workspaceId, true)) return;
+    if (!await requireWorkspaceWriter(req, reply, workspaceId)) return;
     req.workspaceId = workspaceId;
 
     for (const { noteId, updates } of notes) {
@@ -171,12 +162,15 @@ async function yjsSyncRoutes(app) {
       })),
     }));
     req.body = parsed.data;
+    const { plan: effectivePlan, seats } = await resolveEffectivePlan(req);
     let result;
     try {
       result = await persistence.storeNotesBatch(workspaceId, storedNotes, {
         accountId: req.userId,
         workspaceId: req.workspaceId || null,
         subscription: req.subscription,
+        plan: effectivePlan,
+        seats,
       });
     } catch (error) {
       if (error.code === 'storage_quota_exceeded') {
@@ -187,8 +181,36 @@ async function yjsSyncRoutes(app) {
     const { accepted, duplicate, acceptedBytes: sizeBytes, checkpoint } = result;
 
     const deviceLabel = String(req.headers['x-device-label'] ?? 'Unknown Device').slice(0, 128);
-    await Device.findOneAndUpdate({ accountId: req.userId, deviceId }, { label: deviceLabel, lastSeen: new Date() }, { upsert: true, new: true });
+    try {
+      await Device.findOneAndUpdate({ accountId: req.userId, deviceId }, { label: deviceLabel, lastSeen: new Date() }, { upsert: true, new: true });
+    } catch (err) {
+      // The batch is already committed; a device-metadata write failure must
+      // not turn a successful push into a 500.
+      app.log.warn({ err: err?.message, deviceId }, 'device metadata update failed after push');
+    }
     audit(req, 'yjs_push_batch', { accepted, duplicate, deviceId, workspaceId, noteCount: notes.length });
+
+    // Notify other connected clients via Postgres LISTEN/NOTIFY so they
+    // can trigger an immediate HTTP pull instead of waiting for the next
+    // 30-second timer tick.  The notification is lightweight — just the
+    // workspace ID and affected note IDs.  Hocuspocus subscribes to
+    // 'sync_notifications' and broadcasts a stateless JSON message to
+    // matching connections.
+    if (accepted > 0) {
+      try {
+        const pool = getPool();
+        const noteIds = notes.map((n) => n.noteId);
+        await pool.query('SELECT pg_notify($1, $2)', [
+          'sync_notifications',
+          JSON.stringify({ workspaceId, noteIds, excludeDeviceId: deviceId }),
+        ]);
+      } catch (err) {
+        // Notification failure is non-fatal — the 30-second pull timer
+        // will pick up changes eventually.
+        app.log.warn({ err: err?.message }, 'sync_notifications notify failed');
+      }
+    }
+
     const response = { accepted, duplicate, sizeBytes, checkpoint };
     if (notes.length > 1) response.checkpoints = result.checkpoints;
     return reply.status(201).send(response);
@@ -198,31 +220,44 @@ async function yjsSyncRoutes(app) {
     const parsed = BatchPullSchema.safeParse(req.body ?? {});
     if (!parsed.success) return validationError(reply, parsed);
     const { workspaceId, notes } = parsed.data;
-    if (!await requireWorkspaceRole(req, reply, workspaceId, false)) return;
+    if (!await requireWorkspaceMember(req, reply, workspaceId)) return;
 
-    const result = {};
-    for (const { noteId, checkpoint, limit } of notes) {
-      const page = await persistence.loadUpdatesAfter(workspaceId, noteId, checkpoint, Math.min(limit, MAX_UPDATES_PER_PULL));
-      result[noteId] = {
+    const { cutoffTs } = await historyCutoffForAccount(req.userId, workspaceId);
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[pull-batch] ws=${workspaceId} notes=${notes.length} cutoffTs=${cutoffTs} deviceId=${req.headers['x-device-id'] || 'none'}`);
+      for (const { noteId, checkpoint, limit } of notes) {
+        console.log(`[pull-batch]   note=${noteId} checkpoint=${JSON.stringify(checkpoint)} limit=${limit}`);
+      }
+    }
+
+    const entries = await Promise.all(notes.map(async ({ noteId, checkpoint, limit }) => {
+      const page = await persistence.loadUpdatesAfter(workspaceId, noteId, checkpoint, Math.min(limit, MAX_UPDATES_PER_PULL), cutoffTs);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[pull-batch]   -> ${noteId}: ${page.updates.length} updates, hasMore=${page.hasMore}${page.stale ? ' STALE' : ''}`);
+      }
+      const entry = {
         updates: page.updates.map((update) => formatUpdate(noteId, update)),
         nextCheckpoint: page.nextCheckpoint,
         hasMore: page.hasMore,
       };
-    }
-    return reply.send({ notes: result });
+      if (page.stale) entry.stale = true;
+      return [noteId, entry];
+    }));
+    return reply.send({ notes: Object.fromEntries(entries) });
   });
 
   app.get('/note-ids', { ...protect }, async (req, reply) => {
     const workspaceId = req.query.workspaceId;
     if (!workspaceId) return reply.status(400).send({ error: 'missing_workspace' });
-    if (!await requireWorkspaceRole(req, reply, workspaceId, false)) return;
+    if (!await requireWorkspaceMember(req, reply, workspaceId)) return;
     return reply.send({ noteIds: await persistence.listNoteIds(workspaceId) });
   });
 
   app.delete('/updates', { ...protect, bodyLimit: 4096 }, async (req, reply) => {
     const parsed = DeleteSchema.safeParse(req.body ?? {});
     if (!parsed.success) return validationError(reply, parsed);
-    if (!await requireWorkspaceRole(req, reply, parsed.data.workspaceId, true)) return;
+    if (!await requireWorkspaceWriter(req, reply, parsed.data.workspaceId)) return;
     await persistence.deleteUpdatesForNote(parsed.data.workspaceId, parsed.data.noteId);
     return reply.send({ deleted: true });
   });

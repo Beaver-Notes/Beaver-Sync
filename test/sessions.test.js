@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const repoRoot = path.resolve(__dirname, '..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -17,6 +16,8 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../src/db');
+const { setupTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const { hashSessionId } = require('../src/lib/crypto');
@@ -45,9 +46,14 @@ function resetStubs() {
   models.Account.findById = () => ({ lean: () => null });
 }
 
+test.before(async () => {
+  await setupTestDb();
+});
+
 test.after(() => {
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(models.Account, originalMethods.Account);
+  return close();
 });
 
 async function makeApp() {
@@ -145,7 +151,7 @@ test('validateSession returns null for idle session (lastSeenAt older than IDLE_
 
 test('GET /auth/sessions returns only the authenticated users sessions', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -186,7 +192,7 @@ test('GET /auth/sessions returns only the authenticated users sessions', async (
 
 test('DELETE /auth/sessions/:id revokes the correct session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -223,7 +229,7 @@ test('DELETE /auth/sessions/:id revokes the correct session', async (t) => {
 
 test('DELETE /auth/sessions/:id returns 403 for another users session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -262,7 +268,7 @@ test('DELETE /auth/sessions/:id returns 403 for another users session', async (t
 
 test('POST /auth/logout invalidates the session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -311,7 +317,7 @@ test('POST /auth/logout invalidates the session', async (t) => {
 
 test('POST /auth/sessions/revoke-all revokes every session except the current one', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
   const sessionIdHash = hashSessionId(rawId);
@@ -360,7 +366,7 @@ test('POST /auth/sessions/revoke-all revokes every session except the current on
 
 test('POST /auth/sessions/revoke-all without keepCurrent revokes every session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const rawId = crypto.randomBytes(32).toString('base64url');
 
@@ -404,7 +410,7 @@ test('POST /auth/sessions/revoke-all without keepCurrent revokes every session',
 
 test('POST /auth/sessions/revoke-all rejects unauthenticated requests', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'POST',

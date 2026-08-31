@@ -2,26 +2,17 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-
-const repoRoot = path.resolve(__dirname, '..');
-const dbPath = path.join(repoRoot, '.test-data', 'org-invite-api-test.db');
-fs.rmSync(dbPath, { force: true });
-fs.rmSync(`${dbPath}-shm`, { force: true });
-fs.rmSync(`${dbPath}-wal`, { force: true });
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
-process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
-process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
 process.env.SESSION_HMAC_KEY = 'test-session-hmac-key-at-least-32-characters-long';
 process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 process.env.ENTERPRISE_MODE = 'false';
 
-const { getDb, close } = require('../src/db');
+const { close, query } = require('../src/db');
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
+const { seedAccount } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const { createSession } = require('../src/middleware/auth');
 
@@ -29,18 +20,11 @@ const now = new Date().toISOString();
 const PUBKEY = 'alice-pub-1';
 const PUBKEY_2 = 'bob-pub-2';
 
-function seedAccount(id, kemKey) {
-  const db = getDb();
-  db.prepare('INSERT INTO accounts (id, email_hmac, kem_public_key, created_at) VALUES (?, ?, ?, ?)')
-    .run(id, `${id}-email`, kemKey ?? null, now);
-}
-
-function seedOrg(orgId, ownerId) {
-  const db = getDb();
-  db.prepare('INSERT INTO organizations (id, name_encrypted, slug, created_at) VALUES (?, ?, ?, ?)')
-    .run(orgId, 'org-name', `slug-${orgId}`, now);
-  db.prepare('INSERT INTO org_members (org_id, account_id, role, created_at) VALUES (?, ?, ?, ?)')
-    .run(orgId, ownerId, 'owner', now);
+// Single-use SQL variant without an org subscription row; the models-based
+// factory.seedOrg always creates one, which these assertions never had.
+async function seedOrg(orgId, ownerId) {
+  await query('INSERT INTO organizations (id, name_encrypted, slug, created_at) VALUES ($1, $2, $3, $4)', [orgId, 'org-name', `slug-${orgId}`, now]);
+  await query('INSERT INTO org_members (org_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', [orgId, ownerId, 'owner', now]);
 }
 
 async function inject(app, session, method, url, payload) {
@@ -50,23 +34,22 @@ async function inject(app, session, method, url, payload) {
 }
 
 test.before(async () => {
-  seedAccount('inv-owner', PUBKEY);
-  seedAccount('inv-joiner', PUBKEY_2);
-  seedAccount('inv-joiner2', PUBKEY);
-  seedOrg('org-invite-1', 'inv-owner');
-  seedOrg('org-invite-2', 'inv-owner');
+  await setupTestDb();
+  await cleanTestDb();
+  await seedAccount('inv-owner', PUBKEY);
+  await seedAccount('inv-joiner', PUBKEY_2);
+  await seedAccount('inv-joiner2', PUBKEY);
+  await seedOrg('org-invite-1', 'inv-owner');
+  await seedOrg('org-invite-2', 'inv-owner');
 });
 
 test.after(async () => {
-  close();
-  fs.rmSync(dbPath, { force: true });
-  fs.rmSync(`${dbPath}-shm`, { force: true });
-  fs.rmSync(`${dbPath}-wal`, { force: true });
+  await close();
 });
 
 test('admin creates an invite that returns a raw token and grants membership on join', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const ownerSession = await createSession('inv-owner', { headers: {} });
   const joinerSession = await createSession('inv-joiner', { headers: {} });
 
@@ -86,8 +69,7 @@ test('admin creates an invite that returns a raw token and grants membership on 
   const join = await inject(app, joinerSession, 'POST', `/organizations/join/${created.token}`);
   assert.equal(join.statusCode, 201);
   assert.deepEqual(join.json(), { orgId: 'org-invite-1', role: 'member' });
-  const membership = getDb().prepare('SELECT role FROM org_members WHERE org_id = ? AND account_id = ?')
-    .get('org-invite-1', 'inv-joiner');
+  const membership = (await query('SELECT role FROM org_members WHERE org_id = $1 AND account_id = $2', ['org-invite-1', 'inv-joiner'])).rows[0];
   assert.equal(membership.role, 'member');
 
   const duplicate = await inject(app, joinerSession, 'POST', `/organizations/join/${created.token}`);
@@ -97,8 +79,8 @@ test('admin creates an invite that returns a raw token and grants membership on 
 
 test('a keyless user cannot join via invite and is rejected with 403 keypair_required', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
-  seedAccount('inv-keyless', null);
+  t.after(async () => { await app.close(); });
+  await seedAccount('inv-keyless', null);
   const ownerSession = await createSession('inv-owner', { headers: {} });
   const keylessSession = await createSession('inv-keyless', { headers: {} });
 
@@ -109,14 +91,13 @@ test('a keyless user cannot join via invite and is rejected with 403 keypair_req
   const join = await inject(app, keylessSession, 'POST', `/organizations/join/${token}`);
   assert.equal(join.statusCode, 403);
   assert.equal(join.json().error, 'keypair_required');
-  const membership = getDb().prepare('SELECT COUNT(*) AS count FROM org_members WHERE org_id = ? AND account_id = ?')
-    .get('org-invite-1', 'inv-keyless').count;
+  const membership = (await query('SELECT COUNT(*)::int AS count FROM org_members WHERE org_id = $1 AND account_id = $2', ['org-invite-1', 'inv-keyless'])).rows[0].count;
   assert.equal(membership, 0);
 });
 
 test('a require-approval invite is pending until an admin approves it, then join succeeds', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const ownerSession = await createSession('inv-owner', { headers: {} });
   const joinerSession = await createSession('inv-joiner2', { headers: {} });
 
@@ -128,8 +109,7 @@ test('a require-approval invite is pending until an admin approves it, then join
   const pending = await inject(app, joinerSession, 'POST', `/organizations/join/${token}`);
   assert.equal(pending.statusCode, 202);
   assert.deepEqual(pending.json(), { pending: true, message: 'Join request requires approval.' });
-  assert.equal(getDb().prepare('SELECT COUNT(*) AS count FROM org_members WHERE org_id = ? AND account_id = ?')
-    .get('org-invite-2', 'inv-joiner2').count, 0);
+  assert.equal((await query('SELECT COUNT(*)::int AS count FROM org_members WHERE org_id = $1 AND account_id = $2', ['org-invite-2', 'inv-joiner2'])).rows[0].count, 0);
 
   const approve = await inject(app, ownerSession, 'POST', '/organizations/org-invite-2/invite/' + token + '/approve');
   assert.equal(approve.statusCode, 200);
@@ -142,7 +122,7 @@ test('a require-approval invite is pending until an admin approves it, then join
 
 test('revoked invites are rejected with 404 on join', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
   const ownerSession = await createSession('inv-owner', { headers: {} });
   const joinerSession = await createSession('inv-joiner', { headers: {} });
 
@@ -161,32 +141,33 @@ test('revoked invites are rejected with 404 on join', async (t) => {
 
 test('public-keys returns only collaborators with keypairs and 403s for outsiders', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
-  seedAccount('pk-owner', PUBKEY);
-  seedAccount('pk-user1', PUBKEY_2);
-  seedAccount('pk-user2', null);
-  seedAccount('pk-outsider', PUBKEY);
-  const db = getDb();
+  t.after(async () => { await app.close(); });
+  await seedAccount('pk-owner', PUBKEY);
+  await seedAccount('pk-user1', PUBKEY_2);
+  await seedAccount('pk-user2', null);
+  await seedAccount('pk-outsider', PUBKEY);
   for (const uid of ['pk-owner', 'pk-user1', 'pk-user2']) {
-    db.prepare('INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run('note-pk', uid, 'pk-owner', 'editor', now);
+    await query(
+      'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
+      ['note-pubkey-test', uid, 'pk-owner', 'editor', now]
+    );
   }
 
   const ownerSession = await createSession('pk-owner', { headers: {} });
   const outsiderSession = await createSession('pk-outsider', { headers: {} });
 
-  const response = await inject(app, ownerSession, 'GET', '/collaboration/public-keys/note-pk');
+  const response = await inject(app, ownerSession, 'GET', '/collaboration/public-keys/note-pubkey-test');
   assert.equal(response.statusCode, 200);
   const expected = [
-    { userId: 'pk-owner', kemPublicKey: PUBKEY },
-    { userId: 'pk-user1', kemPublicKey: PUBKEY_2 },
+    { userId: 'pk-owner', deviceId: 'default', kemPublicKey: PUBKEY },
+    { userId: 'pk-user1', deviceId: 'default', kemPublicKey: PUBKEY_2 },
   ];
   assert.deepEqual(
     response.json().collaborators.sort((a, b) => a.userId.localeCompare(b.userId)),
     expected.sort((a, b) => a.userId.localeCompare(b.userId))
   );
 
-  const forbidden = await inject(app, outsiderSession, 'GET', '/collaboration/public-keys/note-pk');
+  const forbidden = await inject(app, outsiderSession, 'GET', '/collaboration/public-keys/note-pubkey-test');
   assert.equal(forbidden.statusCode, 403);
   assert.equal(forbidden.json().error, 'forbidden');
 });

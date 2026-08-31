@@ -1,5 +1,7 @@
 'use strict';
 
+// SMOKE TEST ONLY: exercises the model layer against a mocked postgres driver
+// to confirm methods are thenable. It does NOT assert real query behavior.
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
@@ -28,7 +30,11 @@ describe('Async model layer', () => {
       id: postgresPath,
       filename: postgresPath,
       loaded: true,
-      exports: { query: mockQuery, transaction: mockTransaction }
+      exports: {
+        query: mockQuery,
+        transaction: mockTransaction,
+        getPool: () => ({}),
+      }
     };
   });
 

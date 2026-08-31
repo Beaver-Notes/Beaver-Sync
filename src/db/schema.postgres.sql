@@ -1,19 +1,46 @@
 -- Postgres schema for Beaver Sync
--- Converted from src/db/schema.sql (SQLite)
 
 CREATE TABLE IF NOT EXISTS accounts (
   id                    TEXT PRIMARY KEY,
-  username              TEXT UNIQUE,
+  username              TEXT,
   email_hmac            TEXT NOT NULL UNIQUE,
   email_encrypted       TEXT,
   kem_public_key        TEXT,
+  device_keys           JSONB NOT NULL DEFAULT '[]'::jsonb,
   password_hash         TEXT,
   recovery_key_hash     TEXT,
   failed_login_attempts BIGINT NOT NULL DEFAULT 0,
   locked_until          TEXT,
   kdf_salt              TEXT,
   wrapped_aek           TEXT,
+  recovery_code_hash    TEXT,
+  recovery_code_generated_at TIMESTAMPTZ,
   created_at            TEXT NOT NULL
+);
+
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS jwt_revoked_at TIMESTAMPTZ;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verification_token_hash TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMPTZ;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_reset_token_hash TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_secret_encrypted TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_secret_encrypted TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_expires_at TIMESTAMPTZ;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_last_timestep BIGINT;
+
+CREATE TABLE IF NOT EXISTS ws_tickets (
+  id_hash    TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id  TEXT,
+  role       TEXT,
+  expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mfa_challenges (
+  id_hash    TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS organizations (
@@ -28,6 +55,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
   name_encrypted     TEXT NOT NULL,
   owner_id           TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   org_id             TEXT REFERENCES organizations(id),
+  vault_wrapped_keys TEXT,
   storage_used_bytes BIGINT NOT NULL DEFAULT 0 CHECK(storage_used_bytes >= 0),
   data_residency     TEXT NOT NULL DEFAULT 'auto' CHECK(data_residency IN ('auto', 'eu', 'us', 'asia', 'custom')),
   emoji              TEXT,
@@ -65,7 +93,7 @@ CREATE TABLE IF NOT EXISTS commits (
 CREATE TABLE IF NOT EXISTS subscriptions (
   id                 TEXT PRIMARY KEY,
   account_id         TEXT NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
-  plan               TEXT NOT NULL CHECK(plan IN ('free', 'basic', 'pro', 'team', 'enterprise')),
+  plan               TEXT NOT NULL CHECK(plan IN ('free', 'starter', 'pro', 'team', 'enterprise')),
   status             TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'grace_period', 'expired')),
   provider           TEXT CHECK(provider IN ('stripe', 'apple', 'google')),
   renews_at          TEXT,
@@ -118,9 +146,10 @@ CREATE TABLE IF NOT EXISTS compaction_locks (
 CREATE TABLE IF NOT EXISTS note_keys (
   note_id     TEXT NOT NULL,
   user_id     TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id   TEXT NOT NULL DEFAULT 'default',
   wrapped_key TEXT NOT NULL,
   created_at  TEXT NOT NULL,
-  PRIMARY KEY (note_id, user_id)
+  PRIMARY KEY (note_id, user_id, device_id)
 );
 
 CREATE TABLE IF NOT EXISTS workspace_keys (
@@ -140,6 +169,16 @@ CREATE TABLE IF NOT EXISTS org_keys (
 );
 
 CREATE INDEX IF NOT EXISTS idx_note_keys_user ON note_keys(user_id);
+
+CREATE TABLE IF NOT EXISTS key_distribution_requests (
+  note_id          TEXT NOT NULL,
+  user_id          TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  target_device_id TEXT NOT NULL,
+  requested_at     TEXT NOT NULL,
+  PRIMARY KEY (note_id, user_id, target_device_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_distribution_requests_user ON key_distribution_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_workspace_keys_user ON workspace_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_org_keys_user ON org_keys(user_id);
 
@@ -156,15 +195,15 @@ CREATE INDEX IF NOT EXISTS idx_org_members_account ON org_members(account_id);
 CREATE TABLE IF NOT EXISTS org_subscriptions (
   id TEXT PRIMARY KEY,
   org_id TEXT NOT NULL UNIQUE REFERENCES organizations(id) ON DELETE CASCADE,
-  plan TEXT NOT NULL CHECK(plan IN ('free', 'basic', 'pro', 'team', 'enterprise')),
+  plan TEXT NOT NULL CHECK(plan IN ('free', 'starter', 'pro', 'team', 'enterprise')),
   status TEXT DEFAULT 'active' CHECK(status IN ('active', 'grace_period', 'expired')),
   seats INTEGER DEFAULT 1,
   provider TEXT CHECK(provider IN ('stripe', 'apple', 'google')),
   renews_at TEXT,
   stripe_customer_id TEXT,
   stripe_subscription_id TEXT,
-  storage_quota_bytes INTEGER DEFAULT 0,
-  storage_used_bytes INTEGER DEFAULT 0,
+  storage_quota_bytes BIGINT DEFAULT 0,
+  storage_used_bytes BIGINT DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
@@ -227,7 +266,7 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
 CREATE TABLE IF NOT EXISTS workspace_members (
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   account_id   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  role         TEXT NOT NULL CHECK(role IN ('owner', 'editor', 'viewer', 'guest')),
+  role         TEXT NOT NULL CHECK(role IN ('owner', 'admin', 'editor', 'viewer')),
   created_at   TEXT NOT NULL,
   PRIMARY KEY (workspace_id, account_id)
 );
@@ -235,7 +274,7 @@ CREATE TABLE IF NOT EXISTS workspace_members (
 CREATE TABLE IF NOT EXISTS workspace_invites (
   token_hash       TEXT PRIMARY KEY,
   workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  role             TEXT NOT NULL CHECK(role IN ('editor', 'viewer', 'guest')),
+  role             TEXT NOT NULL CHECK(role IN ('editor', 'viewer')),
   require_approval INTEGER NOT NULL DEFAULT 0,
   expires_at       TEXT NOT NULL,
   max_uses         INTEGER NOT NULL DEFAULT 0,
@@ -308,12 +347,12 @@ CREATE TABLE IF NOT EXISTS yjs_doc_updates (
   device_id       TEXT NOT NULL,
   clock           BIGINT NOT NULL,
   ts              BIGINT NOT NULL,
-  created_at      TEXT NOT NULL
+  created_at      TEXT NOT NULL,
+  UNIQUE (workspace_id, note_id, device_id, clock)
 );
 
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_workspace_note ON yjs_doc_updates(workspace_id, note_id, ts);
 CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_device ON yjs_doc_updates(workspace_id, note_id, device_id);
-CREATE INDEX IF NOT EXISTS idx_yjs_doc_updates_clock ON yjs_doc_updates(workspace_id, note_id, device_id, clock);
 
 CREATE TABLE IF NOT EXISTS sync_workspace_state (
   workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -329,6 +368,7 @@ CREATE TABLE IF NOT EXISTS sync_document_state (
   note_id TEXT NOT NULL,
   snapshot_generation BIGINT NOT NULL DEFAULT 0,
   snapshot_key TEXT,
+  snapshot_ts BIGINT NOT NULL DEFAULT 0,
   checkpoint_ts BIGINT NOT NULL DEFAULT 0,
   checkpoint_sequence BIGINT NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
@@ -382,3 +422,26 @@ CREATE TABLE IF NOT EXISTS vault_proof_challenges (
 
 CREATE INDEX IF NOT EXISTS idx_vault_proof_challenges_lookup
   ON vault_proof_challenges(workspace_id, account_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS yjs_documents (
+  doc_name TEXT PRIMARY KEY,
+  state_vector BYTEA,
+  blob BYTEA NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_yjs_documents_updated ON yjs_documents(updated_at);
+
+CREATE TABLE IF NOT EXISTS asset_reservations (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+  asset_key TEXT NOT NULL,
+  size_bytes BIGINT NOT NULL CHECK(size_bytes >= 0),
+  status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed')),
+  expires_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_asset_reservations_account ON asset_reservations(account_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_asset_reservations_expires ON asset_reservations(expires_at) WHERE status = 'pending';

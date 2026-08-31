@@ -1,0 +1,92 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: beaver-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [api, ws-relay]
+    networks:
+      - beaver-internal
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: beaver-sync-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
+    volumes:
+      - beaver_data:/app/keys
+    networks:
+      - beaver-internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  ws-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.ws-relay
+    container_name: beaver-sync-ws-relay
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
+      - AUTH_BACKEND_URL=http://api:3000
+      - WS_RELAY_PORT=8080
+    command: ["node", "src/ws-relay.js"]
+    networks:
+      - beaver-internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: beaver-sync-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-beaver}
+      POSTGRES_USER: ${POSTGRES_USER:-beaver}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-beaver}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - beaver-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-beaver}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pg_data:
+  beaver_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  beaver-internal:
+    driver: bridge

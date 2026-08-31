@@ -8,7 +8,6 @@ const bcrypt = require('bcrypt');
 const repoRoot = path.resolve(__dirname, '..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -18,6 +17,8 @@ process.env.AUTH_RATE_LIMIT_PER_MINUTE = '2';
 process.env.ASSET_URL_TTL_SECONDS = '300';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../src/db');
+const { setupTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const { signToken } = require('../src/middleware/auth');
 const models = require('../src/models');
@@ -84,13 +85,13 @@ function resetStubs() {
 
   models.Subscription.findOne = () => chain({
     accountId: 'user-a',
-    plan: 'basic',
+    plan: 'starter',
     status: 'active',
     storageUsedBytes: 0,
     storageQuotaBytes: 4 * 1024 * 1024 * 1024,
   });
   models.Subscription.updateOne = async () => ({ modifiedCount: 1 });
-  models.Subscription.findOneAndUpdate = async () => ({ id: 'sub-id', accountId: 'user-a', plan: 'basic', status: 'active' });
+  models.Subscription.findOneAndUpdate = async () => ({ id: 'sub-id', accountId: 'user-a', plan: 'starter', status: 'active' });
   models.Subscription.deleteOne = async () => ({ deletedCount: 1 });
 
   models.CommitMeta.find = () => chain([]);
@@ -124,6 +125,10 @@ async function makeApp() {
   return app;
 }
 
+test.before(async () => {
+  await setupTestDb();
+});
+
 test.after(() => {
   Object.assign(models.Account, originalMethods.Account);
   Object.assign(models.Subscription, originalMethods.Subscription);
@@ -131,11 +136,12 @@ test.after(() => {
   Object.assign(models.Device, originalMethods.Device);
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(r2, originalMethods.r2);
+  return close();
 });
 
 test('unauthorized access to private account route is rejected', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'GET',
@@ -148,7 +154,7 @@ test('unauthorized access to private account route is rejected', async (t) => {
 
 test('cross-tenant commit access is rejected with object-level authorization', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let lastCommitQuery = null;
   models.CommitMeta.findOne = (query) => {
@@ -173,7 +179,7 @@ test('cross-tenant commit access is rejected with object-level authorization', a
 
 test('auth endpoint rate limiting throttles repeated login attempts', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const passwordHash = await bcrypt.hash('correct horse battery staple', 4);
   models.Account.findOne = async ({ emailHmac }) => {
@@ -211,7 +217,7 @@ test('auth endpoint rate limiting throttles repeated login attempts', async (t) 
 
 test('oversized asset uploads are rejected before storage work', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let storageTouched = false;
   r2.stat = async () => {
@@ -236,7 +242,7 @@ test('oversized asset uploads are rejected before storage work', async (t) => {
 
 test('malformed auth payloads with the wrong content type are rejected early', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'POST',
@@ -252,7 +258,7 @@ test('malformed auth payloads with the wrong content type are rejected early', a
 
 test('signed download URLs stay tenant-scoped and use short-lived expiry', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let presignArgs = null;
   r2.stat = async (key) => (key === 'user-a/assets/file-1'

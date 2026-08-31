@@ -3,9 +3,11 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert');
 
+const { setupTestDb } = require('../helpers/db');
+
 describe('Postgres HA integration', () => {
   before(async () => {
-    process.env.DATABASE_URL = 'postgresql://localhost:5432/test';
+    await setupTestDb();
   });
 
   after(async () => {
@@ -20,20 +22,21 @@ describe('Postgres HA integration', () => {
   });
 
   it('can run migrations', async () => {
-    const { runMigrations } = require('../../src/db/migrate-postgres');
-    await runMigrations();
+    const { ensureSchema } = require('../../src/db/migrate-postgres');
+    await ensureSchema();
   });
 
   it('can create and query account', async () => {
     const { Account } = require('../../src/models');
+    const emailHmac = `test-${Date.now()}@example.com`;
     const account = await Account.create({
-      emailHmac: 'test@example.com',
+      emailHmac,
       username: 'testuser',
     });
     assert(account.id);
 
     const found = await Account.findById(account.id).lean();
-    assert(found.emailHmac === 'test@example.com');
+    assert(found.emailHmac === emailHmac);
 
     await Account.deleteOne({ _id: account.id });
   });

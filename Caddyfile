@@ -1,0 +1,19 @@
+{$APP_URL} {
+    reverse_proxy /api/* api:3000
+
+    @websockets {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @websockets ws-relay:8080 {
+        lb_policy cookie beaver_ws {
+            ttl 1h
+        }
+    }
+
+    reverse_proxy /ws/* ws-relay:8080 {
+        lb_policy cookie beaver_ws {
+            ttl 1h
+        }
+    }
+}

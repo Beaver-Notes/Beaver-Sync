@@ -23,6 +23,11 @@ function generateAliasToken() {
   return crypto.randomBytes(16).toString("base64url").toLowerCase();
 }
 
+// Prevent CR/LF injection into SMTP commands and message headers.
+function sanitizeHeader(value) {
+  return String(value ?? "").replace(/[\r\n]/g, "").trim();
+}
+
 async function createEmailAlias(accountId, emailEncrypted, ttlMs) {
   const token = generateAliasToken();
   const alias = `${token}@${NOTIFY_DOMAIN}`;
@@ -71,6 +76,11 @@ async function sendWithAlias(app, accountId, subject, html) {
   const client = getResend();
   if (!client) {
     app.log.debug("RESEND_API_KEY not set - skipping email");
+    return;
+  }
+
+  if (process.env.EMAIL_ENABLED === "false") {
+    app.log.debug("EMAIL_ENABLED=false - skipping email send");
     return;
   }
 
@@ -157,6 +167,10 @@ async function sendViaSmtp({ host, port, user, pass, from, to, subject, html }) 
       socket.write(line + "\r\n");
     }
 
+    from = sanitizeHeader(from);
+    to = sanitizeHeader(to);
+    subject = sanitizeHeader(subject);
+
     function onData(data) {
       buffer += data.toString();
       const lines = buffer.split("\r\n");
@@ -230,6 +244,9 @@ async function sendViaSmtp({ host, port, user, pass, from, to, subject, html }) 
               break;
             case 7:
               {
+                // SMTP dot-stuffing (RFC 5321 §4.5.2): any line beginning with
+                // '.' must be escaped as '..' so a single '.' terminates DATA.
+                const stuffed = String(html).split(/\r?\n/).map((l) => (l.startsWith('.') ? '.' + l : l)).join('\r\n');
                 const msg = [
                   `From: ${from}`,
                   `To: ${to}`,
@@ -237,7 +254,7 @@ async function sendViaSmtp({ host, port, user, pass, from, to, subject, html }) 
                   "MIME-Version: 1.0",
                   "Content-Type: text/html; charset=utf-8",
                   "",
-                  html,
+                  stuffed,
                   ".",
                 ].join("\r\n");
                 send(msg);
@@ -277,13 +294,17 @@ async function sendViaSendmail(to, { subject, html, text }) {
     sendmail.on("error", (err) => reject(err));
     sendmail.stderr.on("data", (d) => { stderr += d.toString(); });
 
+    to = sanitizeHeader(to);
+    subject = sanitizeHeader(subject);
+
+    const stuffed = String(html || text || "").split(/\r?\n/).map((l) => (l.startsWith('.') ? '.' + l : l)).join('\n');
     const message = [
       `To: ${to}`,
       `Subject: ${subject}`,
       "MIME-Version: 1.0",
       "Content-Type: text/html; charset=utf-8",
       "",
-      html || text || "",
+      stuffed,
     ].join("\n");
 
     sendmail.stdin.write(message);

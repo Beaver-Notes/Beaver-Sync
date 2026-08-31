@@ -2,38 +2,188 @@
 
 const fs = require('fs');
 const path = require('path');
-const { query } = require('./postgres');
+const crypto = require('crypto');
+const { query, getPool } = require('./postgres');
 
-async function runMigrations() {
-  await query(`CREATE TABLE IF NOT EXISTS _migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+const SCHEMA_ADVISORY_LOCK_KEY = 930743;
 
-  const applied = await query('SELECT filename FROM _migrations');
-  const appliedSet = new Set(applied.rows.map(r => r.filename));
+async function ensureSchema() {
+  const schemaPath = path.join(__dirname, 'schema.postgres.sql');
+  if (!fs.existsSync(schemaPath)) {
+    throw new Error('schema.postgres.sql not found; Postgres backend requires it');
+  }
 
-  const migrationsDir = path.join(__dirname, 'migrations');
-  if (!fs.existsSync(migrationsDir)) return;
-
-  const files = fs.readdirSync(migrationsDir)
-    .filter(f => f.endsWith('.sql') && f.includes('.postgres.'))
-    .sort();
-
-  for (const file of files) {
-    if (appliedSet.has(file)) continue;
-
-    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+  const lockClient = await getPool().connect();
+  try {
+    await lockClient.query('SELECT pg_advisory_lock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
+    const schema = fs.readFileSync(schemaPath, 'utf8');
+    await query(schema);
+    // 02.1: username is a display label, not unique — drop legacy UNIQUE constraint
     try {
-      await query(sql);
-      await query('INSERT INTO _migrations (filename, applied_at) VALUES ($1, $2)', [file, new Date().toISOString()]);
-      console.log(`[db] Applied migration: ${file}`);
-    } catch (err) {
-      if (err.message.includes('already exists')) {
-        await query('INSERT INTO _migrations (filename, applied_at) VALUES ($1, $2)', [file, new Date().toISOString()]);
-        console.log(`[db] Skipped migration: ${file}`);
-      } else {
-        throw err;
-      }
+      await query('ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_username_key');
+    } catch {}
+    try {
+      await query('DROP INDEX IF EXISTS accounts_username_key');
+    } catch {}
+    // 02.2: recovery code — single active per account, HMAC-hashed
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS recovery_code_hash TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS recovery_code_generated_at TIMESTAMPTZ');
+    } catch {}
+    // 02.3: email verification soft gate — bool + single-use hashed token 24h TTL
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verification_token_hash TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMPTZ');
+    } catch {}
+    // 02.4: password reset — single-use hashed token 1h TTL
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_reset_token_hash TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ');
+    } catch {}
+    // 02.5: TOTP 2FA encrypted secret + pending + replay protection
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_secret_encrypted TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_secret_encrypted TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_expires_at TIMESTAMPTZ');
+    } catch {}
+    try {
+      await query('ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_last_timestep BIGINT');
+    } catch {}
+    try {
+      await query(`CREATE TABLE IF NOT EXISTS mfa_challenges (
+        id_hash TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        expires_at TIMESTAMPTZ NOT NULL
+      )`);
+    } catch {}
+    // backfill for legacy workspaces table created before vault_wrapped_keys/emoji/color existed
+    try {
+      await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS vault_wrapped_keys TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS emoji TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS color TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS org_id TEXT REFERENCES organizations(id)');
+    } catch {}
+    // 04.1: asset quota reservations (presign preflight + reap)
+    try {
+      await query(`CREATE TABLE IF NOT EXISTS asset_reservations (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+        asset_key TEXT NOT NULL,
+        size_bytes BIGINT NOT NULL CHECK(size_bytes >= 0),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'confirmed')),
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL
+      )`);
+    } catch {}
+    try { await query('CREATE INDEX IF NOT EXISTS idx_asset_reservations_account ON asset_reservations(account_id, status, expires_at)'); } catch {}
+    try { await query('CREATE INDEX IF NOT EXISTS idx_asset_reservations_expires ON asset_reservations(expires_at) WHERE status = \'pending\''); } catch {}
+  } finally {
+    try {
+      await lockClient.query('SELECT pg_advisory_unlock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
+    } finally {
+      lockClient.release();
     }
   }
 }
 
-module.exports = { runMigrations };
+/**
+ * One-shot migration: fold yjs_documents rows into yjs_doc_updates journal.
+ * Runs under advisory lock; idempotent (skips if journal already has data >= snapshot generation).
+ * Returns migration counts for recording.
+ */
+async function migrateYjsDocumentsToJournal() {
+  const lockClient = await getPool().connect();
+  try {
+    await lockClient.query('SELECT pg_advisory_lock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
+
+    // Check if yjs_documents table exists and has rows
+    const { rows: docRows } = await lockClient.query(`
+      SELECT doc_name, blob, updated_at FROM yjs_documents
+    `)
+
+    if (docRows.length === 0) {
+      return { migrated: 0, skipped: 0, deleted: 0 }
+    }
+
+    const { parseRoomName } = require('../persistence/yjs')
+    let migrated = 0
+    let skipped = 0
+    let deleted = 0
+
+    for (const row of docRows) {
+      const parsed = parseRoomName(row.doc_name)
+      if (!parsed || !parsed.noteId) {
+        console.warn(`[migration] Skipping invalid doc_name: ${row.doc_name}`)
+        skipped++
+        continue
+      }
+
+      const { workspaceId, noteId } = parsed
+
+      // Check if journal already has data for this document (idempotency)
+      const { rows: journalRows } = await lockClient.query(`
+        SELECT COUNT(*)::int AS count FROM yjs_doc_updates
+        WHERE workspace_id = $1 AND note_id = $2
+      `, [workspaceId, noteId])
+
+      if (journalRows[0]?.count > 0) {
+        console.log(`[migration] Journal already has data for ${workspaceId}/${noteId}, skipping`)
+        skipped++
+        // Still delete the yjs_documents row since journal is authoritative
+        await lockClient.query('DELETE FROM yjs_documents WHERE doc_name = $1', [row.doc_name])
+        deleted++
+        continue
+      }
+
+      // Insert the blob as a journal update
+      // Use a synthetic device_id/clock to represent the pre-migration state
+      const deviceId = 'relay'
+      const clock = Math.floor(new Date(row.updated_at).getTime() / 1000) // seconds since epoch
+      const ts = clock * 1000 // milliseconds
+      const updateId = `migration-${crypto.randomUUID()}`
+
+      await lockClient.query(`
+        INSERT INTO yjs_doc_updates (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (workspace_id, note_id, device_id, clock) DO NOTHING
+      `, [updateId, workspaceId, noteId, row.blob, 0, deviceId, clock, ts, row.updated_at])
+
+      // Delete the yjs_documents row
+      await lockClient.query('DELETE FROM yjs_documents WHERE doc_name = $1', [row.doc_name])
+
+      migrated++
+      deleted++
+      console.log(`[migration] Migrated ${row.doc_name} -> journal (${row.blob?.byteLength ?? 0} bytes)`)
+    }
+
+    return { migrated, skipped, deleted }
+  } finally {
+    try {
+      await lockClient.query('SELECT pg_advisory_unlock($1)', [SCHEMA_ADVISORY_LOCK_KEY])
+    } finally {
+      lockClient.release()
+    }
+  }
+}
+
+module.exports = { ensureSchema, migrateYjsDocumentsToJournal };

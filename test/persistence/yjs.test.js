@@ -1,25 +1,21 @@
 'use strict';
 
-process.env.DATABASE_URL = 'postgresql://localhost:5432/test';
+require('../helpers/db');
 
-const { describe, it } = require('node:test');
-const assert = require('node:assert');
+const { describe, it, after } = require('node:test');
+const assert = require('node:assert/strict');
 
 const persistence = require('../../src/persistence/yjs');
 
-describe('Yjs persistence', () => {
-  it('storeUpdate returns a promise', async () => {
-    const result = persistence.storeUpdate('ws1', 'note1', Buffer.from('test'), 'dev1', 1);
-    assert(result instanceof Promise);
-    await result.catch(() => {});
-  });
+after(async () => {
+  await require('../../src/db').close();
+});
 
+describe('Yjs persistence', () => {
   it('exports expected functions', () => {
     assert.equal(typeof persistence.parseRoomName, 'function');
-    assert.equal(typeof persistence.storeUpdate, 'function');
     assert.equal(typeof persistence.storeUpdatesBatch, 'function');
     assert.equal(typeof persistence.storeNotesBatch, 'function');
-    assert.equal(typeof persistence.getAcceptedBytes, 'function');
     assert.equal(typeof persistence.getWorkspaceSyncState, 'function');
     assert.equal(typeof persistence.getDocumentSyncState, 'function');
     assert.equal(typeof persistence.loadUpdatesAfter, 'function');

@@ -3,6 +3,7 @@
 const { Workspace, WorkspaceMember, Device, Session, AuditLog } = require('../models');
 const mlkem = require('../lib/mlkem');
 const { isEnterpriseMode } = require('../lib/license');
+const { resolvePlanForAccount } = require('../lib/plans');
 
 const BODY_LIMIT = parseInt(process.env.ADMIN_BODY_LIMIT_BYTES ?? '4096', 10);
 
@@ -18,18 +19,20 @@ const rateLimit = {
 };
 
 async function requirePlanAndOwner(app, req, reply, workspaceId) {
-  let sub = null;
-  if (!isEnterpriseMode()) {
-    const { Subscription } = require('../models');
-    sub = await Subscription.findOne({ accountId: req.userId }).lean();
-    if (!sub || (sub.plan !== 'team' && sub.plan !== 'enterprise')) {
-      return reply.status(403).send({ error: 'forbidden', message: 'Admin routes require a Team or Enterprise plan.' });
-    }
-  }
-
-  const ws = await Workspace.findById(workspaceId, { nameEncrypted: 1 }).lean();
+  const ws = await Workspace.findById(workspaceId, { nameEncrypted: 1, orgId: 1 }).lean();
   if (!ws) {
     return reply.status(404).send({ error: 'not_found', message: 'Workspace not found.' });
+  }
+
+  let sub = null;
+  if (!isEnterpriseMode()) {
+    const { Subscription, OrgSubscription } = require('../models');
+    sub = await Subscription.findOne({ accountId: req.userId }).lean();
+    const orgSub = ws.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
+    const effectivePlan = resolvePlanForAccount({ orgSub, sub });
+    if (!effectivePlan || (effectivePlan !== 'team' && effectivePlan !== 'enterprise')) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Admin routes require a Team or Enterprise plan.' });
+    }
   }
 
   const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
@@ -109,7 +112,9 @@ async function adminRoutes(app) {
         { accountId: targetUserId, workspaceId },
         { revoked: true }
       );
-    } catch {}
+    } catch (err) {
+      console.error('[admin] failed to revoke sessions for removed member:', err?.message);
+    }
 
     return reply.send({ deleted: true, workspaceId, userId: targetUserId });
   });
@@ -137,7 +142,25 @@ async function adminRoutes(app) {
       createdAt: d.createdAt,
     }));
 
-    return reply.send({ workspaceId, devices: flat });
+    const sessions = accountIds.length > 0
+      ? (await Session.find(
+          { accountId: { $in: accountIds }, workspaceId },
+          { idHash: 1, accountId: 1, deviceLabel: 1, deviceId: 1, ipSubnet: 1, lastSeenAt: 1, revoked: 1, createdAt: 1 }
+        ).lean())
+      : [];
+
+    const flatSessions = sessions.map(s => ({
+      userId: s.accountId,
+      idHash: s.idHash,
+      deviceLabel: s.deviceLabel,
+      deviceId: s.deviceId,
+      ipSubnet: s.ipSubnet,
+      lastSeenAt: s.lastSeenAt,
+      revoked: Boolean(s.revoked),
+      createdAt: s.createdAt,
+    }));
+
+    return reply.send({ workspaceId, devices: flat, sessions: flatSessions });
   });
 
   app.delete('/sessions/:hash', {
@@ -191,6 +214,20 @@ async function adminRoutes(app) {
     ...protect,
   }, async (req, reply) => {
     const workspaceId = req.params.id;
+
+    if (!isEnterpriseMode()) {
+      const { Subscription, OrgSubscription } = require('../models');
+      const sub = await Subscription.findOne({ accountId: req.userId }).lean();
+
+      const ws = await Workspace.findById(workspaceId, { orgId: 1 }).lean();
+      const orgSub = ws?.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
+      const isEnterprise = resolvePlanForAccount({ orgSub, sub }) === 'enterprise';
+
+      if (!isEnterprise) {
+        return reply.status(403).send({ error: 'forbidden', message: 'Audit logs require an Enterprise plan.' });
+      }
+    }
+
     const ownerCheck = await requirePlanAndOwner(app, req, reply, workspaceId);
     if (!ownerCheck) return;
 
@@ -218,7 +255,9 @@ async function adminRoutes(app) {
         try {
           const raw = await mlkem.decryptMetadata(log.metadataEncrypted);
           meta = JSON.parse(raw);
-        } catch { }
+        } catch (err) {
+          console.warn('[admin] failed to decrypt audit metadata:', err?.message);
+        }
       }
       return { ...log, metadataEncrypted: undefined, metadata: meta };
     }));

@@ -2,7 +2,9 @@
 
 const crypto = require('crypto');
 const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember, OrgKey, OrgInvite } = require('../models');
+const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { requireOrgMember, requireOrgAdmin, requireOrgOwner } = require('../middleware/org');
+const { VALID_PLANS } = require('../lib/plans');
 
 async function organizationRoutes(app) {
   await app.register(require('../middleware/auth'));
@@ -11,7 +13,6 @@ async function organizationRoutes(app) {
     preHandler: [app.authenticate],
   };
 
-  // List user's organizations
   app.get('/', protect, async (req, reply) => {
     const memberships = await OrgMember.find({ accountId: req.userId }).lean();
     const orgIds = memberships.map(m => m.orgId);
@@ -38,7 +39,6 @@ async function organizationRoutes(app) {
     return reply.send(result);
   });
 
-  // Create organization
   app.post('/', protect, async (req, reply) => {
     const { nameEncrypted, recipients, slug: clientSlug } = req.body || {};
     if (!nameEncrypted || typeof nameEncrypted !== 'string' || !nameEncrypted.trim()) {
@@ -61,7 +61,7 @@ async function organizationRoutes(app) {
     try {
       await Organization.create({ id: orgId, nameEncrypted: nameEncrypted.trim(), slug, createdAt: new Date() });
     } catch (err) {
-      if (String(err?.message ?? err).includes('UNIQUE')) {
+      if (String(err?.message ?? err).toLowerCase().includes('unique')) {
         return reply.status(409).send({ error: 'slug_taken', message: 'That slug is already in use.' });
       }
       throw err;
@@ -91,12 +91,7 @@ async function organizationRoutes(app) {
       );
     }
 
-    // Initialize sync state
-    const { query } = require('../db');
-    await query(
-      'INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
-      [workspace.id, 'empty', 0, new Date().toISOString()]
-    );
+    await createEmptyState(workspace.id);
 
     return reply.status(201).send({
       id: orgId,
@@ -107,7 +102,6 @@ async function organizationRoutes(app) {
     });
   });
 
-  // Get organization details
   app.get('/:id', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
     const org = await Organization.findById(req.orgId).lean();
     if (!org) return reply.status(404).send({ error: 'not_found' });
@@ -142,7 +136,6 @@ async function organizationRoutes(app) {
     });
   });
 
-  // Update organization
   app.patch('/:id', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
     const { nameEncrypted } = req.body || {};
     if (nameEncrypted) {
@@ -154,7 +147,6 @@ async function organizationRoutes(app) {
     return reply.send({ updated: true });
   });
 
-  // Delete organization
   app.delete('/:id', { preHandler: [app.authenticate, requireOrgOwner] }, async (req, reply) => {
     const workspaces = await Workspace.find({ orgId: req.orgId }).lean();
     if (workspaces.length > 0) {
@@ -171,7 +163,6 @@ async function organizationRoutes(app) {
     return reply.send({ deleted: true });
   });
 
-  // List members
   app.get('/:id/members', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
     const members = await OrgMember.find({ orgId: req.orgId }).lean();
     return reply.send(members.map(m => ({
@@ -181,11 +172,13 @@ async function organizationRoutes(app) {
     })));
   });
 
-  // Add member
   app.post('/:id/members', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
     const { accountId, role = 'member', wrappedKey } = req.body || {};
     if (!accountId) {
       return reply.status(400).send({ error: 'account_id_required' });
+    }
+    if (!['admin', 'member'].includes(role)) {
+      return reply.status(400).send({ error: 'invalid_role', message: 'role must be member or admin.' });
     }
 
     const existing = await OrgMember.findOne({ orgId: req.orgId, accountId }).lean();
@@ -211,7 +204,6 @@ async function organizationRoutes(app) {
     return reply.status(201).send({ added: true });
   });
 
-  // Update member role
   app.patch('/:id/members/:uid', { preHandler: [app.authenticate, requireOrgOwner] }, async (req, reply) => {
     const { role } = req.body || {};
     if (!['admin', 'member'].includes(role)) {
@@ -225,7 +217,6 @@ async function organizationRoutes(app) {
     return reply.send({ updated: true });
   });
 
-  // Remove member
   app.delete('/:id/members/:uid', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
     if (req.params.uid === req.userId) {
       return reply.status(400).send({ error: 'cannot_remove_self' });
@@ -236,7 +227,6 @@ async function organizationRoutes(app) {
     return reply.send({ removed: true });
   });
 
-  // Leave organization
   app.post('/:id/leave', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
     if (req.orgRole === 'owner') {
       return reply.status(400).send({ error: 'owner_cannot_leave' });
@@ -246,7 +236,6 @@ async function organizationRoutes(app) {
     return reply.send({ left: true });
   });
 
-  // Create an org invite link
   app.post('/:id/invite', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
     const { role = 'member', requireApproval = false, maxUses = 0, expiresIn } = req.body ?? {};
     if (!['member', 'admin'].includes(role)) return reply.status(400).send({ error: 'invalid_role' });
@@ -261,20 +250,17 @@ async function organizationRoutes(app) {
     return reply.status(201).send({ id: invite.id, token: rawToken, role, requireApproval, maxUses, expiresAt });
   });
 
-  // List org invite links
   app.get('/:id/invite', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
     const invites = await OrgInvite.find({ orgId: req.orgId, revoked: 0 }).sort({ createdAt: -1 }).lean();
     return reply.send({ invites });
   });
 
-  // Revoke an org invite link
   app.delete('/:id/invite/:token', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
     const tokenHash = crypto.createHash('sha256').update(req.params.token).digest('hex');
     await OrgInvite.updateOne({ orgId: req.orgId, tokenHash }, { $set: { revoked: 1 } });
     return reply.send({ revoked: true });
   });
 
-  // Join an organization via invite token
   app.post('/join/:token', { preHandler: [app.authenticate] }, async (req, reply) => {
     const tokenHash = crypto.createHash('sha256').update(req.params.token).digest('hex');
     const invite = await OrgInvite.findOne({ tokenHash, revoked: 0 }).lean();
@@ -296,7 +282,6 @@ async function organizationRoutes(app) {
     return reply.status(201).send({ orgId: invite.orgId, role: invite.role });
   });
 
-  // Approve a pending join for a require-approval invite
   app.post('/:id/invite/:token/approve', { preHandler: [app.authenticate, requireOrgAdmin] }, async (req, reply) => {
     const tokenHash = crypto.createHash('sha256').update(req.params.token).digest('hex');
     const invite = await OrgInvite.findOne({ orgId: req.orgId, tokenHash, revoked: 0 }).lean();
@@ -305,7 +290,6 @@ async function organizationRoutes(app) {
     return reply.send({ approved: true });
   });
 
-  // Get subscription
   app.get('/:id/subscription', { preHandler: [app.authenticate, requireOrgMember] }, async (req, reply) => {
     const sub = await OrgSubscription.findOne({ orgId: req.orgId }).lean();
     if (!sub) return reply.status(404).send({ error: 'not_found' });
@@ -318,12 +302,32 @@ async function organizationRoutes(app) {
     });
   });
 
-  // Update subscription
   app.patch('/:id/subscription', { preHandler: [app.authenticate, requireOrgOwner] }, async (req, reply) => {
     const { plan, seats } = req.body || {};
     const update = {};
-    if (plan) update.plan = plan;
-    if (seats) update.seats = seats;
+
+    if (plan !== undefined) {
+      if (!VALID_PLANS.has(plan)) {
+        return reply.status(400).send({ error: 'validation_error', message: 'Invalid plan.' });
+      }
+      // Paid plans (starter/pro/team/enterprise) are sourced from the Stripe /
+      // Apple / Google billing webhook (upsertSubscription), never set directly
+      // by a workspace owner — otherwise an owner could self-grant enterprise
+      // and bypass every billing gate. Only a downgrade to 'free' is allowed here.
+      if (plan !== 'free') {
+        return reply.status(402).send({
+          error: 'plan_change_requires_payment',
+          message: 'Plan upgrades must be completed through billing.',
+        });
+      }
+      update.plan = plan;
+    }
+    if (seats !== undefined) {
+      if (!Number.isInteger(seats) || seats < 1 || seats > 1000) {
+        return reply.status(400).send({ error: 'validation_error', message: 'seats must be an integer between 1 and 1000.' });
+      }
+      update.seats = seats;
+    }
 
     await OrgSubscription.updateOne({ orgId: req.orgId }, { $set: update });
     return reply.send({ updated: true });

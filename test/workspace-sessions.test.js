@@ -2,36 +2,30 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const path = require('node:path');
-const fs = require('node:fs');
 const crypto = require('node:crypto');
 
-const repoRoot = path.resolve(__dirname, '..');
-const testDbDir = path.join(repoRoot, '.test-data');
-
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long-ws';
 process.env.SESSION_HMAC_KEY = 'test-session-hmac-key-at-least-32-characters-long';
 process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../src/db');
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const { Account, Session, Workspace, WorkspaceMember, Subscription } = require('../src/models');
 const { hashSessionId } = require('../src/lib/crypto');
 const mlkem = require('../src/lib/mlkem');
 
 test.before(async () => {
-  fs.mkdirSync(testDbDir, { recursive: true });
+  await setupTestDb();
+  await cleanTestDb();
   await mlkem.init();
 });
 
-test.after(() => {
-  const dbPath = process.env.DATABASE_PATH;
-  for (const suffix of ['', '-wal', '-shm']) {
-    try { fs.unlinkSync(dbPath + suffix); } catch {}
-  }
+test.after(async () => {
+  await close();
 });
 
 async function makeAccount(email) {
@@ -72,7 +66,7 @@ async function makeSession(userId, workspaceId) {
 
 test('removing a workspace member revokes only workspace-scoped sessions, not account-wide ones', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await makeAccount('owner-ws@example.com');
   const member = await makeAccount('member-ws@example.com');
@@ -130,7 +124,7 @@ test('removing a workspace member revokes only workspace-scoped sessions, not ac
 
 test('admin removing a workspace member also scopes session revocation', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await makeAccount('owner-admin@example.com');
   const member = await makeAccount('member-admin@example.com');
@@ -188,7 +182,7 @@ test('admin removing a workspace member also scopes session revocation', async (
 
 test('admin cannot revoke another user\'s account-wide (non-workspace) session', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await makeAccount('owner-revoke@example.com');
   const other = await makeAccount('other-revoke@example.com');
@@ -235,7 +229,7 @@ test('admin cannot revoke another user\'s account-wide (non-workspace) session',
 
 test('workspace owner can revoke a session issued by their workspace SSO', async (t) => {
   const app = await buildApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const owner = await makeAccount('owner-ws-sso@example.com');
   const member = await makeAccount('member-ws-sso@example.com');

@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const repoRoot = path.resolve(__dirname, '..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -51,6 +50,8 @@ require.cache[swaPath] = {
   exports: swaMock,
 };
 
+const { close } = require('../src/db');
+const { setupTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const { createEmailHash } = require('../src/lib/crypto');
@@ -101,12 +102,16 @@ function resetStubs() {
   models.Session.create = async () => ({ id: 'sess-id' });
   models.Subscription.findOne = () => chain({
     accountId: '507f1f77bcf86cd799439011',
-    plan: 'basic',
+    plan: 'starter',
     status: 'active',
     storageUsedBytes: 0,
     storageQuotaBytes: 4 * 1024 * 1024 * 1024,
   });
 }
+
+test.before(async () => {
+  await setupTestDb();
+});
 
 test.after(() => {
   Object.assign(models.Account, originalMethods.Account);
@@ -115,6 +120,7 @@ test.after(() => {
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(models.Subscription, originalMethods.Subscription);
   delete require.cache[swaPath];
+  return close();
 });
 
 async function makeApp() {
@@ -125,7 +131,7 @@ async function makeApp() {
 
 test('passkey registration begin returns options and stores challenge', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let challengeStored = null;
   models.WebAuthnChallenge.create = async (data) => { challengeStored = data; return { id: 'c1' }; };
@@ -146,10 +152,15 @@ test('passkey registration begin returns options and stores challenge', async (t
 
 test('passkey registration complete verifies and creates credential', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   models.WebAuthnChallenge.findOneAndDelete = async () => ({ challenge: 'test-challenge-1' });
-  models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: TEST_EMAIL_HASH, kdfSalt: 'salt1' });
+  models.Account.findOne = async () => ({
+    id: '507f1f77bcf86cd799439011',
+    emailHmac: TEST_EMAIL_HASH,
+    kdfSalt: 'salt1',
+    createdAt: new Date().toISOString(),
+  });
   let credentialCreated = null;
   models.Credential.create = async (data) => { credentialCreated = data; return { id: 'c1' }; };
 
@@ -170,7 +181,7 @@ test('passkey registration complete verifies and creates credential', async (t) 
 
 test('passkey login begin returns options for existing credentials', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   swaImpl.generateAuthenticationOptions = async ({ allowCredentials }) => ({ challenge: 'test-challenge-2', allowCredentials });
   models.Account.findOne = async () => ({ id: '507f1f77bcf86cd799439011', emailHmac: TEST_EMAIL_HASH });
@@ -193,7 +204,7 @@ test('passkey login begin returns options for existing credentials', async (t) =
 
 test('passkey login complete verifies and issues session', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   swaImpl.verifyAuthenticationResponse = async () => ({
     verified: true,
@@ -229,7 +240,7 @@ test('passkey login complete verifies and issues session', async (t) => {
 
 test('passkey login rejects replay attack with non-increasing counter', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   swaImpl.verifyAuthenticationResponse = async () => ({
     verified: true,
@@ -261,7 +272,7 @@ test('passkey login rejects replay attack with non-increasing counter', async (t
 
 test('passkey registration rejects expired challenge', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   models.WebAuthnChallenge.findOneAndDelete = async () => null;
 
@@ -279,7 +290,7 @@ test('passkey registration rejects expired challenge', async (t) => {
 
 test('passkey endpoints reject invalid email format', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   const response = await app.inject({
     method: 'POST',

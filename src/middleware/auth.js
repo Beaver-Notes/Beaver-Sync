@@ -5,11 +5,13 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const fp  = require('fastify-plugin');
 const { Session } = require('../models');
+const { getDb } = require('../db');
 const { hashSessionId } = require('../lib/crypto');
 
 const SESSION_TTL_HOURS = parseInt(process.env.SESSION_TTL_HOURS ?? '24', 10);
 const SESSION_MAX_AGE_DAYS = parseInt(process.env.SESSION_MAX_AGE_DAYS ?? '30', 10);
 const IDLE_TIMEOUT_HOURS = parseInt(process.env.IDLE_TIMEOUT_HOURS ?? '24', 10);
+const SESSION_WRITE_THROTTLE_MS = 60 * 1000;
 
 let privateKey;
 let publicKey;
@@ -32,12 +34,7 @@ if (process.env.LEGACY_AUTH_ENABLED === 'true') {
   loadKeys();
 }
 
-function getIpSubnet(req) {
-  const ip = req.ip ?? '0.0.0.0';
-  const ipv4 = ip.includes(':') ? '0.0.0.0' : ip;
-  const parts = ipv4.split('.');
-  return parts.slice(0, 3).join('.');
-}
+const { getIpSubnet } = require('../lib/audit');
 
 async function createSession(userId, req, workspaceId = null) {
   const rawId = crypto.randomBytes(32).toString('base64url');
@@ -72,12 +69,18 @@ async function validateSession(rawId) {
   const now = new Date();
   const idleCutoff = new Date(now.getTime() - IDLE_TIMEOUT_HOURS * 60 * 60 * 1000);
   if (session.lastSeenAt < idleCutoff) return null;
-  const newExpiresAt = new Date(now.getTime() + SESSION_TTL_HOURS * 60 * 60 * 1000);
-  const maxExpiresAt = new Date(session.createdAt.getTime() + SESSION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
 
-  session.lastSeenAt = now;
-  session.expiresAt = newExpiresAt > maxExpiresAt ? maxExpiresAt : newExpiresAt;
-  await session.save();
+  // Throttle the sliding-expiry write: the DB copy is only used for idle and
+  // absolute-expiry checks that tolerate being up to a minute stale.
+  const lastSeenMs = session.lastSeenAt instanceof Date ? session.lastSeenAt.getTime() : 0;
+  if (lastSeenMs === 0 || now.getTime() - lastSeenMs >= SESSION_WRITE_THROTTLE_MS) {
+    const newExpiresAt = new Date(now.getTime() + SESSION_TTL_HOURS * 60 * 60 * 1000);
+    const maxExpiresAt = new Date(session.createdAt.getTime() + SESSION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
+
+    session.lastSeenAt = now;
+    session.expiresAt = newExpiresAt > maxExpiresAt ? maxExpiresAt : newExpiresAt;
+    await session.save();
+  }
 
   return { userId: session.accountId, deviceId: session.deviceId || null };
 }
@@ -136,6 +139,13 @@ async function authPlugin(app) {
     if (process.env.LEGACY_AUTH_ENABLED === 'true') {
       try {
         const payload = verifyToken(rawId);
+        // Stateless JWTs are revocable via accounts.jwt_revoked_at (set by /auth/revoke-legacy)
+        const revoked = await getDb().query('SELECT jwt_revoked_at FROM accounts WHERE id = $1', [payload.sub]);
+        // Inclusive second comparison: tokens issued in the revocation second die too
+        if (revoked.rows[0]?.jwt_revoked_at && payload.iat <= Math.floor(new Date(revoked.rows[0].jwt_revoked_at).getTime() / 1000)) {
+          req.authResult = 'expired';
+          return reply.status(401).send({ error: 'token_expired', message: 'Your session has expired. Please log in again.' });
+        }
         req.userId = payload.sub;
         req.sessionDeviceId = null;
         req.authResult = 'authenticated';
@@ -164,7 +174,6 @@ module.exports = fp(authPlugin);
 module.exports.createSession = createSession;
 module.exports.validateSession = validateSession;
 module.exports.signToken = signToken;
-module.exports.verifyToken = verifyToken;
 module.exports.setSessionCookieIfAvailable = function setSessionCookieIfAvailable(app, reply, rawId) {
   if (app && typeof app.setSessionCookie === 'function') {
     app.setSessionCookie(reply, rawId);

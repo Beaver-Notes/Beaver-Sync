@@ -30,13 +30,23 @@ function createNoteHash(noteId) {
   return crypto.createHmac('sha256', NOTE_HMAC_KEY).update(noteId).digest('hex');
 }
 
-function hashAccountId(id) {
-  return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(id).digest('hex');
+function hashRecoveryCode(code) {
+  return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(String(code)).digest('hex');
+}
+
+function hashVerificationToken(token) {
+  return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(String(token)).digest('hex');
+}
+
+function hashPasswordResetToken(token) {
+  return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(String(token)).digest('hex');
 }
 
 module.exports = {
   createEmailHash,
   hashSessionId,
   createNoteHash,
-  hashAccountId,
+  hashRecoveryCode,
+  hashVerificationToken,
+  hashPasswordResetToken,
 };

@@ -8,6 +8,35 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: beaver
+          POSTGRES_PASSWORD: beaver
+          POSTGRES_DB: beaver_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U beaver"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      minio:
+        image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -15,16 +44,41 @@ jobs:
           node-version: '22'
           cache: yarn
       - run: yarn install --frozen-lockfile
+      - name: Create MinIO bucket
+        run: |
+          for i in $(seq 1 15); do curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1 && break; sleep 1; done
+          STORAGE_ENDPOINT=http://localhost:9000 STORAGE_BUCKET_NAME=beaver-sync STORAGE_ACCESS_KEY_ID=minioadmin STORAGE_SECRET_ACCESS_KEY=minioadmin STORAGE_FORCE_PATH_STYLE=true node -e "const { ensureBucket } = require('./src/services/r2'); ensureBucket().then(()=>console.log('bucket ready')).catch(e=>{console.error(e.message);process.exit(1);});"
       - run: yarn lint
-      - run: yarn test
+      - name: Test
+        run: yarn test
+        env:
+          TEST_DATABASE_URL: postgresql://beaver:beaver@localhost:5432/beaver_test
+          STORAGE_ENDPOINT: http://localhost:9000
+          STORAGE_BUCKET_NAME: beaver-sync
+          STORAGE_ACCESS_KEY_ID: minioadmin
+          STORAGE_SECRET_ACCESS_KEY: minioadmin
+          STORAGE_FORCE_PATH_STYLE: "true"
+      - name: Audit dependencies (fail on critical)
+        run: yarn audit --audit-level=critical
 
   deploy:
-    name: Deploy
+    name: Deploy to VPS
     needs: test
     runs-on: ubuntu-latest
+    # Set repo variable DEPLOY_TARGET=vps to enable. Requires secrets:
+    # VPS_HOST, VPS_USERNAME, VPS_SSH_KEY
+    if: ${{ vars.DEPLOY_TARGET == 'vps' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --strategy rolling
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/beaver-sync
+            git pull --ff-only
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+            docker image prune -f

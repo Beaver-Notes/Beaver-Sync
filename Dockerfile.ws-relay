@@ -1,0 +1,36 @@
+# Lean Dockerfile for the WebSocket relay server
+# Only installs the ~6 packages it actually needs (~80MB vs ~180MB full deps)
+FROM node:22-alpine AS deps
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+
+# Install only relay-required deps at pinned versions from package.json (omit dev)
+RUN node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); const keep=['ws','yjs','y-protocols','lib0','pg','@sentry/node','zod','@aws-sdk/client-s3','@aws-sdk/s3-request-presigner']; const deps={}; for(const k of keep) if(p.dependencies[k]) deps[k]=p.dependencies[k]; fs.writeFileSync('package.json', JSON.stringify({name:'ws-relay',private:true,dependencies:deps})); fs.writeFileSync('package-lock.json','{}');" \
+    && npm install --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force \
+    && find /app/node_modules -type f \( -name '*.md' -o -name '*.ts' -o -name '*.map' \) -delete \
+    && find /app/node_modules -type d \( -name test -o -name tests -o -name __tests__ -o -name docs -o -name example -o -name examples \) -prune -exec rm -rf {} + 2>/dev/null || true
+
+# Stage 2: Runtime
+FROM node:22-alpine AS runtime
+
+ENV NODE_ENV=production
+
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY src/ ./src/
+COPY package.json ./
+
+RUN addgroup -S beaver && adduser -S beaver -G beaver \
+    && mkdir -p /app/keys \
+    && chown -R beaver:beaver /app
+
+USER beaver
+
+EXPOSE 8080
+
+STOPSIGNAL SIGTERM
+
+CMD ["node", "src/ws-relay.js"]

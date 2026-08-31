@@ -31,7 +31,7 @@ function signPayload(assetKey, userId, expires) {
  * @returns {{ url: string, expires: number, sig: string }}
  */
 function signAssetDownload(assetKey, userId, ttlSec = 300, baseUrl) {
-  const base = baseUrl || process.env.APP_URL || 'http://localhost:3000';
+  const base = baseUrl || process.env.APP_URL || 'http://localhost:4000';
   const expires = Math.floor(Date.now() / 1000) + ttlSec;
   const sig = signPayload(assetKey, userId, expires);
 
@@ -53,7 +53,7 @@ function signAssetDownload(assetKey, userId, ttlSec = 300, baseUrl) {
  * @returns {{ url: string, expires: number, sig: string }}
  */
 function signAssetUpload(assetKey, userId, ttlSec = 3600, baseUrl) {
-  const base = baseUrl || process.env.APP_URL || 'http://localhost:3000';
+  const base = baseUrl || process.env.APP_URL || 'http://localhost:4000';
   const expires = Math.floor(Date.now() / 1000) + ttlSec;
   const sig = signPayload(assetKey, userId, expires);
 

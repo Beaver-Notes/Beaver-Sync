@@ -6,16 +6,17 @@ const { OAuth2Client } = require('google-auth-library');
 const Stripe = require('stripe');
 
 const { upsertSubscription, findByProvider, expireSubscription, markGracePeriod, planFromPrice, planFromProductId } = require('../lib/billing');
+const { ensurePaidProvisioning, checkDowngrade, downgradeAtPeriodEnd } = require('../lib/plan-lifecycle');
+const { Subscription: SubscriptionModel } = require('../models');
+const { getQuotaBytes } = require('../lib/plans');
 const { sendSubscriptionReceiptEmail } = require('../email');
 
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const WEBHOOK_BODY_LIMIT_BYTES = parseInt(process.env.WEBHOOK_BODY_LIMIT_BYTES ?? '262144', 10);
 
-// ---- Stripe ----
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 
-// ---- Apple ----
 const APPLE_BUNDLE_ID = process.env.APPLE_BUNDLE_ID;
 let appleJwksCache = null;
 let appleJwksCachedAt = 0;
@@ -58,21 +59,35 @@ async function verifyAppleJWS(signedPayload) {
 
 async function webhookRoutes(app) {
   // Capture raw body for signature verification (Stripe needs exact bytes)
+  const { Readable } = require('stream');
   app.addHook('preParsing', (req, reply, payload, done) => {
     if (req.method !== 'POST') return done(null, payload);
-
+    if (!payload) {
+      req.rawBody = '';
+      return done(null, payload);
+    }
+    // Fastify inject provides payload as string/Buffer, not a stream
+    if (typeof payload === 'string' || Buffer.isBuffer(payload)) {
+      const rawStr = payload.toString('utf-8');
+      req.rawBody = rawStr;
+      const stream = Readable.from(Buffer.from(rawStr));
+      return done(null, stream);
+    }
+    if (typeof payload.on !== 'function') {
+      req.rawBody = '';
+      return done(null, payload);
+    }
     let raw = '';
     payload.on('data', (chunk) => { raw += chunk.toString('utf-8'); });
     payload.on('end', () => {
       req.rawBody = raw;
-      done(null, payload);
+      // Provide a fresh stream containing the same bytes for downstream parsers
+      const stream = Readable.from(Buffer.from(raw));
+      done(null, stream);
     });
     payload.on('error', (err) => done(err));
   });
 
-  // =========================================
-  //  Stripe
-  // =========================================
   app.post('/stripe', {
     bodyLimit: WEBHOOK_BODY_LIMIT_BYTES,
     config: {
@@ -99,35 +114,113 @@ async function webhookRoutes(app) {
       return reply.send({ received: true, processed: false });
     }
 
-    const sub = event.data.object;
+    const obj = event.data.object;
 
     try {
       switch (event.type) {
+        case 'checkout.session.completed': {
+          const session = obj;
+          const accountId = session.client_reference_id || session.metadata?.userId;
+          if (!accountId) break;
+          const isPaid = session.payment_status === 'paid' || session.status === 'complete';
+          if (!isPaid) break;
+          try { await ensurePaidProvisioning(accountId); } catch (e) { app.log.warn({ err: e }, 'checkout provisioning failed'); }
+          break;
+        }
         case 'customer.subscription.created':
         case 'customer.subscription.updated': {
+          const sub = obj;
           const accountId = sub.metadata?.userId;
           if (!accountId) break;
           const plan = planFromPrice(
             sub.items?.data?.[0]?.price?.id || '',
             sub.items?.data?.[0]?.price?.product || ''
           );
-          const status = sub.status === 'active' || sub.status === 'trialing' ? 'active' : 'expired';
+          const isCancelAtPeriodEnd = sub.cancel_at_period_end === true;
+          let status;
+          if (sub.status === 'active' || sub.status === 'trialing') {
+            status = 'active';
+          } else if (isCancelAtPeriodEnd) {
+            status = 'active';
+          } else {
+            status = 'expired';
+          }
           const renewsAt = sub.current_period_end ? new Date(sub.current_period_end * 1000) : null;
           await upsertSubscription({ accountId, plan, status, provider: 'stripe', providerId: sub.id, renewsAt, stripeCustomerId: sub.customer });
           if (status === 'active') {
             sendSubscriptionReceiptEmail(app, accountId, {});
+            try { await ensurePaidProvisioning(accountId); } catch (e) { app.log.warn({ err: e }, 'subscription provisioning failed'); }
+            if (isCancelAtPeriodEnd) {
+              app.log.info({ accountId, renewsAt }, 'subscription cancel scheduled at period end');
+            }
+          } else {
+            const renewsAtMs = renewsAt ? renewsAt.getTime() : 0;
+            if (!renewsAtMs || renewsAtMs <= Date.now()) {
+              try { await downgradeAtPeriodEnd(accountId); } catch (e) { app.log.warn({ err: e }, 'downgrade failed'); }
+              try {
+                const existing = await SubscriptionModel.findOne({ accountId }).lean();
+                if (existing && existing.plan !== 'free') {
+                  const c = await checkDowngrade(accountId, existing.plan, 'free');
+                  if (!c.ok) app.log.info({ accountId, reason: c.reason }, 'downgrade blocked by quota');
+                }
+              } catch {}
+            } else {
+              app.log.info({ accountId, renewsAt }, 'subscription downgrade deferred until period end');
+            }
           }
           break;
         }
         case 'customer.subscription.deleted': {
+          const sub = obj;
           const accountId = sub.metadata?.userId;
           if (!accountId) break;
           await expireSubscription({ accountId });
+          try { await downgradeAtPeriodEnd(accountId); } catch (e) { app.log.warn({ err: e }, 'downgrade failed'); }
+          try {
+            const existing = await SubscriptionModel.findOne({ accountId }).lean();
+            if (existing && existing.plan !== 'free') {
+              const c = await checkDowngrade(accountId, existing.plan, 'free');
+              if (!c.ok) app.log.info({ accountId, reason: c.reason }, 'downgrade blocked by quota');
+              else if (existing.plan !== 'free') {
+                await SubscriptionModel.updateOne({ accountId }, { $set: { plan: 'free', status: 'expired', storageQuotaBytes: getQuotaBytes('free') } });
+              }
+            }
+          } catch {}
+          break;
+        }
+        case 'invoice.paid':
+        case 'invoice.payment_succeeded': {
+          const invoice = obj;
+          let accountId = invoice.subscription_details?.metadata?.userId || invoice.metadata?.userId;
+          if (!accountId && invoice.customer) {
+            const found = await SubscriptionModel.findOne({ stripeCustomerId: invoice.customer }).lean();
+            accountId = found?.accountId;
+          }
+          if (!accountId && invoice.subscription) {
+            const found = await SubscriptionModel.findOne({ stripeSubscriptionId: invoice.subscription }).lean();
+            accountId = found?.accountId;
+          }
+          if (!accountId) break;
+          try { await ensurePaidProvisioning(accountId); } catch (e) { app.log.warn({ err: e }, 'invoice provisioning failed'); }
+          try {
+            const sub = await SubscriptionModel.findOne({ accountId }).lean();
+            if (sub && sub.status !== 'active') {
+              await SubscriptionModel.updateOne({ accountId }, { $set: { status: 'active' } });
+            }
+          } catch {}
           break;
         }
         case 'invoice.payment_failed': {
-          const invoice = event.data.object;
-          const accountId = invoice.subscription_details?.metadata?.userId || invoice.metadata?.userId;
+          const invoice = obj;
+          let accountId = invoice.subscription_details?.metadata?.userId || invoice.metadata?.userId;
+          if (!accountId && invoice.customer) {
+            const found = await SubscriptionModel.findOne({ stripeCustomerId: invoice.customer }).lean();
+            accountId = found?.accountId;
+          }
+          if (!accountId && invoice.subscription) {
+            const found = await SubscriptionModel.findOne({ stripeSubscriptionId: invoice.subscription }).lean();
+            accountId = found?.accountId;
+          }
           if (accountId) await markGracePeriod({ accountId });
           break;
         }
@@ -136,14 +229,12 @@ async function webhookRoutes(app) {
       }
     } catch (err) {
       app.log.error({ err, type: event.type }, 'Error processing Stripe webhook');
+      throw err;
     }
 
     return reply.send({ received: true, processed: true });
   });
 
-  // =========================================
-  //  Apple App Store
-  // =========================================
   app.post('/apple', {
     bodyLimit: WEBHOOK_BODY_LIMIT_BYTES,
     config: {
@@ -186,6 +277,11 @@ async function webhookRoutes(app) {
         return reply.send({ received: true, processed: false });
       }
 
+      if (transactionInfo.bundleId !== APPLE_BUNDLE_ID) {
+        app.log.warn({ bundleId: transactionInfo.bundleId }, 'Apple transaction bundleId mismatch');
+        return reply.send({ received: true, processed: false });
+      }
+
       const accountId = transactionInfo.appAccountToken;
       if (!accountId) {
         app.log.warn({ originalTransactionId: transactionInfo.originalTransactionId }, 'Apple notification missing appAccountToken');
@@ -209,14 +305,12 @@ async function webhookRoutes(app) {
       await upsertSubscription({ accountId, plan, status, provider: 'apple', providerId: originalTransactionId, renewsAt });
     } catch (err) {
       app.log.error({ err }, 'Error processing Apple webhook');
+      throw err;
     }
 
     return reply.send({ received: true });
   });
 
-  // =========================================
-  //  Google Play
-  // =========================================
   app.post('/google', {
     bodyLimit: WEBHOOK_BODY_LIMIT_BYTES,
     config: {
@@ -282,6 +376,7 @@ async function webhookRoutes(app) {
       await upsertSubscription({ accountId: existing.accountId, plan, status, provider: 'google', providerId: purchaseToken });
     } catch (err) {
       app.log.error({ err }, 'Error processing Google webhook');
+      throw err;
     }
 
     return reply.send({ received: true });

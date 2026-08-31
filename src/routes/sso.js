@@ -11,6 +11,34 @@ const { isEnterpriseMode } = require('../lib/license');
 
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
 const SSO_STATE_TTL_MS = 10 * 60 * 1000;
+const OIDC_ISSUER_CACHE_TTL_MS = 60 * 60 * 1000;
+
+// One-time exchange codes reuse the ws_tickets table (hash PK + TTL); the
+// completion page swaps ?code= for a session via POST /sso/exchange so tokens
+// never appear in URLs or referrer/history.
+async function issueExchangeCode(accountId) {
+  const { hashSessionId } = require('../lib/crypto');
+  const { getDb } = require('../db');
+  const code = crypto.randomBytes(32).toString('base64url');
+  await getDb().query('DELETE FROM ws_tickets WHERE expires_at < NOW()');
+  await getDb().query(
+    'INSERT INTO ws_tickets (id_hash, account_id, device_id, role, expires_at) VALUES ($1,$2,NULL,NULL, NOW() + make_interval(secs => $3))',
+    [hashSessionId(code), accountId, parseInt(process.env.SSO_EXCHANGE_TTL_SECONDS ?? '60', 10)]
+  );
+  return code;
+}
+
+// OIDC discovery does a network fetch of the well-known document; cache it per
+// issuer so logins don't pay a round-trip on every request.
+const oidcIssuerCache = new Map();
+
+async function discoverOidcIssuer(issuerUrl) {
+  const cached = oidcIssuerCache.get(issuerUrl);
+  if (cached && Date.now() - cached.at < OIDC_ISSUER_CACHE_TTL_MS) return cached.issuer;
+  const issuer = await Issuer.discover(issuerUrl);
+  oidcIssuerCache.set(issuerUrl, { issuer, at: Date.now() });
+  return issuer;
+}
 
 function safeRedirectTarget(value, fallback) {
   if (!value || typeof value !== 'string') return fallback;
@@ -69,18 +97,20 @@ function buildSamlInstance(config) {
   });
 }
 
-async function jitProvision(email, config) {
+async function jitProvision(email, config, opts = {}) {
+  const { emailVerified = true } = opts;
+  // OIDC must present email_verified=true; SAML assertions are already trusted
+  if (emailVerified !== true) return null;
+
   const normalized = String(email).trim().toLowerCase();
   const domain = normalized.split('@')[1] ?? '';
 
-  if (config) {
-    const allowedHosts = (config.allowedEmailDomains && String(config.allowedEmailDomains))
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
-    if (allowedHosts.length > 0 && !allowedHosts.some((allowed) => domain === allowed || normalized.endsWith('.' + allowed))) {
-      return null;
-    }
+  const allowedHosts = config && (config.allowedEmailDomains && String(config.allowedEmailDomains))
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean) || [];
+  if (allowedHosts.length > 0 && !allowedHosts.some((allowed) => domain === allowed || normalized.endsWith('.' + allowed))) {
+    return null;
   }
 
   const emailHash = createEmailHash(normalized);
@@ -93,7 +123,10 @@ async function jitProvision(email, config) {
     });
     const { Subscription } = require('../models');
     await Subscription.create({ accountId: account.id, plan: 'free', status: 'active', storageQuotaBytes: 0, createdAt: new Date() });
+    return account;
   }
+  // Existing account: default-deny JIT linking unless domain explicitly allow-listed
+  if (allowedHosts.length === 0) return null;
   return account;
 }
 
@@ -132,7 +165,7 @@ async function ssoRoutes(app) {
     const config = await decryptConfig(raw);
 
     if (config.protocol === 'oidc') {
-      const issuer = await Issuer.discover(config.oidcIssuer);
+      const issuer = await discoverOidcIssuer(config.oidcIssuer);
       const client = new issuer.Client({
         client_id: config.oidcClientId,
         client_secret: config.oidcClientSecret,
@@ -157,13 +190,13 @@ async function ssoRoutes(app) {
         code_challenge: crypto.createHash('sha256').update(codeVerifier).digest('base64url'),
       });
 
-      return reply.redirect(301, url);
+      return reply.code(301).redirect(url);
     }
 
     const saml = buildSamlInstance(config);
     const host = req.headers['host'] ?? 'localhost';
     const url = await saml.getAuthorizeUrlAsync('', host, {});
-    return reply.redirect(301, url);
+    return reply.code(301).redirect(url);
   });
 
   app.post('/sso/:slug/acs', async (req, reply) => {
@@ -195,7 +228,9 @@ async function ssoRoutes(app) {
     const fallback = `${APP_URL}/auth/sso/${config.slug}/complete`;
     const redirectTo = safeRedirectTarget(req.query?.RelayState, fallback);
     if (typeof app.setSessionCookie === 'function') app.setSessionCookie(reply, token);
-    return reply.redirect(302, `${redirectTo}?token=${encodeURIComponent(token)}`);
+    reply.header('Referrer-Policy', 'no-referrer');
+    const code = await issueExchangeCode(account.id);
+    return reply.code(302).redirect(`${redirectTo}?code=${encodeURIComponent(code)}`);
   });
 
   app.get('/sso/:slug/oidc/callback', async (req, reply) => {
@@ -214,7 +249,7 @@ async function ssoRoutes(app) {
       return reply.status(400).send({ error: 'state_expired' });
     }
 
-    const issuer = await Issuer.discover(config.oidcIssuer);
+    const issuer = await discoverOidcIssuer(config.oidcIssuer);
     const client = new issuer.Client({
       client_id: config.oidcClientId,
       client_secret: config.oidcClientSecret,
@@ -239,8 +274,11 @@ async function ssoRoutes(app) {
     if (!email) {
       return reply.status(400).send({ error: 'email_required', message: 'OIDC provider did not return an email address.' });
     }
+    if (userinfo.email_verified !== true) {
+      return reply.status(403).send({ error: 'email_not_verified', message: 'OIDC email must be verified.' });
+    }
 
-    const account = await jitProvision(email, config);
+    const account = await jitProvision(email, config, { emailVerified: userinfo.email_verified });
     if (!account) {
       return reply.status(403).send({ error: 'forbidden', message: 'Email domain is not permitted by this SSO configuration.' });
     }
@@ -248,7 +286,32 @@ async function ssoRoutes(app) {
 
     const redirectTo = `${APP_URL}/auth/sso/${config.slug}/complete`;
     if (typeof app.setSessionCookie === 'function') app.setSessionCookie(reply, token);
-    return reply.redirect(302, `${redirectTo}?token=${encodeURIComponent(token)}`);
+    reply.header('Referrer-Policy', 'no-referrer');
+    const code = await issueExchangeCode(account.id);
+    return reply.code(302).redirect(`${redirectTo}?code=${encodeURIComponent(code)}`);
+  });
+
+  app.post('/sso/exchange', {
+    config: {
+      security: { public: true },
+      rateLimit: { max: 30, timeWindow: '1 minute' },
+    },
+  }, async (req, reply) => {
+    const code = req.body?.code;
+    if (typeof code !== 'string' || code.length < 16) {
+      return reply.status(400).send({ error: 'invalid_code' });
+    }
+    const { hashSessionId } = require('../lib/crypto');
+    const { getDb } = require('../db');
+    const redeemed = await getDb().query(
+      'DELETE FROM ws_tickets WHERE id_hash = $1 AND expires_at > NOW() AND role IS NULL RETURNING account_id',
+      [hashSessionId(code)]
+    );
+    if (redeemed.rowCount === 0) {
+      return reply.status(401).send({ error: 'invalid_code', message: 'Exchange code is invalid or expired.' });
+    }
+    const token = await createSession(redeemed.rows[0].account_id, req);
+    return reply.send({ token });
   });
 }
 

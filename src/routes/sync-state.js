@@ -2,10 +2,23 @@
 
 const crypto = require('node:crypto');
 const { z } = require('zod');
-const { query, transaction } = require('../db');
+const {
+  getStatus,
+  listDocuments,
+  getVaultKeyParams,
+  claimInitialization,
+  getInitializationClaim,
+  completeInitialization,
+  resetState,
+  listDownloadableSnapshots,
+} = require('../repositories/syncWorkspaceState');
 const { requireWorkspaceMember, requireWorkspaceOwner } = require('../middleware/org');
 
-const CLAIM_TTL_MS = 5 * 60 * 1000;
+const CLAIM_TTL_MS = 30 * 60 * 1000;
+
+const VERIFY_CONCURRENCY = 8;
+
+const { mapWithConcurrency } = require('../lib/concurrency');
 
 const WorkspaceSchema = z.object({ workspaceId: z.string().min(1) });
 const CompleteSchema = WorkspaceSchema.extend({
@@ -17,7 +30,8 @@ const CompleteSchema = WorkspaceSchema.extend({
     snapshotKey: z.string().min(1),
     checkpointTs: z.number().int().nonnegative().optional().default(0),
     checkpointSequence: z.number().int().nonnegative().optional().default(0),
-  }).strict()).superRefine((documents, ctx) => {
+    snapshotTs: z.number().int().nonnegative().optional().default(0),
+  }).strict()).max(5000).superRefine((documents, ctx) => {
     const noteIds = new Set();
     for (const document of documents) {
       if (noteIds.has(document.noteId)) {
@@ -40,7 +54,8 @@ function validKeySegment(value) {
 function getObjectStorage() {
   try {
     return require('../services/r2');
-  } catch {
+  } catch (err) {
+    console.warn('[sync-state] object storage unavailable:', err?.message);
     return null;
   }
 }
@@ -59,23 +74,16 @@ function documentState(row) {
     snapshotKey: row.snapshot_key,
     checkpointTs: row.checkpoint_ts,
     checkpointSequence: row.checkpoint_sequence,
+    snapshotTs: row.snapshot_ts ?? 0,
   };
 }
 
 async function readState(workspaceId) {
-  const { rows } = await query('SELECT status, generation FROM sync_workspace_state WHERE workspace_id = $1', [workspaceId]);
-  const state = rows[0];
+  const state = await getStatus(workspaceId);
   if (!state) return null;
-  const { rows: docRows } = await query(`
-    SELECT note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence
-    FROM sync_document_state WHERE workspace_id = $1 ORDER BY note_id
-  `, [workspaceId]);
+  const docRows = await listDocuments(workspaceId);
   const documents = docRows.map(documentState);
-  const { rows: vaultRows } = await query(`
-    SELECT id, owner_id, key_params_blob, created_at, updated_at
-    FROM vault_key_params WHERE workspace_id = $1
-  `, [workspaceId]);
-  const vaultRow = vaultRows[0];
+  const vaultRow = await getVaultKeyParams(workspaceId);
 
   return {
     workspaceId,
@@ -98,7 +106,7 @@ async function syncStateRoutes(app) {
 
   app.get('/state', protect, async (req, reply) => {
     const parsed = WorkspaceSchema.safeParse(req.query);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId } = parsed.data;
     await requireWorkspaceMember(req, reply, workspaceId);
     if (reply.sent) return;
@@ -109,7 +117,7 @@ async function syncStateRoutes(app) {
 
   app.post('/initialize/claim', protect, async (req, reply) => {
     const parsed = WorkspaceSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
@@ -117,19 +125,14 @@ async function syncStateRoutes(app) {
     const token = crypto.randomBytes(32).toString('base64url');
     const expiresAt = new Date(Date.now() + CLAIM_TTL_MS).toISOString();
     const now = new Date().toISOString();
-    const result = await query(`
-      UPDATE sync_workspace_state
-      SET status = 'initializing', initialization_token = $1, initialization_expires_at = $2, updated_at = $3
-      WHERE workspace_id = $4
-        AND (status = 'empty' OR (status = 'initializing' AND initialization_expires_at <= $5))
-    `, [token, expiresAt, now, workspaceId, now]);
-    if (result.rowCount === 0) return reply.status(409).send({ error: 'sync_already_initialized' });
+    const claimed = await claimInitialization({ workspaceId, token, expiresAt, now });
+    if (!claimed) return reply.status(409).send({ error: 'sync_already_initialized' });
     return reply.send({ token, expiresAt });
   });
 
   app.post('/initialize/complete', protect, async (req, reply) => {
     const parsed = CompleteSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId, token, generation, documents, assets } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
@@ -140,57 +143,30 @@ async function syncStateRoutes(app) {
       return reply.status(400).send({ error: 'snapshot_generation_mismatch' });
     }
 
-    const storage = getObjectStorage();
-    for (const document of documents) {
-      if (!validKeySegment(workspaceId) || !validKeySegment(document.noteId)) {
-        return reply.status(400).send({ error: 'invalid_snapshot_key' });
+      const storage = getObjectStorage();
+      if (!storage) return reply.status(503).send({ error: 'storage_unavailable' });
+      const snapshotErrors = await mapWithConcurrency(documents, VERIFY_CONCURRENCY, async (document) => {
+        if (!validKeySegment(workspaceId) || !validKeySegment(document.noteId)) {
+          return 'invalid_snapshot_key';
+        }
+        if (document.snapshotKey !== snapshotKeyFor(workspaceId, document.noteId, generation)) {
+          return 'invalid_snapshot_key';
+        }
+        return verifyObject(storage, document.snapshotKey, 'snapshot_missing');
+      });
+      for (const error of snapshotErrors) {
+        if (error) return reply.status(400).send({ error });
       }
-      if (document.snapshotKey !== snapshotKeyFor(workspaceId, document.noteId, generation)) {
-        return reply.status(400).send({ error: 'invalid_snapshot_key' });
-      }
-      const error = await verifyObject(storage, document.snapshotKey, 'snapshot_missing');
-      if (error) return reply.status(400).send({ error });
-    }
-    for (const asset of assets) {
+    const assetErrors = await mapWithConcurrency(assets, VERIFY_CONCURRENCY, async (asset) => {
       const assetKey = storage?.assetKey ? storage.assetKey(req.userId, asset) : asset;
-      const error = await verifyObject(storage, assetKey, 'asset_missing');
+      return verifyObject(storage, assetKey, 'asset_missing');
+    });
+    for (const error of assetErrors) {
       if (error) return reply.status(400).send({ error });
     }
 
     const now = new Date().toISOString();
-    const complete = await transaction(async (client) => {
-      const { rows } = await client.query(`
-        SELECT initialization_token, initialization_expires_at
-        FROM sync_workspace_state
-        WHERE workspace_id = $1 AND status = 'initializing'
-      `, [workspaceId]);
-      const state = rows[0];
-      if (!state || state.initialization_token !== token) return 'invalid_token';
-      if (!state.initialization_expires_at || state.initialization_expires_at <= now) return 'expired_token';
-
-      const upsertSql = `
-        INSERT INTO sync_document_state
-          (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        ON CONFLICT(workspace_id, note_id) DO UPDATE SET
-          snapshot_generation = excluded.snapshot_generation,
-          snapshot_key = excluded.snapshot_key,
-          checkpoint_ts = excluded.checkpoint_ts,
-          checkpoint_sequence = excluded.checkpoint_sequence,
-          updated_at = excluded.updated_at
-      `;
-      for (const document of documents) {
-        await client.query(upsertSql, [workspaceId, document.noteId, document.snapshotGeneration, document.snapshotKey ?? null,
-          document.checkpointTs, document.checkpointSequence, now]);
-      }
-      await client.query(`
-        UPDATE sync_workspace_state
-        SET status = 'initialized', generation = $1, initialization_token = NULL,
-            initialization_expires_at = NULL, updated_at = $2
-        WHERE workspace_id = $3
-      `, [generation, now, workspaceId]);
-      return null;
-    });
+    const complete = await completeInitialization({ workspaceId, token, generation, documents, now });
     if (complete === 'expired_token') return reply.status(403).send({ error: 'initialization_token_expired' });
     if (complete === 'invalid_token') return reply.status(403).send({ error: 'invalid_initialization_token' });
     return reply.send({ ok: true, workspaceId, status: 'initialized', generation });
@@ -204,17 +180,13 @@ async function syncStateRoutes(app) {
       generation: z.number().int().positive(),
       data: z.string().min(1),
     }).strict().safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId, token, noteId, generation, data } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
 
     const now = new Date().toISOString();
-    const { rows: claimRows } = await query(`
-      SELECT initialization_token, initialization_expires_at
-      FROM sync_workspace_state WHERE workspace_id = $1 AND status = 'initializing'
-    `, [workspaceId]);
-    const claim = claimRows[0];
+    const claim = await getInitializationClaim(workspaceId);
     if (!claim || claim.initialization_token !== token) {
       return reply.status(403).send({ error: 'invalid_initialization_token' });
     }
@@ -231,12 +203,23 @@ async function syncStateRoutes(app) {
     let body;
     try {
       body = Buffer.from(data, 'base64');
-      if (!body.length || body.toString('base64') !== data) throw new Error('invalid base64');
+      if (!body.length || body.toString('base64') !== data) {
+        return reply.status(400).send({ error: 'invalid_base64' });
+      }
+    } catch {
+      return reply.status(400).send({ error: 'invalid_base64' });
+    }
+
+    try {
       await storage.put(key, body, 'application/octet-stream');
       const error = await verifyObject(storage, key, 'snapshot_verification_failed');
-      if (error) return reply.status(400).send({ error });
+      // A missing object right after a successful put is a storage-side
+      // consistency failure, not a client error.
+      if (error) return reply.status(503).send({ error });
     } catch {
-      return reply.status(400).send({ error: 'snapshot_upload_failed' });
+      // R2/MinIO outage or network error — must surface as 503 so clients
+      // retry, never as a 400 client failure.
+      return reply.status(503).send({ error: 'snapshot_upload_failed' });
     }
     return reply.send({ key, generation, sizeBytes: body.length });
   });
@@ -247,17 +230,13 @@ async function syncStateRoutes(app) {
       token: z.string().min(1),
       noteIds: z.array(z.string().min(1).max(256)).min(1).max(500),
     }).strict().safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId, token, noteIds } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
 
     const now = new Date().toISOString();
-    const { rows: claimRows } = await query(`
-      SELECT initialization_token, initialization_expires_at
-      FROM sync_workspace_state WHERE workspace_id = $1 AND status = 'initializing'
-    `, [workspaceId]);
-    const claim = claimRows[0];
+    const claim = await getInitializationClaim(workspaceId);
     if (!claim || claim.initialization_token !== token) {
       return reply.status(403).send({ error: 'invalid_initialization_token' });
     }
@@ -285,25 +264,57 @@ async function syncStateRoutes(app) {
 
   app.post('/initialize/reset', protect, async (req, reply) => {
     const parsed = WorkspaceSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error' });
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
     const { workspaceId } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
 
     const now = new Date().toISOString();
-    await transaction(async (client) => {
-      await client.query(`
-        UPDATE sync_workspace_state
-        SET status = 'empty', generation = 0, initialization_token = NULL,
-            initialization_expires_at = NULL, updated_at = $1
-        WHERE workspace_id = $2
-      `, [now, workspaceId]);
-      await client.query('DELETE FROM sync_document_state WHERE workspace_id = $1', [workspaceId]);
-      await client.query('DELETE FROM yjs_doc_updates WHERE workspace_id = $1', [workspaceId]);
-      await client.query('DELETE FROM vault_key_params WHERE workspace_id = $1', [workspaceId]);
-    });
+    await resetState({ workspaceId, now });
     return reply.send({ ok: true, workspaceId, status: 'empty' });
+  });
+
+  app.post('/snapshot-download-urls', protect, async (req, reply) => {
+    const parsed = z.object({
+      workspaceId: z.string().min(1),
+      noteIds: z.array(z.string().min(1).max(256)).min(1).max(500),
+    }).strict().safeParse(req.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
+    const { workspaceId, noteIds } = parsed.data;
+    await requireWorkspaceMember(req, reply, workspaceId);
+    if (reply.sent) return;
+
+    const storage = getObjectStorage();
+    if (!storage || typeof storage.presignGet !== 'function') {
+      return reply.status(503).send({ error: 'storage_unavailable' });
+    }
+
+    const rows = await listDownloadableSnapshots(workspaceId, noteIds);
+
+    const generation = rows[0]?.snapshot_generation ?? 0;
+    const urls = {};
+    const presignPromises = [];
+    const noteIdsToSign = [];
+
+    for (const row of rows) {
+      noteIdsToSign.push(row.note_id);
+      presignPromises.push(storage.presignGet(row.snapshot_key, 600));
+    }
+
+    const presignedUrls = await Promise.all(presignPromises);
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      urls[row.note_id] = {
+        url: presignedUrls[i],
+        key: row.snapshot_key,
+        snapshotTs: row.snapshot_ts ?? 0,
+      };
+    }
+
+    return reply.send({ urls, generation });
   });
 }
 
 module.exports = syncStateRoutes;
+module.exports.getObjectStorage = getObjectStorage;
+module.exports.snapshotKeyFor = snapshotKeyFor;

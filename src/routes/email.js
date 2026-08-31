@@ -16,6 +16,20 @@ function extractAlias(to) {
 }
 
 async function emailRoutes(app) {
+  // Raw bytes for HMAC verification; the JSON parser would re-serialize and byte-mismatch.
+  app.addHook('preParsing', (req, _reply, payload, done) => {
+    if (req.method !== 'POST' || !req.url.startsWith('/email/inbound')) return done(null, payload);
+    const chunks = [];
+    payload.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+    payload.on('end', () => {
+      const buf = chunks.length ? Buffer.concat(chunks) : Buffer.alloc(0);
+      req.rawBody = buf.toString('utf-8');
+      const { Readable } = require('stream');
+      done(null, Readable.from(buf));
+    });
+    payload.on('error', (err) => done(err));
+  });
+
   app.post('/email/inbound', {
     config: {
       security: { public: true },
@@ -31,16 +45,21 @@ async function emailRoutes(app) {
           return reply.status(401).send({ error: 'missing_signature', message: 'Webhook signature required.' });
         }
 
-        const rawBody = req.rawBody || JSON.stringify(req.body);
+        // Exact signed bytes; JSON.stringify fallback only for inject-style callers without rawBody.
+        const rawBody = req.rawBody != null ? req.rawBody : JSON.stringify(req.body ?? '');
         const expectedSignature = crypto
           .createHmac('sha256', webhookSecret)
           .update(rawBody)
           .digest('hex');
 
-        if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))) {
+        const a = Buffer.from(signature, 'utf8');
+        const b = Buffer.from(expectedSignature, 'utf8');
+        if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
           app.log.warn('Inbound email invalid webhook signature');
           return reply.status(401).send({ error: 'invalid_signature', message: 'Invalid webhook signature.' });
         }
+      } else if (process.env.NOTIFY_DOMAIN) {
+        app.log.warn('INBOUND_WEBHOOK_SECRET unset while NOTIFY_DOMAIN is configured — inbound aliases are spam-forwardable');
       }
 
       const payload = req.body || {};

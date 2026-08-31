@@ -55,34 +55,29 @@ function resolveStorageConfig() {
   const usingMinio = provider === "minio";
   const endpoint = firstDefined(
     process.env.STORAGE_ENDPOINT,
-    process.env.S3_ENDPOINT,
     process.env.R2_ENDPOINT,
     usingMinio ? process.env.MINIO_ENDPOINT : undefined,
     usingMinio ? "http://minio:9000" : undefined,
   );
   const region = firstDefined(
     process.env.STORAGE_REGION,
-    process.env.S3_REGION,
     process.env.R2_REGION,
     usingMinio ? "us-east-1" : "auto",
   );
   const bucket = firstDefined(
     process.env.STORAGE_BUCKET_NAME,
-    process.env.S3_BUCKET_NAME,
     process.env.R2_BUCKET_NAME,
     usingMinio ? process.env.MINIO_BUCKET_NAME : undefined,
     usingMinio ? "beaver-sync" : undefined,
   );
   const accessKeyId = firstDefined(
     process.env.STORAGE_ACCESS_KEY_ID,
-    process.env.S3_ACCESS_KEY_ID,
     process.env.R2_ACCESS_KEY_ID,
     usingMinio ? process.env.MINIO_ROOT_USER : undefined,
     usingMinio ? "minioadmin" : undefined,
   );
   const secretAccessKey = firstDefined(
     process.env.STORAGE_SECRET_ACCESS_KEY,
-    process.env.S3_SECRET_ACCESS_KEY,
     process.env.R2_SECRET_ACCESS_KEY,
     usingMinio ? process.env.MINIO_ROOT_PASSWORD : undefined,
     usingMinio ? "minioadmin" : undefined,
@@ -90,7 +85,6 @@ function resolveStorageConfig() {
   const forcePathStyle = parseBoolean(
     firstDefined(
       process.env.STORAGE_FORCE_PATH_STYLE,
-      process.env.S3_FORCE_PATH_STYLE,
       usingMinio ? "true" : "false",
     ),
     usingMinio,
@@ -258,8 +252,9 @@ async function del(key) {
 }
 
 async function delMany(keys) {
-  if (!keys || keys.length === 0) return { deleted: 0 };
+  if (!keys || keys.length === 0) return { deleted: 0, failed: 0 };
   let totalDeleted = 0;
+  let totalFailed = 0;
   for (let i = 0; i < keys.length; i += 1000) {
     const chunk = keys.slice(i, i + 1000).map((k) => ({ Key: k }));
     try {
@@ -270,18 +265,25 @@ async function delMany(keys) {
         }),
       );
       totalDeleted += res.Deleted?.length ?? 0;
-    } catch {
+      const errors = res.Errors ?? [];
+      if (errors.length) {
+        totalFailed += errors.length;
+        console.warn(`[r2] delMany batch had ${errors.length} errors`);
+      }
+    } catch (err) {
+      console.warn('[r2] delMany batch failed, falling back per-object:', err?.message);
       for (const e of chunk) {
         try {
-          await r2.send(
-            new DeleteObjectCommand({ Bucket: BUCKET, Key: e.Key }),
-          );
+          await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: e.Key }));
           totalDeleted++;
-        } catch {}
+        } catch (objErr) {
+          totalFailed++;
+          console.warn(`[r2] failed to delete ${e.Key}:`, objErr?.message);
+        }
       }
     }
   }
-  return { deleted: totalDeleted };
+  return { deleted: totalDeleted, failed: totalFailed };
 }
 
 /**
@@ -323,8 +325,13 @@ async function stat(key) {
       }),
     );
     return { sizeBytes: res.ContentLength ?? 0 };
-  } catch {
-    return null;
+  } catch (err) {
+    // Only a genuine "not found" is "absent". Any other error (auth, network,
+    // 5xx) must propagate so callers can return 503 instead of a false 404.
+    if (err.name === 'NoSuchKey' || err.name === 'NotFound' || err.$metadata?.httpStatusCode === 404) {
+      return null;
+    }
+    throw err;
   }
 }
 
@@ -353,7 +360,6 @@ const commitKey = (userId, commitId) => `${userId}/commits/${commitId}.json`;
 const assetKey = (userId, assetKey) => `${userId}/assets/${assetKey}`;
 const snapshotKey = (userId) => `${userId}/snapshot.json`;
 const exportKey = (userId, id) => `${userId}/export-${id}.zip`;
-const yjsKey = (userId, fileName) => `${userId}/yjs/${fileName}`;
 
 module.exports = {
   put,
@@ -369,7 +375,6 @@ module.exports = {
   assetKey,
   snapshotKey,
   exportKey,
-  yjsKey,
   storageConfig,
   ensureBucket,
 };

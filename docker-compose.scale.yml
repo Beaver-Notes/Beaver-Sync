@@ -1,0 +1,44 @@
+# docker-compose.scale.yml — horizontal scaling on a single VPS.
+#
+# The default stack (docker-compose.yml + prod.yml) runs one api + one ws-relay.
+# This overlay adds a Redis for shared rate-limit state so you can run N api
+# replicas behind Caddy. The ws-relay holds rooms in-memory and stays at 1
+# replica unless you add Redis pub/sub for cross-instance fan-out (future).
+#
+# Usage (opt-in, backwards compatible):
+#   # single (default, no Redis):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+#   # scaled: 3 api replicas + Redis
+#   REDIS_URL=redis://redis:6379 \
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.scale.yml up -d --scale api=3
+#
+# Compose `scale` requires removing container_name from the scaled service.
+# This overlay removes it so `docker compose up --scale api=3` works; Caddy
+# round-robins across the replicas via DNS `api:3000`.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: beaver-sync-redis
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no
+    networks: [beaver-internal]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    # Drop pinned container_name so compose can create api-1, api-2, …
+    container_name: !reset null
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Backups run once in the base stack; don't duplicate when scaling.
+  pg-backup:
+    profiles: ["backup"]

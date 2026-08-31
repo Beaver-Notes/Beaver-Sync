@@ -2,7 +2,7 @@
 
 const { AuditLog } = require('../models');
 const mlkem = require('./mlkem');
-const { hashAccountId } = require('./crypto');
+const { hashSessionId } = require('./crypto');
 
 function getIpSubnet(req) {
   const ip = req.ip ?? '0.0.0.0';
@@ -11,23 +11,29 @@ function getIpSubnet(req) {
   return parts.slice(0, 3).join('.');
 }
 
-async function audit(req, action, meta = {}) {
-  try {
-    const metadataEncrypted = Object.keys(meta).length > 0
-      ? await mlkem.encryptMetadata(JSON.stringify(meta))
-      : null;
+function audit(req, action, meta = {}) {
+  // Audit writes are off the critical path: defer so they never block the
+  // request response (audit runs on every push/commit/login).
+  const write = async () => {
+    try {
+      const metadataEncrypted = Object.keys(meta).length > 0
+        ? await mlkem.encryptMetadata(JSON.stringify(meta))
+        : null;
 
-    await AuditLog.create({
-      accountIdHash: hashAccountId(req.userId),
-      workspaceId: meta.workspaceId ?? null,
-      action,
-      metadataEncrypted,
-      ipSubnet: getIpSubnet(req),
-      createdAt: new Date(),
-    });
-  } catch (err) {
-    req.log?.error?.({ err, action }, 'Audit log write failed');
-  }
+      await AuditLog.create({
+        accountIdHash: hashSessionId(req.userId),
+        workspaceId: meta.workspaceId ?? null,
+        action,
+        metadataEncrypted,
+        ipSubnet: getIpSubnet(req),
+        createdAt: new Date(),
+      });
+    } catch (err) {
+      req.log?.error?.({ err, action }, 'Audit log write failed');
+    }
+  };
+
+  setImmediate(write);
 }
 
-module.exports = { audit };
+module.exports = { audit, getIpSubnet };

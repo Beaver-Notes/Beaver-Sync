@@ -59,19 +59,19 @@ describe('Postgres schema', () => {
     assert(!createTableMatches, `All CREATE TABLE statements must use IF NOT EXISTS. Found: ${createTableMatches}`);
   });
 
-  it('migration runner exists and exports runMigrations', () => {
+  it('migration runner exists and exports ensureSchema', () => {
     const migratePath = require('path').join(__dirname, '../../src/db/migrate-postgres.js');
     assert(require('fs').existsSync(migratePath), 'migrate-postgres.js must exist');
     const mod = require(migratePath);
-    assert(typeof mod.runMigrations === 'function', 'runMigrations must be a function');
+    assert(typeof mod.ensureSchema === 'function', 'ensureSchema must be a function');
   });
 
-  it('Postgres migrations directory has .postgres.sql files', () => {
+  it('migration entrypoint schema.postgres.sql exists and is non-empty', () => {
     const fs = require('fs');
     const path = require('path');
-    const migrationsDir = path.join(__dirname, '../../src/db/migrations');
-    const files = fs.readdirSync(migrationsDir);
-    const postgresFiles = files.filter(f => f.endsWith('.postgres.sql'));
-    assert(postgresFiles.length > 0, 'Must have at least one .postgres.sql migration file');
+    const schemaPath = path.join(__dirname, '../../src/db/schema.postgres.sql');
+    assert(fs.existsSync(schemaPath), 'schema.postgres.sql (migration source) must exist');
+    const content = fs.readFileSync(schemaPath, 'utf8');
+    assert(content.trim().length > 0, 'schema.postgres.sql must not be empty');
   });
 });

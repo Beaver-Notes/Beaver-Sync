@@ -10,10 +10,8 @@ const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..');
 const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'beaver-sync-task7-'));
-const dbPath = path.join(testDir, 'remote-bootstrap.sqlite');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -26,28 +24,26 @@ process.env.STORAGE_BUCKET_NAME = 'integration-test';
 process.env.STORAGE_ACCESS_KEY_ID = 'test-access';
 process.env.STORAGE_SECRET_ACCESS_KEY = 'test-secret';
 
-const { getDb, close } = require('../src/db');
+const { close, query } = require('../src/db');
+const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { createSession } = require('../src/middleware/auth');
 
 const ids = { account: 'bootstrap-owner', workspace: 'bootstrap-workspace', note: 'bootstrap-note' };
 const deviceId = 'bootstrap-device';
+// Recent epoch-ms: pull cursors older than 24h are treated as stale.
+const TS_BASE = Date.now() - 60_000;
 
-function seed() {
-  const db = getDb();
+async function seed() {
   const now = new Date().toISOString();
-  db.prepare('INSERT INTO accounts (id, email_hmac, created_at) VALUES (?, ?, ?)').run(ids.account, 'bootstrap-email', now);
-  db.prepare('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES (?, ?, ?, ?)')
-    .run(ids.workspace, 'encrypted-workspace', ids.account, now);
-  db.prepare('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES (?, ?, ?, ?)')
-    .run(ids.workspace, ids.account, 'owner', now);
-  db.prepare('INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run('bootstrap-subscription', ids.account, 'pro', 'active', 10_000_000, 0, now);
-  db.prepare('INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES (?, ?, ?, ?)')
-    .run(ids.workspace, 'empty', 0, now);
+  await query('INSERT INTO accounts (id, email_hmac, created_at) VALUES ($1, $2, $3)', [ids.account, 'bootstrap-email', now]);
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', [ids.workspace, 'encrypted-workspace', ids.account, now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', [ids.workspace, ids.account, 'owner', now]);
+  await query('INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)', ['bootstrap-subscription', ids.account, 'pro', 'active', 10_000_000, 0, now]);
+  await query('INSERT INTO sync_workspace_state (workspace_id, status, generation, updated_at) VALUES ($1, $2, $3, $4)', [ids.workspace, 'empty', 0, now]);
 }
 
 function update(sequence) {
-  const ts = 100 + sequence;
+  const ts = TS_BASE + sequence;
   return {
     key: `${ids.note}~~${deviceId}~~${ts}~~${sequence}.yjs.json`,
     data: Buffer.from(`encrypted-yjs-${sequence}`).toString('base64'),
@@ -73,8 +69,8 @@ async function request(app, session, url, payload, method = 'POST') {
 test('bootstraps, completes, pushes, replays, and pulls every update exactly once', async (t) => {
   const expectedKeys = new Set([
     `${ids.account}/snapshot.json`,
-    `${ids.account}/yjs/${ids.note}~~${deviceId}~~101~~1.yjs.json`,
-    `${ids.account}/yjs/${ids.note}~~${deviceId}~~102~~2.yjs.json`,
+    `${ids.account}/yjs/${ids.note}~~${deviceId}~~${TS_BASE + 1}~~1.yjs.json`,
+    `${ids.account}/yjs/${ids.note}~~${deviceId}~~${TS_BASE + 2}~~2.yjs.json`,
     `yjs/${ids.workspace}/${ids.note}/1.yjs`,
   ]);
   const storageRequests = [];
@@ -106,12 +102,14 @@ test('bootstraps, completes, pushes, replays, and pulls every update exactly onc
   const { buildApp } = require('../src/server');
   const objectStorage = require('../src/services/r2');
 
-  seed();
+  await setupTestDb();
+  await cleanTestDb();
+  await seed();
   let app;
   t.after(async () => {
     if (app) await app.close();
     await new Promise((resolve) => storage.close(resolve));
-    close();
+    await close();
     fs.rmSync(testDir, { recursive: true, force: true });
   });
   app = await buildApp();
@@ -153,13 +151,13 @@ test('bootstraps, completes, pushes, replays, and pulls every update exactly onc
   assert.equal(pushRes1.accepted, 2);
   assert.equal(pushRes1.duplicate, 0);
   assert.equal(pushRes1.sizeBytes, 30);
-  assert.deepEqual(pushRes1.checkpoint, { ts: 102, sequence: 2, deviceId });
+  assert.deepEqual(pushRes1.checkpoint, { ts: TS_BASE + 2, sequence: 2, deviceId });
 
   const pushRes2 = (await push([firstUpdate])).json();
   assert.equal(pushRes2.accepted, 0);
   assert.equal(pushRes2.duplicate, 1);
   assert.equal(pushRes2.sizeBytes, 0);
-  assert.deepEqual(pushRes2.checkpoint, { ts: 101, sequence: 1, deviceId });
+  assert.deepEqual(pushRes2.checkpoint, { ts: TS_BASE + 1, sequence: 1, deviceId });
 
   const seen = [];
   let checkpoint = null;
@@ -178,7 +176,7 @@ test('bootstraps, completes, pushes, replays, and pulls every update exactly onc
 
   assert.deepEqual(seen, [firstUpdate.key, secondUpdate.key]);
   assert.equal(new Set(seen).size, 2);
-  assert.deepEqual(checkpoint, { [deviceId]: { ts: 102, sequence: 2 } });
+  assert.deepEqual(checkpoint, { [deviceId]: { ts: TS_BASE + 2, sequence: 2 } });
   assert.notEqual(storageRequests.length, 0);
   assert.deepEqual(storageRequests, [
     { method: 'PUT', key: `${ids.account}/snapshot.json`, bodyLength: 16 },
@@ -192,5 +190,5 @@ test('bootstraps, completes, pushes, replays, and pulls every update exactly onc
 });
 
 function firstStorageKey() {
-  return `${ids.note}~~${deviceId}~~101~~1.yjs.json`;
+  return `${ids.note}~~${deviceId}~~${TS_BASE + 1}~~1.yjs.json`;
 }

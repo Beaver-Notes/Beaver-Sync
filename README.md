@@ -10,36 +10,50 @@ flowchart LR
 
     API --> DB["PostgreSQL 16"]
 
-    Client -. WebSocket .-> Hocuspocus["Hocuspocus<br/>(8080)"]
+    Client -. WebSocket .-> Relay["ws-relay<br/>(8080)"]
 
-    Hocuspocus --> DB
+    Relay --> DB
 
     API --> Storage["MinIO / R2<br/>(encrypted blobs)"]
 ```
 
 - **API**: Fastify server handling auth, sync, workspaces, admin, SSO, webhooks
-- **Hocuspocus**: Standalone WebSocket relay for real-time multiplayer editing
+- **WebSocket relay** (`src/ws-relay.js`): y-websocket-compatible relay for real-time multiplayer editing; authenticates each connection against the API
 - **Storage**: S3-compatible (MinIO dev, Cloudflare R2 prod); all blobs ML-KEM encrypted
-- **Database**: PostgreSQL 16 (single-node dev, 3-node HA on Fly.io)
+- **Database**: PostgreSQL 16 — single source of truth; `LISTEN/NOTIFY` fans out sync events
 - **Error monitoring**: Optional Glitchtip / Sentry (DSN-based, no-op when unset)
 
 ## Features
 
-| Feature | Free | Basic ($4/mo) | Pro ($9/mo) | Team ($12/seat/mo) | Enterprise |
+| Feature | Free | Starter | Pro | Team | Enterprise |
 |---|---|---|---|---|---|
-| Version history | ✗ | 30 days | ✓ | ✓ | ✓ |
-| Encrypted cloud sync | BYO Cloud | ✓ | ✓ | ✓ | ✓ |
-| Cloud storage | ✗ | 4 GB | 10 GB | 50 GB | Unlimited |
-| End-to-end encryption | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Quantum-resistant encryption | (only for Beaver Sync) | ✓ | ✓ | ✓ | ✓ |
-| Real-time multiplayer editing | (editor only on invite) | ✓ | ✓ | ✓ | ✓ |
+| Notes & editor | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Sync container | Folder only | Personal workspace | Personal workspace | Personal + shared team workspaces | Personal + shared team workspaces |
+| Receive shared notes | ✓ (as note collaborator) | ✓ | ✓ | ✓ | ✓ |
+| Invite / share notes | ✗ | ✓ | ✓ | ✓ | ✓ |
+| Collaborators (page-scoped) | ✗ | ✗ | ✗ | ✓ | ✓ |
 | Team workspaces & permissions | ✗ | ✗ | ✗ | ✓ | ✓ |
-| Guest access | ✗ | ✗ | ✗ | ✓ | ✓ |
 | Admin dashboard | ✗ | ✗ | ✗ | ✓ | ✓ |
 | Audit logs | ✗ | ✗ | ✗ | ✗ | ✓ |
 | SSO / SAML | ✗ | ✗ | ✗ | ✗ | ✓ |
-| GDPR data export & deletion | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Device limit | Unlimited | 5 | Unlimited | Unlimited | Unlimited |
+| Self-hosted | ✗ | ✗ | ✗ | ✗ | ✓ |
+| Cloud storage | 0 | 10 GB | 50 GB | 100 GB + 25 GB × seats | Contractual |
+| Version history | ✗ | 30 days | 1 year | 1 year | Contractual |
+| Device limit | Unlimited | Unlimited | Unlimited | Unlimited | Unlimited |
+
+## Local testing (production mode)
+
+Run the backend exactly like production (VPS docker compose) locally:
+
+```bash
+PLAN_OVERRIDE=team docker compose -f docker-compose.test.yml up -d
+```
+
+- `PLAN_OVERRIDE` forces every account to the given tier (free|starter|pro|team|enterprise).
+- `EMAIL_ENABLED=false` disables all Resend sends in this environment.
+- Seed a tier-specific account: `npm run seed:tier -- team tester@example.com`
+- Frontend: point `VITE_BEAVER_SYNC_API_URL=http://localhost:4000` and
+  `VITE_BEAVER_SYNC_WS_URL=ws://localhost:8080` (defaults already).
 
 ## Quick Start (Development)
 
@@ -49,7 +63,7 @@ bash scripts/generate-keys.sh
 docker compose up -d
 ```
 
-This starts Postgres, MinIO, the API, and Hocuspocus. The API connects to Postgres at `localhost:5432` (default credentials in `.env.example`).
+This starts Postgres, MinIO, the API, the WebSocket relay (`ws-relay`), and a scheduled Postgres backup sidecar. The API connects to Postgres at `localhost:5432` (default credentials in `.env.example`).
 
 ## Enterprise Self-Hosted
 
@@ -57,62 +71,70 @@ This starts Postgres, MinIO, the API, and Hocuspocus. The API connects to Postgr
 docker compose -f docker-compose.enterprise.yml up -d
 ```
 
-Includes Postgres, MinIO, GlitchTip, API, and Hocuspocus. All features (SSO, audit logs, admin, workspaces, real-time collab) work offline with `ENTERPRISE_MODE=true`. Optional license key validation via `LICENSE_SECRET`.
+Includes Postgres, MinIO, GlitchTip, the API, and the WebSocket relay. Offline HMAC licenses: `BL<base64url(payload)>.<base64url(HMAC-SHA256(payload, LICENSE_SECRET))>` with canonical JSON `{licensee, plan:'enterprise', seats?, expiry}`. Verification is timing-safe; expired licenses have a 14-day grace period (warning logged). Seats is a soft limit (warn only).
 
-## Fly.io Deployment
+- **Development:** `ENTERPRISE_MODE=true` alone unlocks enterprise features.
+- **Production (`NODE_ENV=production`):** a valid license is required — set `LICENSE_KEY` (the `BL...` token) and `LICENSE_SECRET` (HMAC secret). `ENTERPRISE_MODE=true` alone is insufficient. Generate a license offline:
+  ```bash
+  LICENSE_SECRET=$(openssl rand -hex 32) node scripts/generate-license.js --licensee "Acme Corp" --expiry 2027-08-30 --seats 50
+  # then set LICENSE_SECRET and LICENSE_KEY in .env
+  ```
+  The generator (`scripts/generate-license.js`) also accepts `LICENSEE`/`EXPIRY`/`SEATS` env vars or `--stdin` JSON; it is excluded from Docker images via `.dockerignore` and only `src/lib/license.js` reads `LICENSE_SECRET` at runtime.
+
+## Deployment (VPS)
+
+Full guide: [docs/deployment.md](docs/deployment.md).
 
 ### Prerequisites
-1. [Fly.io](https://fly.io) account + `flyctl` CLI installed
-2. Cloudflare R2 bucket created with API token
-3. DNS records pointing to Fly for your custom domain
-4. Fly Postgres cluster (or external Postgres) with `DATABASE_URL`
+1. A VPS with Docker + Docker Compose
+2. DNS records pointing your domain at the VPS
+3. External or co-located Postgres reachable via `DATABASE_URL`
+4. Cloudflare R2 bucket (or self-hosted MinIO) for blob storage
 
 ### Deploy
 ```bash
 # 1. Configure secrets
-cp fly/.env.secrets.example fly/.env.secrets
-# Edit fly/.env.secrets with real values (including DATABASE_URL)
+cp .env.example .env
+bash scripts/generate-keys.sh   # JWT + ML-KEM keys
+# Edit .env with real values
 
-# 2. Run deploy script
-bash fly/deploy.sh
+# 2. Start the stack
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-The deploy script creates API, Hocuspocus, and GlitchTip apps, sets secrets, deploys with rolling strategy, and configures your custom domain.
+CI/CD alternative: push to `main` with repo variables `DEPLOY_TARGET=vps` and secrets `VPS_HOST`, `VPS_USERNAME`, `VPS_SSH_KEY` — GitHub Actions runs tests then deploys over SSH.
 
-### Update
+### Update / Rollback
 ```bash
-# Deploy individual services
-fly deploy fly/api/
-fly deploy fly/hocuspocus/
-fly deploy fly/glitchtip/
-```
+git pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 
-### Rollback
-```bash
-fly releases rollback -a <app-name>
+# Rollback: check out the previous tag/commit and redeploy the same way
 ```
 
 ### Scaling
 
-#### Add API replica
+The API is stateless — scale it horizontally with the overlay (adds Redis as the shared rate-limit store):
+
 ```bash
-fly m clone --app beaver-sync-api
+export REDIS_URL=redis://redis:6379
+docker compose -f docker-compose.yml -f docker-compose.scale.yml up -d --scale api=3
 ```
 
-#### Upgrade machine
-```bash
-fly m scale shared-cpu-2x --app beaver-sync-api
-```
+The WebSocket relay must stay a single instance (rooms live in memory); Caddy's sticky routing keeps clients pinned to it.
 
-#### Scale Postgres to 3-node
+### Backups
+
+A `pg-backup` sidecar runs `scripts/backup-postgres.sh` on a schedule (`BACKUP_INTERVAL_SECONDS`, retention via `BACKUP_RETENTION_DAYS`, dumps land in `./backups`). Verify restores periodically:
+
 ```bash
-fly mpg scale --plan basic --replicas 3
+scripts/restore-postgres.sh backups/pg-<timestamp>.sql.gz <target-db>
 ```
 
 ### Monitor
 ```bash
-fly logs -a beaver-sync-api
-fly status --app beaver-sync-api
+docker compose logs -f api ws-relay
+docker compose ps
 ```
 
 ## License

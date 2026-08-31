@@ -5,6 +5,17 @@ require('dotenv').config();
 const Fastify = require('fastify');
 const { getDb } = require('./db');
 
+// Crash-safety: a floating promise or thrown sync error must never vanish
+// without a trace. uncaughtException exits (state is undefined); unhandledRejection
+// logs loudly (Node's default already exits, this just makes it observable).
+process.on('uncaughtException', (err) => {
+  console.error('[fatal] uncaughtException', { message: err?.message, stack: err?.stack });
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] unhandledRejection', { reason: reason instanceof Error ? { message: reason.message, stack: reason.stack } : reason });
+});
+
 function validateRequiredEnv() {
   const missing = [];
   const isProduction = process.env.NODE_ENV === 'production';
@@ -18,14 +29,14 @@ function validateRequiredEnv() {
     }
   }
 
-  // Require either DATABASE_URL or DATABASE_PATH
-  if (!process.env.DATABASE_URL && !process.env.DATABASE_PATH) {
-    missing.push('DATABASE_URL or DATABASE_PATH');
+  if (!process.env.DATABASE_URL) {
+    missing.push('DATABASE_URL');
   }
-requireVar('SESSION_HMAC_KEY', true, 32);
-    requireVar('EMAIL_HMAC_KEY', true, 32);
-    requireVar('COOKIE_SECRET', true, 32);
-    requireVar('NOTE_HMAC_KEY', isProduction, 32);
+  requireVar('SESSION_HMAC_KEY', true, 32);
+  requireVar('EMAIL_HMAC_KEY', true, 32);
+  requireVar('COOKIE_SECRET', true, 32);
+  requireVar('NOTE_HMAC_KEY', isProduction, 32);
+  requireVar('INTERNAL_API_SECRET', isProduction, 32);
   requireVar('JWT_PRIVATE_KEY_PATH', legacyAuth);
   requireVar('JWT_PUBLIC_KEY_PATH', legacyAuth);
   requireVar('WEBAUTHN_RPID', isProduction);
@@ -48,7 +59,12 @@ requireVar('SESSION_HMAC_KEY', true, 32);
 
   for (const name of ['SESSION_HMAC_KEY', 'EMAIL_HMAC_KEY', 'NOTE_HMAC_KEY', 'COOKIE_SECRET']) {
     if (DEFAULT_SECRETS.includes(process.env[name])) {
-      console.warn(`WARNING: ${name} is using a default value. Generate a real key for production.`);
+      const msg = `${name} is using a default value. Generate a real key for production.`;
+      if (isProduction) {
+        console.error(`FATAL: ${msg}`);
+        process.exit(1);
+      }
+      console.warn(`WARNING: ${msg}`);
     }
   }
 
@@ -70,20 +86,51 @@ async function buildApp() {
   const mlkem = require('./lib/mlkem');
   await mlkem.init();
 
+  // Enterprise license grace/expiry warnings (offline HMAC, 14d grace, seats soft-warn)
+  if (process.env.ENTERPRISE_MODE === 'true') {
+    try {
+      const lic = require('./lib/license');
+      const s = lic.getLicenseStatus();
+      if (process.env.NODE_ENV === 'production' && !s.valid) {
+        console.warn(`[license] ENTERPRISE_MODE=true but license invalid (${s.reason}) — enterprise features disabled`);
+      } else if (s.valid && s.inGrace) {
+        console.warn(`[license] license for ${s.payload.licensee} expired ${new Date(s.expiryMs).toISOString().slice(0,10)} — in ${lic.GRACE_DAYS}d grace (${s.graceDaysLeft}d left)`);
+      } else if (s.valid && s.expiringSoon) {
+        console.warn(`[license] license for ${s.payload.licensee} expires ${s.payload.expiry} — within ${lic.GRACE_DAYS}d grace window`);
+      }
+      if (s.valid && s.payload?.seats) {
+        // soft-warn only; caller checks via checkSeats for actual usage
+      }
+    } catch {}
+  }
+
   const app = Fastify({
     logger: {
       level: process.env.NODE_ENV === 'production' ? 'warn' : 'info',
+      // pino-pretty's worker thread hangs node:test across sequential app builds
       transport:
-        process.env.NODE_ENV !== 'production'
+        process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'test'
           ? { target: 'pino-pretty' }
           : undefined,
     },
     bodyLimit: parseInt(process.env.API_BODY_LIMIT_BYTES ?? '1048576', 10),
-    trustProxy: true,
+    trustProxy: process.env.TRUST_PROXY === 'true' ? true : false,
     requestTimeout: parseInt(process.env.REQUEST_TIMEOUT_MS ?? '30000', 10),
     connectionTimeout: parseInt(process.env.CONNECTION_TIMEOUT_MS ?? '10000', 10),
     keepAliveTimeout: parseInt(process.env.KEEP_ALIVE_TIMEOUT_MS ?? '5000', 10),
   });
+
+  // Fastify 5 400s empty JSON bodies; restore v4 behavior so bodyless requests pass
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (_req, body, done) => {
+    if (body === '' || body === undefined) return done(null, {});
+    try {
+      done(null, JSON.parse(body));
+    } catch (err) {
+      err.statusCode = 400;
+      done(err, undefined);
+    }
+  });
+
 
   app.addContentTypeParser(
     'application/octet-stream',
@@ -125,10 +172,26 @@ async function buildApp() {
     return reply;
   });
 
+  let redisClient = null;
+  if (process.env.REDIS_URL) {
+    try {
+      const Redis = require('ioredis');
+      redisClient = new Redis(process.env.REDIS_URL, {
+        connectTimeout: 2000,
+        maxRetriesPerRequest: 2,
+        enableReadyCheck: true,
+        lazyConnect: false,
+      });
+      redisClient.on('error', (err) => app.log.warn({ err: err.message }, 'Redis rate-limit store error — falling back to in-memory'));
+    } catch (err) {
+      app.log.warn({ err: err.message }, 'REDIS_URL set but ioredis unavailable — using in-memory rate limiting');
+    }
+  }
   await app.register(require('@fastify/rate-limit'), {
     max: parseInt(process.env.API_RATE_LIMIT_PER_MINUTE ?? '120'),
     timeWindow: '1 minute',
     keyGenerator: (req) => req.userId || req.ip,
+    ...(redisClient ? { redis: redisClient, nameSpace: 'beaver-ratelimit-', skipOnError: true } : {}),
     errorResponseBuilder: (_req, context) => ({
       statusCode: context.ban ? 403 : 429,
       error: context.ban ? 'rate_limit_banned' : 'rate_limit_exceeded',
@@ -139,6 +202,7 @@ async function buildApp() {
   // Compression handled by reverse proxy (NPM/Cloudflare)
 
   await app.register(require('./middleware/security'));
+  await app.register(require('./middleware/subscription'));
 
   await app.register(require('./routes/auth'),        { prefix: '/auth' });
   await app.register(require('./routes/passkey'),     { prefix: '/auth' });
@@ -148,6 +212,8 @@ async function buildApp() {
   await app.register(require('./routes/assets'),      { prefix: '/assets' });
   await app.register(require('./routes/snapshot'),    { prefix: '/snapshot' });
   await app.register(require('./routes/account'),     { prefix: '/account' });
+  await app.register(require('./routes/plans'),       { prefix: '/plans' });
+  await app.register(require('./routes/billing'),     { prefix: '/billing' });
   await app.register(require('./routes/email'),      { prefix: '' });
   await app.register(require('./routes/collaboration'), { prefix: '/collaboration' });
   await app.register(require('./routes/workspaces'),   { prefix: '/workspaces' });
@@ -159,9 +225,7 @@ async function buildApp() {
   await app.register(require('./routes/admin'),       { prefix: '/admin' });
   await app.register(require('./routes/webhooks'),    { prefix: '/webhooks' });
   await app.register(require('./routes/comments'),    { prefix: '/comments' });
-
-  await app.register(require('@fastify/websocket'));
-  await app.register(require('./routes/ws'));
+  await app.register(require('./routes/sso-admin'));
 
   app.get('/health', {
     config: {
@@ -173,19 +237,20 @@ async function buildApp() {
         timeWindow: '1 minute',
       },
     },
-  }, async () => {
+  }, async (_req, reply) => {
     const payload = {
       status: 'ok',
       timestamp: new Date().toISOString(),
     };
 
-    if (process.env.NODE_ENV !== 'production') {
-      try {
-        getDb();
-        payload.db = 'connected';
-      } catch {
-        payload.db = 'disconnected';
-      }
+    try {
+      const { query } = require('./db');
+      await query('SELECT 1');
+      payload.db = 'connected';
+    } catch {
+      payload.db = 'disconnected';
+      payload.status = 'degraded';
+      reply.status(503);
     }
 
     return payload;
@@ -221,11 +286,22 @@ async function buildApp() {
     });
   });
 
+  // Scheduled YJS GC/compaction (D18) — env-toggled, advisory-locked
+  try {
+    const { startGcScheduler } = require('./jobs/yjs-gc');
+    startGcScheduler(app);
+  } catch (err) {
+    app.log.warn({ err: err.message }, '[yjs-gc] scheduler init failed (non-fatal)');
+  }
+
   return app;
 }
 
 async function start() {
   const app = await buildApp();
+
+  const { ensureSchema } = require('./db/migrate-postgres');
+  await ensureSchema();
 
   getDb();
   app.log.info('Database connected');
@@ -237,18 +313,31 @@ async function start() {
     app.log.warn('Storage bucket check failed (non-fatal):', err.message);
   }
 
-  try {
-    const { startPostgresListener } = require('./lib/events');
-    await startPostgresListener();
-  } catch (err) {
-    app.log.warn('Postgres listener start failed (non-fatal):', err.message);
-  }
-
   const port = parseInt(process.env.PORT ?? '3000');
   const host = process.env.HOST ?? '0.0.0.0';
 
   await app.listen({ port, host });
   app.log.info(`Beaver Sync API running on http://${host}:${port}`);
+
+  // Graceful shutdown: flush in-flight requests, close DB pool
+  let shuttingDown = false;
+  async function gracefulShutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    app.log.info(`Received ${signal} — shutting down gracefully`);
+    try {
+      await app.close();
+    } catch (err) {
+      app.log.warn({ err }, 'Error closing Fastify');
+    }
+    try {
+      const { close } = require('./db');
+      await close();
+    } catch {}
+    process.exit(0);
+  }
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 if (require.main === module) {

@@ -8,7 +8,6 @@ const crypto = require('crypto');
 const repoRoot = path.resolve(__dirname, '..');
 
 process.env.NODE_ENV = 'test';
-process.env.DATABASE_PATH = path.join(repoRoot, ".test-data", "test.db");
 process.env.JWT_PRIVATE_KEY_PATH = path.join(repoRoot, 'keys/private.pem');
 process.env.JWT_PUBLIC_KEY_PATH = path.join(repoRoot, 'keys/public.pem');
 process.env.COOKIE_SECRET = 'test-cookie-secret-at-least-32-chars-long';
@@ -17,10 +16,12 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
+const { close } = require('../src/db');
+const { setupTestDb } = require('./helpers/db');
+const { authHeaderFor } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
 const r2 = require('../src/services/r2');
-const { hashSessionId } = require('../src/lib/crypto');
 
 const originalMethods = {
   CompactionLock: {
@@ -61,7 +62,7 @@ function resetStubs() {
   models.CompactionLock.deleteOne = async () => ({ deletedCount: 1 });
   models.Subscription.findOne = () => chain({
     accountId: '507f1f77bcf86cd799439011',
-    plan: 'basic',
+    plan: 'starter',
     status: 'active',
     storageUsedBytes: 0,
     storageQuotaBytes: 4 * 1024 * 1024 * 1024,
@@ -76,6 +77,10 @@ function resetStubs() {
   r2.stat = async () => null;
 }
 
+test.before(async () => {
+  await setupTestDb();
+});
+
 test.after(() => {
   Object.assign(models.CompactionLock, originalMethods.CompactionLock);
   Object.assign(models.Subscription, originalMethods.Subscription);
@@ -83,6 +88,7 @@ test.after(() => {
   Object.assign(models.Device, originalMethods.Device);
   Object.assign(models.Session, originalMethods.Session);
   Object.assign(r2, originalMethods.r2);
+  return close();
 });
 
 async function makeApp() {
@@ -90,30 +96,9 @@ async function makeApp() {
   return buildApp();
 }
 
-async function authHeaderFor(app, userId = '507f1f77bcf86cd799439011') {
-  const rawId = crypto.randomBytes(32).toString('base64url');
-  const sessionIdHash = hashSessionId(rawId);
-
-  models.Session.findOne = async ({ idHash: h }) => {
-    if (h === sessionIdHash) {
-      return {
-        idHash: h,
-        accountId: userId,
-        revoked: false,
-        expiresAt: new Date(Date.now() + 3600_000),
-        createdAt: new Date(),
-        save: async () => {},
-      };
-    }
-    return null;
-  };
-
-  return `Bearer ${rawId}`;
-}
-
 test('concurrent compaction requests: first succeeds, second returns 409', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let locked = false;
   models.CompactionLock.findOneAndUpdate = () => {
@@ -122,7 +107,7 @@ test('concurrent compaction requests: first succeeds, second returns 409', async
     return { id: '507f1f77bcf86cd799439011', lockedAt: new Date(), expiresAt: new Date(Date.now() + 300_000) };
   };
 
-  const auth = await authHeaderFor(app);
+  const auth = await authHeaderFor();
 
   const first = await app.inject({
     method: 'POST',
@@ -151,7 +136,7 @@ test('concurrent compaction requests: first succeeds, second returns 409', async
 
 test('lock is released after compaction completes', async (t) => {
   const app = await makeApp();
-  t.after(() => app.close());
+  t.after(async () => { await app.close(); });
 
   let deleted = false;
   models.CompactionLock.findOneAndUpdate = async () => ({
@@ -164,7 +149,7 @@ test('lock is released after compaction completes', async (t) => {
     return { deletedCount: 1 };
   };
 
-  const auth = await authHeaderFor(app);
+  const auth = await authHeaderFor();
 
   const response = await app.inject({
     method: 'POST',

@@ -6,7 +6,7 @@ const { NoteComment, NoteInvitation } = require('../models');
 
 const BODY_LIMIT = parseInt(process.env.COMMENTS_BODY_LIMIT_BYTES ?? '8192', 10);
 
-const NoteIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9-]+$/);
+const NoteIdSchema = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 const CommentIdSchema = z.string().uuid();
 
 const baseRateLimit = {
@@ -115,6 +115,10 @@ async function commentRoutes(app) {
       return reply.status(403).send({ error: 'forbidden', message: 'Can only edit your own comments.' });
     }
 
+    if (!await requireCollaborator(existing.noteId, req.userId)) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
+    }
+
     const { contentEncrypted, contentIv } = req.body ?? {};
     if (!contentEncrypted || typeof contentEncrypted !== 'string' || !contentIv || typeof contentIv !== 'string') {
       return reply.status(400).send({ error: 'validation_error', message: 'contentEncrypted and contentIv are required.' });
@@ -145,6 +149,10 @@ async function commentRoutes(app) {
 
     if (existing.authorId !== req.userId) {
       return reply.status(403).send({ error: 'forbidden', message: 'Can only delete your own comments.' });
+    }
+
+    if (!await requireCollaborator(existing.noteId, req.userId)) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
     }
 
     await NoteComment.deleteMany({ $or: [{ _id: commentId }, { parentId: commentId }] });
