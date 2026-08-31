@@ -24,6 +24,19 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      minio:
+        image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,6 +50,37 @@ jobs:
       - name: Install dependencies
         run: yarn install --frozen-lockfile
 
+      - name: Create MinIO bucket
+        run: |
+          echo "Waiting for MinIO to be ready..."
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+              echo "MinIO ready on attempt $i"
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+            echo "MinIO service not running server (expected: minio/minio needs 'server' cmd) — starting fallback container..."
+            docker run -d --name minio-ci-fallback -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio:RELEASE.2025-02-28T09-55-16Z server /data --console-address ":9001"
+            for i in $(seq 1 30); do
+              if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+                echo "Fallback MinIO ready on attempt $i"
+                break
+              fi
+              if [ "$i" = "30" ]; then
+                echo "Fallback MinIO never became ready"
+                docker logs minio-ci-fallback || true
+                exit 1
+              fi
+              sleep 1
+            done
+          fi
+          STORAGE_ENDPOINT=http://localhost:9000 STORAGE_BUCKET_NAME=beaver-sync STORAGE_ACCESS_KEY_ID=minioadmin STORAGE_SECRET_ACCESS_KEY=minioadmin STORAGE_FORCE_PATH_STYLE=true node -e "
+            const { ensureBucket } = require('./src/services/r2');
+            ensureBucket().then(() => console.log('bucket ready')).catch(e => { console.error(e.message); process.exit(1); });
+          "
+
       - name: Lint
         run: yarn lint
 
@@ -44,6 +88,176 @@ jobs:
         run: yarn test
         env:
           TEST_DATABASE_URL: postgresql://beaver:beaver@localhost:5432/beaver_test
+          STORAGE_ENDPOINT: http://localhost:9000
+          STORAGE_BUCKET_NAME: beaver-sync
+          STORAGE_ACCESS_KEY_ID: minioadmin
+          STORAGE_SECRET_ACCESS_KEY: minioadmin
+          STORAGE_FORCE_PATH_STYLE: "true"
 
       - name: Audit dependencies (fail on critical)
         run: yarn audit --audit-level=critical
+
+  container-smoke:
+    name: Container smoke (API + relay)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Clean any stale scratch volumes
+        run: docker compose -f docker-compose.test.yml down -v --remove-orphans || true
+
+      - name: Build API+relay from scratch (no cache)
+        run: docker compose -f docker-compose.test.yml build --no-cache api ws-relay
+
+      - name: Image size report (measured)
+        run: |
+          echo "### Image size report" >> "$GITHUB_STEP_SUMMARY"
+          echo "| image | id | size | digest |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for img in $(docker images --format "{{.Repository}}:{{.Tag}}" | grep -E "beaver-sync"); do
+            id=$(docker inspect --format='{{.Id}}' "$img" 2>/dev/null | cut -c1-19)
+            size=$(docker images --format "{{.Repository}}:{{.Tag}} {{.Size}}" | grep -F "$img " | awk '{print $2}')
+            digest=$(docker inspect --format='{{index .RepoDigests 0}}' "$img" 2>/dev/null || echo "n/a")
+            echo "| $img | $id | $size | $digest |" >> "$GITHUB_STEP_SUMMARY"
+            echo "$img $id $size $digest"
+          done
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          docker images --digests | grep -E "beaver-sync|REPOSITORY" | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "history api:" >> "$GITHUB_STEP_SUMMARY"
+          docker history beaver-sync-api 2>&1 | head -20 >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Up stack against scratch PG/MinIO
+        env:
+          ENTERPRISE_MODE: "true"
+          SESSION_HMAC_KEY: ci-smoke-session-hmac-key-32-chars-long!
+          EMAIL_HMAC_KEY: ci-smoke-email-hmac-key-32-chars-long!!
+          COOKIE_SECRET: ci-smoke-cookie-secret-32-chars-long!!!
+          NOTE_HMAC_KEY: ci-smoke-note-hmac-key-32-chars-long!!
+        run: docker compose -f docker-compose.test.yml up -d --wait
+
+      - name: Wait for API /health green
+        run: |
+          set -e
+          echo "Polling http://localhost:4000/health ..."
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:4000/health 2>/dev/null | grep -q '"status":"ok"'; then
+              echo "health ok on attempt $i"
+              curl -fsS http://localhost:4000/health
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "API /health never turned green"
+              docker compose -f docker-compose.test.yml logs --no-color api || true
+              exit 1
+            fi
+            sleep 2
+          done
+          curl -fsS http://localhost:4000/health | grep -q '"db":"connected"'
+          echo "/health db connected ✓"
+
+      - name: Assert 30s alive
+        run: |
+          set -e
+          echo "Sleep 30s then verify both containers still running and healthy..."
+          sleep 30
+          docker inspect --format='{{.State.Status}}' beaver-sync-test-api | grep -q running
+          docker inspect --format='{{.State.Status}}' beaver-sync-test-ws-relay | grep -q running
+          # restart count should be 0 (no crash-loop)
+          api_restarts=$(docker inspect --format='{{.RestartCount}}' beaver-sync-test-api)
+          relay_restarts=$(docker inspect --format='{{.RestartCount}}' beaver-sync-test-ws-relay)
+          echo "api restarts=$api_restarts relay restarts=$relay_restarts"
+          [ "$api_restarts" = "0" ] || { echo "API restarted unexpectedly"; exit 1; }
+          [ "$relay_restarts" = "0" ] || { echo "relay restarted unexpectedly (MODULE_NOT_FOUND regression)"; exit 1; }
+          curl -fsS http://localhost:4000/health | grep -q '"status":"ok"'
+          curl -fsS http://localhost:8080/ | grep -q '"status":"ok"'
+          echo "30s alive + health green + relay http ok ✓"
+
+      - name: Ticket-socket smoke (MODULE_NOT_FOUND regression)
+        run: |
+          set -e
+          npm install --no-save ws >/dev/null 2>&1
+          node <<'NODEJS'
+          const WebSocket = require('ws');
+          const API = 'http://localhost:4000';
+          const WS_HOST = 'ws://localhost:8080';
+          const email = `smoke-${Date.now()}@example.com`;
+          const password = 'SmokeTestPass123!';
+          async function mustJson(res, label) {
+            const txt = await res.text();
+            let j; try { j = JSON.parse(txt); } catch { throw new Error(`${label} non-JSON ${res.status}: ${txt.slice(0,400)}`); }
+            if (!res.ok) throw new Error(`${label} ${res.status}: ${JSON.stringify(j).slice(0,600)}`);
+            return j;
+          }
+          (async () => {
+            console.log(`register ${email} ...`);
+            let r = await fetch(`${API}/auth/register`, {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ email, password })
+            });
+            const reg = await mustJson(r, 'register');
+            const token = reg.token;
+            const wsId = reg.workspace?.id;
+            if (!token) throw new Error('no token from register');
+            if (!wsId) throw new Error('no workspace id — ENTERPRISE_MODE must be true so registration provisions workspace');
+            console.log(`registered ws=${wsId} token=${token.slice(0,10)}...`);
+
+            console.log('issuing ws-ticket ...');
+            r = await fetch(`${API}/auth/ws-ticket`, {
+              method: 'POST', headers: { 'content-type': 'application/json', 'authorization': `Bearer ${token}` },
+              body: JSON.stringify({ workspaceId: wsId })
+            });
+            const tj = await mustJson(r, 'ws-ticket');
+            const ticket = tj.ticket;
+            if (!ticket) throw new Error('no ticket');
+            console.log(`ticket=${ticket.slice(0,10)}...`);
+
+            const room = `workspace:${wsId}:meta`;
+            const url = `${WS_HOST}/${room}?ticket=${ticket}`;
+            console.log(`connecting ${url} ...`);
+            const ws = new WebSocket(url);
+            let gotAuth = false;
+            const timeout = setTimeout(() => { console.error('WS timeout waiting for auth frame'); process.exit(1); }, 8000);
+            ws.on('open', () => console.log('ws open'));
+            ws.on('message', (data, isBin) => {
+              if (isBin) return;
+              try {
+                const msg = JSON.parse(data.toString());
+                if (msg.type === 'auth') {
+                  gotAuth = true;
+                  clearTimeout(timeout);
+                  console.log(`ws auth frame: ${JSON.stringify(msg)} ✓`);
+                  ws.close();
+                }
+              } catch {}
+            });
+            ws.on('error', e => { console.error('ws error', e.message); process.exit(1); });
+            ws.on('close', (code) => {
+              if (!gotAuth) { console.error(`ws closed before auth code=${code}`); process.exit(1); }
+              console.log('ticket-socket ok ✓ (MODULE_NOT_FOUND regression covered)');
+              process.exit(0);
+            });
+            ws.on('unexpected-response', (_req, res) => {
+              console.error(`ws upgrade rejected HTTP ${res.statusCode}`);
+              res.destroy();
+              process.exit(1);
+            });
+          })().catch(e => { console.error(e.stack || e.message); process.exit(1); });
+          NODEJS
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          echo "=== docker ps ==="; docker ps -a || true
+          echo "=== compose logs ==="; docker compose -f docker-compose.test.yml logs --no-color || true
+          echo "=== api health ==="; curl -fsS http://localhost:4000/health || true
+          echo "=== relay http ==="; curl -fsS http://localhost:8080/ || true
+
+      - name: Teardown scratch stack
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v --remove-orphans || true

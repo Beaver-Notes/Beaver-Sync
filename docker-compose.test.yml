@@ -84,12 +84,20 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
       NODE_ENV: production
       EMAIL_ENABLED: "false"
       PLAN_OVERRIDE: ${PLAN_OVERRIDE:-free}
+      ENTERPRISE_MODE: ${ENTERPRISE_MODE:-false}
+      SESSION_HMAC_KEY: ${SESSION_HMAC_KEY:-ci-smoke-session-hmac-key-32-chars-long!}
+      EMAIL_HMAC_KEY: ${EMAIL_HMAC_KEY:-ci-smoke-email-hmac-key-32-chars-long!!}
+      COOKIE_SECRET: ${COOKIE_SECRET:-ci-smoke-cookie-secret-32-chars-long!!!}
+      NOTE_HMAC_KEY: ${NOTE_HMAC_KEY:-ci-smoke-note-hmac-key-32-chars-long!!}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-minio}
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://minio:9000}
       STORAGE_PUBLIC_ENDPOINT: ${STORAGE_PUBLIC_ENDPOINT:-http://${LAN_IP:-localhost}:9000}
@@ -123,10 +131,15 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
       AUTH_BACKEND_URL: http://api:3000
+      WS_RELAY_PORT: ${WS_RELAY_PORT:-8080}
+      WS_RELAY_AUTH_TIMEOUT_MS: ${WS_RELAY_AUTH_TIMEOUT_MS:-10000}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
     command: ["node", "src/ws-relay.js"]
     ports:
       - "0.0.0.0:8080:8080"
