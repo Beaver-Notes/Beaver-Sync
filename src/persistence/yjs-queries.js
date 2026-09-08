@@ -185,6 +185,8 @@ async function deleteUnencryptedUpdatesForNote(workspaceId, noteId) {
   await query(`
     DELETE FROM yjs_doc_updates
     WHERE workspace_id = $1 AND note_id = $2 AND update_encrypted = 0
+    -- spare pre-migration baseline blobs (migrate-postgres.js); last-resort copy
+    AND id NOT LIKE 'migration-%'
   `, [workspaceId, noteId]);
 }
 

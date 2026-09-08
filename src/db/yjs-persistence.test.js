@@ -6,7 +6,7 @@ const { createPostgresPersistence } = require('./yjs-persistence')
 const { query } = require('./postgres')
 const { getPool } = require('./postgres')
 
-describe('yjs-persistence (journal-backed)', () => {
+describe('yjs-persistence (ephemeral relay)', () => {
   let pool
   let persistence
   const TEST_WS = 'ws-test-persist'
@@ -38,54 +38,63 @@ describe('yjs-persistence (journal-backed)', () => {
     await query('DELETE FROM yjs_doc_updates WHERE workspace_id = $1', [TEST_WS])
   })
 
-  function makeDocName() {
-    return `workspace:${TEST_WS}:note:${TEST_NOTE}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  function makeNote() {
+    const noteId = `${TEST_NOTE}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    return { noteId, docName: `workspace:${TEST_WS}:note:${noteId}` }
   }
 
-  it('bindState loads persisted document from journal', async () => {
-    const docName = makeDocName()
-    const doc1 = new Y.Doc()
-    const map1 = doc1.getMap('test')
-    map1.set('key', 'value')
+  async function countRows(noteId) {
+    const { rows } = await query(
+      'SELECT COUNT(*)::int AS count FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = $2',
+      [TEST_WS, noteId]
+    )
+    return rows[0].count
+  }
 
-    // Persist via writeState (writes to journal)
+  it('writeState does not INSERT relay rows', async () => {
+    const { noteId, docName } = makeNote()
+    const doc = new Y.Doc()
+    doc.getMap('test').set('key', 'value')
+    await persistence.writeState(docName, doc)
+    doc.destroy()
+    assert.strictEqual(await countRows(noteId), 0)
+  })
+
+  it('bindState starts empty (broadcast only, never loads journal)', async () => {
+    const { docName } = makeNote()
+    const doc1 = new Y.Doc()
+    doc1.getMap('test').set('key', 'value')
     await persistence.writeState(docName, doc1)
     doc1.destroy()
 
-    // Give time for async persistence
-    await new Promise(r => setTimeout(r, 50))
-
-    // Load in new doc (reads from journal)
     const doc2 = new Y.Doc()
     await persistence.bindState(docName, doc2)
-    await new Promise(r => setTimeout(r, 50))
-    const map2 = doc2.getMap('test')
-    assert.strictEqual(map2.get('key'), 'value')
+    assert.strictEqual(doc2.getMap('test').get('key'), undefined)
     doc2.destroy()
   })
 
-  it('writeState updates existing document via journal append', async () => {
-    const docName = makeDocName()
-    const doc1 = new Y.Doc()
-    doc1.getMap('test').set('v', 1)
-    await persistence.writeState(docName, doc1)
-    doc1.destroy()
+  it('bindState cleans pre-existing poison rows, keeps encrypted envelopes', async () => {
+    const { noteId, docName } = makeNote()
+    const now = new Date().toISOString()
+    await query(`
+      INSERT INTO yjs_doc_updates
+        (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at)
+      VALUES
+        ($1, $2, $3, $4, 0, 'relay', 1, $5, $6),
+        ($7, $2, $3, $8, 1, 'client-device', 1, $5, $6)
+    `, [`poison-${noteId}`, TEST_WS, noteId, Buffer.from('poison'), Date.now(), now,
+        `envelope-${noteId}`, Buffer.from('envelope')])
+    assert.strictEqual(await countRows(noteId), 2)
 
-    await new Promise(r => setTimeout(r, 50))
+    const doc = new Y.Doc()
+    await persistence.bindState(docName, doc)
+    doc.destroy()
 
-    const doc2 = new Y.Doc()
-    await persistence.bindState(docName, doc2)
-    await new Promise(r => setTimeout(r, 50))
-    doc2.getMap('test').set('v', 2)
-    await persistence.writeState(docName, doc2)
-    doc2.destroy()
-
-    await new Promise(r => setTimeout(r, 50))
-
-    const doc3 = new Y.Doc()
-    await persistence.bindState(docName, doc3)
-    await new Promise(r => setTimeout(r, 50))
-    assert.strictEqual(doc3.getMap('test').get('v'), 2)
-    doc3.destroy()
+    const { rows } = await query(
+      'SELECT device_id, update_encrypted FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = $2',
+      [TEST_WS, noteId]
+    )
+    assert.strictEqual(rows.length, 1)
+    assert.strictEqual(rows[0].device_id, 'client-device')
   })
 })
