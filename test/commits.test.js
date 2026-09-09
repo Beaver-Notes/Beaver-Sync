@@ -282,3 +282,61 @@ test('envelope missing cipher is rejected with 400', async (t) => {
   const body = response.json();
   assert.equal(body.error, 'validation_error');
 });
+
+test('v5 envelope string with dashed UUID deviceId is accepted', async (t) => {
+  const app = await makeApp();
+  t.after(async () => { await app.close(); });
+
+  let storedPayload = null;
+  r2.put = async (key, body) => { storedPayload = body.toString('utf8'); };
+
+  const auth = await authHeaderFor();
+  const deviceId = '123e4567-e89b-12d3-a456-426614174000';
+  const ts = 1700000000000;
+  const clock = 7;
+  const commitId = `${ts}-${deviceId}-${clock}`;
+  const envelope = JSON.stringify({
+    v: 5,
+    meta: { noteId: 'note-1', clock: 1 },
+    iv: 'aXYivbase64',
+    enc: 'cipherbase64',
+  });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/commits',
+    headers: {
+      'content-type': 'application/json',
+      authorization: auth,
+      'x-device-id': deviceId,
+    },
+    payload: JSON.stringify({ id: commitId, deviceId, clock, ts, payload: envelope }),
+  });
+
+  assert.equal(response.statusCode, 201);
+  const unwrapped = await mlkem.unwrapBlob(Buffer.from(storedPayload, 'utf8'));
+  assert.equal(unwrapped.toString('utf8'), envelope);
+});
+
+test('GET /:id returns a stored v5 envelope string as-is', async (t) => {
+  const app = await makeApp();
+  t.after(async () => { await app.close(); });
+
+  const deviceId = '123e4567-e89b-12d3-a456-426614174000';
+  const commitId = `1700000000000-${deviceId}-7`;
+  const envelope = JSON.stringify({ v: 5, meta: {}, iv: 'x', enc: 'y' });
+  const blob = await mlkem.wrapBlob(Buffer.from(envelope, 'utf8'));
+
+  models.CommitMeta.findOne = () => chain({ commitId, accountId: '507f1f77bcf86cd799439011' });
+  r2.get = async () => blob;
+
+  const auth = await authHeaderFor();
+  const response = await app.inject({
+    method: 'GET',
+    url: `/commits/${commitId}`,
+    headers: { authorization: auth },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json(), envelope);
+});

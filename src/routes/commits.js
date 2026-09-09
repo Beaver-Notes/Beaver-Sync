@@ -16,16 +16,29 @@ const MAX_CURSOR_BYTES = parseInt(process.env.COMMIT_CURSOR_QUERY_MAX_BYTES ?? '
 const MAX_CURSOR_ENTRIES = parseInt(process.env.COMMIT_CURSOR_MAX_ENTRIES ?? '100', 10);
 const COMMIT_ID_PATTERN = /^\d+-[a-zA-Z0-9_-]+-\d+$/;
 
+const CommitLegacyPayload = z.object({
+  v: z.literal(3),
+  nonce: z.string(),
+  cipher: z.string(),
+});
+
+// v4/v5 sync envelopes are sent as JSON strings (see Beaver-Notes crypto.js
+// encryptJSON). Raw non-envelope strings are still rejected.
+const CommitEnvelopePayload = z.string().min(1).refine((s) => {
+  try {
+    const parsed = JSON.parse(s);
+    return !!parsed && (parsed.v === 4 || parsed.v === 5);
+  } catch {
+    return false;
+  }
+}, 'Invalid sync envelope payload');
+
 const CommitUploadSchema = z.object({
   id: z.string().regex(COMMIT_ID_PATTERN, 'Invalid commit ID format'),
   deviceId: z.string().regex(DEVICE_ID_PATTERN, 'Invalid device ID'),
   clock: z.number().int().min(0),
   ts: z.number().int().min(0),
-  payload: z.object({
-    v: z.literal(3),
-    nonce: z.string(),
-    cipher: z.string(),
-  }),
+  payload: z.union([CommitLegacyPayload, CommitEnvelopePayload]),
 });
 
 function parseCursorMap(afterParam) {
@@ -158,7 +171,14 @@ async function commitRoutes(app) {
       });
     }
 
-    const [, commitDeviceId, commitClock] = id.split('-');
+    // Commit IDs are `${ts}-${deviceId}-${clock}` and deviceIds may
+    // themselves contain dashes (UUIDs), so split on the first/last dash.
+    const firstDash = id.indexOf('-');
+    const lastDash = id.lastIndexOf('-');
+    const commitDeviceId = firstDash > 0 && lastDash > firstDash
+      ? id.slice(firstDash + 1, lastDash)
+      : null;
+    const commitClock = lastDash > firstDash ? id.slice(lastDash + 1) : null;
     if (commitDeviceId !== deviceId || parseInt(commitClock, 10) !== clock) {
       return reply.status(400).send({
         error: 'invalid_commit_identity',
