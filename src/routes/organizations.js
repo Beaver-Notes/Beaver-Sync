@@ -277,8 +277,14 @@ async function organizationRoutes(app) {
     if (invite.requireApproval && !invite.approvedBy) {
       return reply.status(202).send({ pending: true, message: 'Join request requires approval.' });
     }
-    await OrgMember.create({ orgId: invite.orgId, accountId: req.userId, role: invite.role, createdAt: new Date() });
-    await OrgInvite.updateOne({ tokenHash }, { $inc: { usedCount: 1 } });
+    const upd = await OrgInvite.updateOne({ tokenHash, revoked: 0, $or: [{ maxUses: 0 }, { usedCount: { $lt: invite.maxUses } }] }, { $inc: { usedCount: 1 } });
+    if (upd.modifiedCount === 0 && invite.maxUses > 0) return reply.status(410).send({ error: 'invite_max_uses' });
+    try {
+      await OrgMember.create({ orgId: invite.orgId, accountId: req.userId, role: invite.role, createdAt: new Date() });
+    } catch (e) {
+      if (String(e.message).toLowerCase().includes('unique') || String(e.message).includes('duplicate')) return reply.status(409).send({ error: 'already_member' });
+      throw e;
+    }
     return reply.status(201).send({ orgId: invite.orgId, role: invite.role });
   });
 

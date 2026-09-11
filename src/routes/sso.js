@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const net = require('net');
 const { SAML, generateServiceProviderMetadata } = require('@node-saml/node-saml');
 const { Issuer } = require('openid-client');
 const { SsoConfig, SsoOidcState, Account } = require('../models');
@@ -23,7 +24,7 @@ async function issueExchangeCode(accountId) {
   await getDb().query('DELETE FROM ws_tickets WHERE expires_at < NOW()');
   await getDb().query(
     'INSERT INTO ws_tickets (id_hash, account_id, device_id, role, expires_at) VALUES ($1,$2,NULL,NULL, NOW() + make_interval(secs => $3))',
-    [hashSessionId(code), accountId, parseInt(process.env.SSO_EXCHANGE_TTL_SECONDS ?? '60', 10)]
+    [hashSessionId(`sso-exchange:${code}`), accountId, parseInt(process.env.SSO_EXCHANGE_TTL_SECONDS ?? '60', 10)]
   );
   return code;
 }
@@ -32,7 +33,34 @@ async function issueExchangeCode(accountId) {
 // issuer so logins don't pay a round-trip on every request.
 const oidcIssuerCache = new Map();
 
+function isBlockedOidcHost(hostname) {
+  const h = String(hostname || '').toLowerCase().trim();
+  if (!h) return true;
+  if (h === 'localhost' || h === '::1' || h === '0.0.0.0') return true;
+  if (net.isIP(h)) {
+    if (net.isIP(h) === 4) {
+      if (h.startsWith('127.') || h.startsWith('0.')) return true;
+      if (h.startsWith('10.')) return true;
+      if (h.startsWith('192.168.')) return true;
+      if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true;
+      if (h.startsWith('169.254.')) return true;
+    } else if (h === '::1' || h === '::ffff:127.0.0.1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return true;
+    return false;
+  }
+  if (h === 'metadata.google.internal' || h.endsWith('.internal')) return true;
+  return false;
+}
+
 async function discoverOidcIssuer(issuerUrl) {
+  let parsed;
+  try { parsed = new URL(issuerUrl); } catch { throw Object.assign(new Error('Invalid OIDC issuer URL'), { statusCode: 400 }); }
+  const isLoopback = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '::1';
+  const allowHttpLoopback = process.env.NODE_ENV !== 'production' && isLoopback;
+  if (parsed.protocol !== 'https:' && !(allowHttpLoopback && parsed.protocol === 'http:')) throw Object.assign(new Error('OIDC issuer must use https'), { statusCode: 400 });
+  if (isBlockedOidcHost(parsed.hostname)) {
+    const exemptLoopback = allowHttpLoopback && parsed.protocol === 'http:' && isLoopback;
+    if (!exemptLoopback) throw Object.assign(new Error('OIDC issuer host not allowed'), { statusCode: 400 });
+  }
   const cached = oidcIssuerCache.get(issuerUrl);
   if (cached && Date.now() - cached.at < OIDC_ISSUER_CACHE_TTL_MS) return cached.issuer;
   const issuer = await Issuer.discover(issuerUrl);
@@ -305,7 +333,7 @@ async function ssoRoutes(app) {
     const { getDb } = require('../db');
     const redeemed = await getDb().query(
       'DELETE FROM ws_tickets WHERE id_hash = $1 AND expires_at > NOW() AND role IS NULL RETURNING account_id',
-      [hashSessionId(code)]
+      [hashSessionId(`sso-exchange:${code}`)]
     );
     if (redeemed.rowCount === 0) {
       return reply.status(401).send({ error: 'invalid_code', message: 'Exchange code is invalid or expired.' });

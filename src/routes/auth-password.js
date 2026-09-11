@@ -425,11 +425,13 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
     }
     const expiresAt = account.passwordResetExpiresAt ? new Date(account.passwordResetExpiresAt) : null;
     if (!expiresAt || expiresAt < new Date()) {
-      await Account.updateOne({ _id: account.id }, { passwordResetTokenHash: null, passwordResetExpiresAt: null });
+      await Account.updateOne({ _id: account.id, passwordResetTokenHash: tokenHash }, { $set: { passwordResetTokenHash: null, passwordResetExpiresAt: null } });
       return reply.status(410).send({ error: 'token_expired', message: 'Reset token has expired.' });
     }
+    const claimed = await Account.updateOne({ _id: account.id, passwordResetTokenHash: tokenHash, passwordResetExpiresAt: { $gte: new Date() } }, { $set: { passwordResetTokenHash: null, passwordResetExpiresAt: null } });
+    if (claimed.modifiedCount === 0) return reply.status(400).send({ error: 'invalid_token', message: 'Invalid or expired reset token.' });
     const newHash = await bcrypt.hash(nextPw, BCRYPT_ROUNDS);
-    await Account.updateOne({ _id: account.id }, { passwordHash: newHash, passwordResetTokenHash: null, passwordResetExpiresAt: null, failedLoginAttempts: 0, lockedUntil: null });
+    await Account.updateOne({ _id: account.id }, { $set: { passwordHash: newHash, failedLoginAttempts: 0, lockedUntil: null } });
     const { Session } = require('../models');
     await Session.updateMany({ accountId: account.id }, { revoked: true });
     try { const { getDb } = require('../db'); await getDb().query('DELETE FROM ws_tickets WHERE account_id = $1', [account.id]); } catch {}

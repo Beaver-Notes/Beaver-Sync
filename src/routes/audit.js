@@ -1,6 +1,6 @@
 'use strict';
 
-const { AuditLog } = require('../models');
+const { AuditLog, WorkspaceMember } = require('../models');
 const mlkem = require('../lib/mlkem');
 const { isEnterpriseMode } = require('../lib/license');
 
@@ -37,6 +37,11 @@ async function auditRoutes(app) {
     const workspaceId = req.query.workspaceId;
     if (!workspaceId || typeof workspaceId !== 'string') {
       return reply.status(400).send({ error: 'validation_error', message: 'workspaceId query parameter is required.' });
+    }
+
+    const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
+    if (!membership) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Not a member of this workspace.' });
     }
 
     const filter = { workspaceId };

@@ -183,6 +183,7 @@ async function registerAssetPresignRoutes(app, protect) {
       try {
         const stat = await r2.stat(key);
         if (!stat) return null;
+        if (stat.sizeBytes > MAX_ASSET_SIZE_BYTES) return { assetKey, sizeBytes: stat.sizeBytes, tooLarge: true };
         return { assetKey, sizeBytes: stat.sizeBytes };
       } catch (err) {
         console.warn('[assets] confirm-seed stat failed:', assetKey, err.message);
@@ -216,18 +217,26 @@ async function registerAssetPresignRoutes(app, protect) {
       }
     }
 
-    if (workspaceId && totalSizeBytes > 0) {
-      await Workspace.updateOne(
-        { _id: workspaceId },
-        { $inc: { storageUsedBytes: totalSizeBytes } }
-      );
-    } else if (totalSizeBytes > 0) {
-      await Subscription.updateOne(
-        { accountId: req.userId },
-        { $inc: { storageUsedBytes: totalSizeBytes } }
-      );
+    if (totalSizeBytes > 0) {
+      const { query } = require('../db/postgres');
+      const { resolveQuotaAndUsed } = require('../db/asset-reservations');
+      const { quota } = await resolveQuotaAndUsed(req.userId, workspaceId, null);
+      if (quota !== Number.MAX_SAFE_INTEGER) {
+        let res;
+        if (workspaceId) {
+          res = await query('UPDATE workspaces SET storage_used_bytes = storage_used_bytes + $1 WHERE id=$2 AND storage_used_bytes + $1 <= $3', [totalSizeBytes, workspaceId, quota]);
+        } else {
+          res = await query('UPDATE subscriptions SET storage_used_bytes = storage_used_bytes + $1 WHERE account_id=$2 AND storage_used_bytes + $1 <= $3', [totalSizeBytes, req.userId, quota]);
+        }
+        if (!res || res.rowCount !== 1) {
+          return reply.status(507).send({ error: 'storage_quota_exceeded', message: 'Storage quota exceeded at confirm time.' });
+        }
+      } else if (workspaceId) {
+        await Workspace.updateOne({ _id: workspaceId }, { $inc: { storageUsedBytes: totalSizeBytes } });
+      } else {
+        await Subscription.updateOne({ accountId: req.userId }, { $inc: { storageUsedBytes: totalSizeBytes } });
+      }
     }
-
     return reply.send({ verified, total: keys.length, sizeBytes: totalSizeBytes, confirmed });
   });
 }

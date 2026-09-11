@@ -9,6 +9,7 @@ const { resolvePlanForAccount } = require('./plans');
 // non-participant.
 async function isOrgParticipant(orgId, userId) {
   if (!orgId || !userId) return false;
+  if (typeof orgId !== 'string') return false;
   const member = await OrgMember.findOne({ orgId, accountId: userId }).lean();
   if (member) return true;
   const wsRows = await Workspace.find({ orgId }, { _id: 1 }).lean();
@@ -25,6 +26,7 @@ async function isOrgParticipant(orgId, userId) {
 // the org; otherwise returns null so the caller falls back to their own plan.
 async function resolveOrgSubscription(orgId, userId) {
   if (!orgId) return null;
+  if (typeof orgId !== 'string') return null;
   const orgSub = await OrgSubscription.findOne({ orgId }).lean();
   if (!orgSub) return null;
   if (!(await isOrgParticipant(orgId, userId))) return null;
@@ -32,13 +34,15 @@ async function resolveOrgSubscription(orgId, userId) {
 }
 
 function orgIdFromReq(req) {
-  const orgId = req.body?.orgId ?? req.params?.orgId ?? req.query?.orgId ?? null;
-  const workspaceId =
+  const rawOrgId = req.body?.orgId ?? req.params?.orgId ?? req.query?.orgId ?? null;
+  const orgId = typeof rawOrgId === 'string' ? rawOrgId : null;
+  const rawWorkspaceId =
     req.body?.workspaceId ??
     req.params?.workspaceId ??
     req.query?.workspaceId ??
     req.headers?.['x-workspace-id'] ??
     null;
+  const workspaceId = typeof rawWorkspaceId === 'string' ? rawWorkspaceId : null;
   return { orgId, workspaceId };
 }
 

@@ -212,7 +212,7 @@ async function authRoutes(app) {
     await getDb().query('DELETE FROM ws_tickets WHERE expires_at < NOW()');
     await getDb().query(
       'INSERT INTO ws_tickets (id_hash, account_id, device_id, role, expires_at) VALUES ($1,$2,$3,$4, NOW() + make_interval(secs => $5))',
-      [hashSessionId(ticket), req.userId, req.sessionDeviceId ?? null, resolved.role ?? null, ttlSeconds]
+      [hashSessionId(`ws-ticket:${ticket}`), req.userId, req.sessionDeviceId ?? null, resolved.role ?? null, ttlSeconds]
     );
     return reply.send({ ticket });
   });
@@ -239,7 +239,7 @@ async function authRoutes(app) {
     const { hashSessionId } = require('../lib/crypto');
     const consumed = await getDb().query(
       'DELETE FROM ws_tickets WHERE id_hash = $1 AND expires_at > NOW() RETURNING account_id, device_id, role',
-      [hashSessionId(ticket)]
+      [hashSessionId(`ws-ticket:${ticket}`)]
     );
     if (consumed.rows.length === 0) {
       return reply.status(401).send({ error: 'invalid_ticket', message: 'Ticket is invalid, used, or expired.' });

@@ -491,8 +491,18 @@ async function workspaceRoutes(app) {
       }
     }
 
-    await WorkspaceMember.create({ workspaceId: invite.workspaceId, accountId: req.userId, role: invite.role, createdAt: new Date() });
-    await WorkspaceInvite.updateOne({ tokenHash }, { $inc: { usedCount: 1 } });
+    if (invite.maxUses > 0) {
+      const upd = await WorkspaceInvite.updateOne({ tokenHash, usedCount: { $lt: invite.maxUses } }, { $inc: { usedCount: 1 } });
+      if (upd.modifiedCount === 0) return reply.status(410).send({ error: 'invite_max_uses', message: 'This invite has reached its maximum number of uses.' });
+    } else {
+      await WorkspaceInvite.updateOne({ tokenHash }, { $inc: { usedCount: 1 } });
+    }
+    try {
+      await WorkspaceMember.create({ workspaceId: invite.workspaceId, accountId: req.userId, role: invite.role, createdAt: new Date() });
+    } catch (e) {
+      if (String(e.message).toLowerCase().includes('unique') || String(e.message).includes('duplicate')) return reply.status(409).send({ error: 'already_member', message: 'You are already a member of this workspace.' });
+      throw e;
+    }
 
     app.log.info({ workspaceId: invite.workspaceId, userId: req.userId, role: invite.role }, 'User joined workspace via invite');
 

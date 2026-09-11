@@ -1,9 +1,48 @@
 'use strict';
 
+const net = require('net');
 const { SsoConfig, Workspace, WorkspaceMember } = require('../models');
 const mlkem = require('../lib/mlkem');
 const { isEnterpriseMode } = require('../lib/license');
 const { resolvePlanForAccount } = require('../lib/plans');
+
+function isBlockedOidcHost(hostname) {
+  const h = String(hostname || '').toLowerCase().trim();
+  if (!h) return true;
+  if (h === 'localhost' || h === '::1' || h === '0.0.0.0') return true;
+  if (net.isIP(h)) {
+    if (net.isIP(h) === 4) {
+      if (h.startsWith('127.') || h.startsWith('0.')) return true;
+      if (h.startsWith('10.')) return true;
+      if (h.startsWith('192.168.')) return true;
+      if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true;
+      if (h.startsWith('169.254.')) return true;
+    } else {
+      if (h === '::1' || h === '::ffff:127.0.0.1') return true;
+      if (h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80')) return true;
+    }
+    return false;
+  }
+  if (h === 'metadata.google.internal' || h.endsWith('.internal')) return true;
+  return false;
+}
+
+function validateOidcIssuer(value) {
+  if (value == null || value === '') return null;
+  if (typeof value !== 'string') return 'oidcIssuer must be a URL string.';
+  if (value.length > 2048) return 'oidcIssuer too long.';
+  let u;
+  try { u = new URL(value); } catch { return 'oidcIssuer must be an absolute URL.'; }
+  const isLoopback = u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1';
+  const allowHttpLoopback = process.env.NODE_ENV !== 'production' && isLoopback;
+  if (u.protocol !== 'https:' && !(allowHttpLoopback && u.protocol === 'http:')) return 'oidcIssuer must use https.';
+  if (!u.hostname) return 'oidcIssuer must include a hostname.';
+  if (isBlockedOidcHost(u.hostname)) {
+    const exemptLoopback = allowHttpLoopback && u.protocol === 'http:' && isLoopback;
+    if (!exemptLoopback) return 'oidcIssuer host is not allowed.';
+  }
+  return null;
+}
 
 const BODY_LIMIT = parseInt(process.env.ADMIN_BODY_LIMIT_BYTES ?? '4096', 10);
 
@@ -104,6 +143,11 @@ async function ssoAdminRoutes(app) {
     if (!/^[a-z0-9-]+$/.test(slug)) {
       return reply.status(400).send({ error: 'bad_request', message: 'slug must contain only lowercase letters, numbers, and hyphens.' });
     }
+    if (protocol === 'oidc') {
+      const oidcErr = validateOidcIssuer(oidcIssuer);
+      if (oidcErr) return reply.status(400).send({ error: 'bad_request', message: oidcErr });
+      if (!oidcIssuer) return reply.status(400).send({ error: 'bad_request', message: 'oidcIssuer is required for OIDC.' });
+    }
 
     const existing = await SsoConfig.findOne({ slug }).lean();
     if (existing) {
@@ -159,6 +203,10 @@ async function ssoAdminRoutes(app) {
 
     const { protocol, slug, idpEntityId, idpSsoUrl, idpCert, oidcIssuer, oidcClientId, oidcClientSecret, spCert, spPrivateKey, allowedEmailDomains } = req.body || {};
 
+    if (oidcIssuer !== undefined) {
+      const oidcErr = validateOidcIssuer(oidcIssuer);
+      if (oidcErr) return reply.status(400).send({ error: 'bad_request', message: oidcErr });
+    }
     if (slug && slug !== config.slug) {
       if (!/^[a-z0-9-]+$/.test(slug)) {
         return reply.status(400).send({ error: 'bad_request', message: 'slug must contain only lowercase letters, numbers, and hyphens.' });
