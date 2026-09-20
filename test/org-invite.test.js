@@ -120,6 +120,39 @@ test('a require-approval invite is pending until an admin approves it, then join
   assert.deepEqual(join.json(), { orgId: 'org-invite-2', role: 'member' });
 });
 
+test('require-approval is per-user: approving one requester does not unlock the link', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+
+  await seedOrg('org-invite-3', 'inv-owner');
+  await seedAccount('inv-requester-a', PUBKEY);
+  await seedAccount('inv-requester-b', PUBKEY_2);
+
+  const ownerSession = await createSession('inv-owner', { headers: {} });
+  const aSession = await createSession('inv-requester-a', { headers: {} });
+  const bSession = await createSession('inv-requester-b', { headers: {} });
+
+  const create = await inject(app, ownerSession, 'POST', '/organizations/org-invite-3/invite', { role: 'member', requireApproval: true });
+  assert.equal(create.statusCode, 201);
+  const token = create.json().token;
+
+  const pendingA = await inject(app, aSession, 'POST', `/organizations/join/${token}`);
+  assert.equal(pendingA.statusCode, 202, pendingA.body);
+
+  const approve = await inject(app, ownerSession, 'POST', `/organizations/org-invite-3/invite/${token}/approve`);
+  assert.equal(approve.statusCode, 200);
+
+  const joinA = await inject(app, aSession, 'POST', `/organizations/join/${token}`);
+  assert.equal(joinA.statusCode, 201, joinA.body);
+
+  // A second, different requester must still need their own approval: one
+  // approval must not turn the link into an unlimited self-join.
+  const pendingB = await inject(app, bSession, 'POST', `/organizations/join/${token}`);
+  assert.equal(pendingB.statusCode, 202, `a new requester must not auto-join, got ${pendingB.statusCode}: ${pendingB.body}`);
+  const bCount = (await query('SELECT COUNT(*)::int AS count FROM org_members WHERE org_id=$1 AND account_id=$2', ['org-invite-3', 'inv-requester-b'])).rows[0].count;
+  assert.equal(bCount, 0, 'requester B must not be a member without their own approval');
+});
+
 test('revoked invites are rejected with 404 on join', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
@@ -159,8 +192,8 @@ test('public-keys returns only collaborators with keypairs and 403s for outsider
   const response = await inject(app, ownerSession, 'GET', '/collaboration/public-keys/note-pubkey-test');
   assert.equal(response.statusCode, 200);
   const expected = [
-    { userId: 'pk-owner', deviceId: 'default', kemPublicKey: PUBKEY },
-    { userId: 'pk-user1', deviceId: 'default', kemPublicKey: PUBKEY_2 },
+    { userId: 'pk-owner', deviceId: 'default', kemPublicKey: PUBKEY, hasEnvelope: false },
+    { userId: 'pk-user1', deviceId: 'default', kemPublicKey: PUBKEY_2, hasEnvelope: false },
   ];
   assert.deepEqual(
     response.json().collaborators.sort((a, b) => a.userId.localeCompare(b.userId)),

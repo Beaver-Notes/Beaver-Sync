@@ -164,3 +164,57 @@ test('lock is released after compaction completes', async (t) => {
   assert.equal(response.statusCode, 201);
   assert.equal(deleted, true);
 });
+
+test('compaction debits the ledger the compacted commits were credited to', async (t) => {
+  const app = await makeApp();
+  t.after(async () => { await app.close(); });
+
+  process.env.PLAN_OVERRIDE = 'team';
+  const origFindById = models.Workspace.findById;
+  const origMemberFindOne = models.WorkspaceMember.findOne;
+  const origWorkspaceUpdate = models.Workspace.updateOne;
+  const origSubUpdate = models.Subscription.updateOne;
+  models.CompactionLock.findOneAndUpdate = async () => ({
+    id: '507f1f77bcf86cd799439011', lockedAt: new Date(), expiresAt: new Date(Date.now() + 300_000),
+  });
+  models.Workspace.findById = () => chain({ storageUsedBytes: 0, orgId: null });
+  models.WorkspaceMember.findOne = () => chain({ role: 'owner' });
+  const calls = { workspace: [], subscription: [] };
+  models.Workspace.updateOne = async (filter, update) => { calls.workspace.push(update); return { modifiedCount: 1 }; };
+  models.Subscription.updateOne = async (filter, update) => { calls.subscription.push(update); return { modifiedCount: 1 }; };
+  // Account-credited commit (see POST /commits), 300 bytes.
+  models.CommitMeta.find = () => chain([{ sizeBytes: 300, workspaceId: null }]);
+
+  try {
+    const auth = await authHeaderFor();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/snapshot',
+      headers: {
+        'content-type': 'application/json',
+        authorization: auth,
+        'x-workspace-id': 'ws-ledger',
+        'x-compacted-commits': '1700000000000-device_a-1',
+      },
+      payload: JSON.stringify({ snapshot: 'data' }),
+    });
+    assert.equal(response.statusCode, 201, response.body);
+
+    const subDebit = calls.subscription.find((u) => u.$inc && u.$inc.storageUsedBytes < 0);
+    assert.ok(subDebit, 'the account ledger that credited the commits must be debited');
+    assert.equal(subDebit.$inc.storageUsedBytes, -300);
+
+    for (const update of calls.workspace) {
+      assert.ok(
+        !update.$inc || update.$inc.storageUsedBytes >= 0,
+        'the workspace ledger must not be debited for account-credited commits'
+      );
+    }
+  } finally {
+    models.Workspace.findById = origFindById;
+    models.WorkspaceMember.findOne = origMemberFindOne;
+    models.Workspace.updateOne = origWorkspaceUpdate;
+    models.Subscription.updateOne = origSubUpdate;
+    delete process.env.PLAN_OVERRIDE;
+  }
+});

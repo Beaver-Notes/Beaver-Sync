@@ -10,7 +10,6 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 
 const { close, query } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
-const persistence = require('../src/persistence/yjs');
 const { createPostgresPersistence } = require('../src/db/yjs-persistence');
 const { getPool } = require('../src/db/postgres');
 
@@ -57,60 +56,39 @@ test.after(async () => {
   await close();
 });
 
-test('cross-path convergence: relay-only edit is visible to REST puller', async () => {
+test('relay-only edits are ephemeral: migration folds old docs, relay persists nothing', async () => {
   const docName = `workspace:${TEST_WORKSPACE}:note:${TEST_NOTE}`;
   const pool = getPool();
   const relayPersistence = createPostgresPersistence(pool);
 
-  // 1. Seed a pre-existing relay document (simulating pre-migration state)
+  // 1. A pre-existing relay document (pre-migration state) folds into the
+  // journal as a one-time baseline; its yjs_documents row is then dropped.
   await seedRelayDoc(docName, 'initial relay content');
-
-  // 2. Run migration to fold relay doc into journal
   const { migrateYjsDocumentsToJournal } = require('../src/db/migrate-postgres');
   const migrationResult = await migrateYjsDocumentsToJournal();
   assert.equal(migrationResult.migrated, 1);
   assert.equal(migrationResult.deleted, 1);
 
-  // 3. Relay client connects and makes an edit
+  // 2. bindState is broadcast-only: it must not load journal plaintext.
   const relayDoc = new Y.Doc();
   const relayText = relayDoc.getText('content');
-
-  // Bind state - this should load from journal (which now has the migrated snapshot)
   await relayPersistence.bindState(docName, relayDoc);
+  assert.equal(relayText.toString(), '');
 
-  // Verify initial content loaded from migration
-  assert.equal(relayText.toString(), 'initial relay content');
-
-  // Relay client makes an edit
-  relayText.insert(relayText.length, ' + relay edit');
-
-  // Persist the relay edit to journal
+  // 3. A relay edit is broadcast in memory only. writeState must not add a
+  // journal row; only the `migration-*` baseline is allowed to remain.
+  relayText.insert(0, 'relay edit');
   await relayPersistence.writeState(docName, relayDoc);
 
-  // 4. REST puller fetches updates via loadUpdatesAfter (simulating REST pull-batch)
-  const checkpoint = {}; // empty checkpoint = full pull
-  const page = await persistence.loadUpdatesAfter(TEST_WORKSPACE, TEST_NOTE, checkpoint, 100);
-
-  // 5. Verify the relay edit appears in the journal for REST puller
-  const relayEdits = page.updates.filter(u => u.deviceId === 'relay');
-  assert.ok(relayEdits.length >= 1, 'Should have at least one relay update');
-
-  // Apply all updates to a fresh doc to verify convergence
-  const restDoc = new Y.Doc();
-  const restText = restDoc.getText('content');
-  for (const update of page.updates) {
-    Y.applyUpdate(restDoc, update.data);
-  }
-
-  // The final content should include both initial and relay edit
-  assert.ok(restText.toString().includes('initial relay content'), 'Should have initial content');
-  assert.ok(restText.toString().includes('relay edit'), 'Should have relay edit');
-
-  // 6. Quota accounting should apply to relay-originated updates
-  // (This is implicitly tested by the store path using the same journal machinery)
+  const { rows } = await query(
+    `SELECT id FROM yjs_doc_updates
+     WHERE workspace_id = $1 AND note_id = $2 AND device_id = 'relay'
+       AND id NOT LIKE 'migration-%'`,
+    [TEST_WORKSPACE, TEST_NOTE]
+  );
+  assert.equal(rows.length, 0, 'relay edits must stay ephemeral');
 
   relayDoc.destroy();
-  restDoc.destroy();
 });
 
 test('relay bindState reconstructs from S3 snapshot + journal tail', async () => {
@@ -131,11 +109,10 @@ test('relay bindState reconstructs from S3 snapshot + journal tail', async () =>
   relayDoc.destroy();
 });
 
-test('quota netting applies to relay-originated updates via journal', async () => {
-  // This test verifies that relay updates go through the same quota accounting
-  // as REST updates by virtue of using storeNotesBatch internally
-  // (The actual quota enforcement is tested in yjs-persistence.test.js)
-
+test('relay-originated updates never enter the quota journal', async () => {
+  // The relay is ephemeral: only client-encrypted envelopes (REST push-batch)
+  // are journaled and counted against quota. The quota path itself is covered
+  // by src/db/yjs-persistence.test.js.
   const pool = getPool();
   const relayPersistence = createPostgresPersistence(pool);
   const docName = `workspace:${TEST_WORKSPACE}:note:note-quota`;
@@ -146,26 +123,16 @@ test('quota netting applies to relay-originated updates via journal', async () =
   // bindState must be called first to register the doc and set dirty tracking
   await relayPersistence.bindState(docName, relayDoc);
 
-  // Now make edits and persist
   relayText.insert(0, 'quota test');
   relayText.insert(relayText.length, ' more');
   await relayPersistence.writeState(docName, relayDoc);
 
-  // Verify the update was written to yjs_doc_updates
   const { rows } = await query(`
-    SELECT update_data, device_id FROM yjs_doc_updates
+    SELECT device_id FROM yjs_doc_updates
     WHERE workspace_id = $1 AND note_id = $2
   `, [TEST_WORKSPACE, 'note-quota']);
 
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].device_id, 'relay');
-
-  // Verify it's a valid Yjs update by applying it
-  const verifyDoc = new Y.Doc();
-  Y.applyUpdate(verifyDoc, rows[0].update_data);
-  const verifyText = verifyDoc.getText('content');
-  assert.equal(verifyText.toString(), 'quota test more');
+  assert.equal(rows.length, 0, 'ephemeral relay must not write plaintext rows');
 
   relayDoc.destroy();
-  verifyDoc.destroy();
 });

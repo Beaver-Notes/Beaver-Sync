@@ -163,9 +163,11 @@ test('commits /history is clamped to the starter 30-day window', async (t) => {
   const body = res.json();
   assert.equal(body.commits.length, 1);
   assert.equal(body.commits[0].commitid, '2-dev-a-2');
+  // The window is explicit so the client can explain an empty/partial list.
+  assert.equal(body.historyLimited, true);
 });
 
-test('commits list is clamped to the starter 30-day window', async (t) => {
+test('commits sync list is clamped to the starter 30-day window with an explicit flag', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('starter');
@@ -180,12 +182,15 @@ test('commits list is clamped to the starter 30-day window', async (t) => {
   });
 
   assert.equal(res.statusCode, 200);
-  const commits = res.json().commits;
-  assert.equal(commits.length, 1);
-  assert.equal(commits[0].commitId, '2-dev-b-2');
+  const body = res.json();
+  // The plan window applies, but `historyLimited` makes it explicit so the
+  // client never renders a limited tail as data loss.
+  assert.equal(body.commits.length, 1);
+  assert.equal(body.commits[0].commitId, '2-dev-b-2');
+  assert.equal(body.historyLimited, true);
 });
 
-test('yjs pull-batch is clamped to the starter 30-day window', async (t) => {
+test('yjs pull-batch is not clamped by the plan window', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
   const account = await makeAccountWithPlan('starter');
@@ -203,8 +208,8 @@ test('yjs pull-batch is clamped to the starter 30-day window', async (t) => {
   assert.equal(res.statusCode, 200);
   const notes = res.json().notes;
   const updates = notes['note-x'].updates;
-  assert.equal(updates.length, 1);
-  assert.ok(updates[0].key.endsWith('~~2.yjs.json'));
+  // Live journal state must sync in full regardless of plan history window.
+  assert.equal(updates.length, 2);
 });
 
 test('yjs pull-batch is not clamped for enterprise plans', async (t) => {

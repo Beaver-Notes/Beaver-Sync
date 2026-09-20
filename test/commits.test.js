@@ -16,7 +16,7 @@ process.env.EMAIL_HMAC_KEY = 'test-email-hmac-key-at-least-32-characters-long';
 process.env.AUTH_RATE_LIMIT_PER_MINUTE = '100';
 process.env.LEGACY_AUTH_ENABLED = 'true';
 
-const { close } = require('../src/db');
+const { close, query } = require('../src/db');
 const { setupTestDb } = require('./helpers/db');
 const { authHeaderFor } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
@@ -339,4 +339,199 @@ test('GET /:id returns a stored v5 envelope string as-is', async (t) => {
 
   assert.equal(response.statusCode, 200);
   assert.equal(response.json(), envelope);
+});
+
+test('shared note history is visible to every workspace member, and hidden from non-members', async (t) => {
+  // Real model/r2 methods: this test exercises the actual membership query.
+  Object.assign(models.CommitMeta, originalMethods.CommitMeta);
+  Object.assign(models.Subscription, originalMethods.Subscription);
+  Object.assign(models.Device, originalMethods.Device);
+  Object.assign(models.Session, originalMethods.Session);
+  Object.assign(r2, originalMethods.r2);
+
+  const { register, authHeaders } = require('./helpers/factory');
+
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+
+  const workspaceId = `ws-${crypto.randomUUID()}`;
+  const noteId = `shared-note-${crypto.randomBytes(4).toString('hex')}`;
+
+  const owner = await register('pro');
+  const member = await register('pro');
+  const outsider = await register('pro');
+  // The commit body plus envelope must fit the storage quota.
+  await query('UPDATE subscriptions SET storage_quota_bytes = 50000000000 WHERE account_id = $1', [owner.id]);
+
+  await models.Workspace.create({ id: workspaceId, nameEncrypted: 'n', ownerId: owner.id, createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId, accountId: owner.id, role: 'owner', createdAt: new Date() });
+  await models.WorkspaceMember.create({ workspaceId, accountId: member.id, role: 'editor', createdAt: new Date() });
+  // The note is "owned" by the workspace through its journal row.
+  await query(
+    `INSERT INTO yjs_doc_updates (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at)
+     VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8)`,
+    [crypto.randomUUID(), workspaceId, noteId, Buffer.from('x'), 'device_owner', 1, Date.now(), new Date().toISOString()]
+  );
+
+  const ownerHeaders = await authHeaders(owner.id);
+  const memberHeaders = await authHeaders(member.id);
+  const outsiderHeaders = await authHeaders(outsider.id);
+
+  let storedKey = null;
+  r2.put = async (key) => { storedKey = key; };
+
+  const ts = Date.now();
+  const commitId = `${ts}-device_owner-1`;
+  const post = await app.inject({
+    method: 'POST',
+    url: '/commits',
+    headers: { ...ownerHeaders, 'x-device-id': 'device_owner', 'x-note-id': noteId },
+    payload: JSON.stringify({
+      id: commitId,
+      deviceId: 'device_owner',
+      clock: 1,
+      ts,
+      payload: { v: 3, nonce: 'aaaaaaaaaaaaaaaa', cipher: 'encrypteddata' },
+    }),
+  });
+  assert.equal(post.statusCode, 201);
+  assert.equal(storedKey, r2.commitKey(owner.id, commitId));
+
+  // A workspace member sees the owner's commit, not only their own.
+  const memberHistory = await app.inject({
+    method: 'GET',
+    url: `/commits/history?noteId=${encodeURIComponent(noteId)}`,
+    headers: memberHeaders,
+  });
+  assert.equal(memberHistory.statusCode, 200);
+  const memberCommits = memberHistory.json().commits;
+  assert.equal(memberCommits.length, 1);
+  assert.equal(memberCommits[0].commitid, commitId);
+
+  // ...and can fetch the owner's blob (stored under the owner's prefix).
+  const envelope = JSON.stringify({ v: 5, meta: {}, iv: 'x', enc: 'y' });
+  const blob = await mlkem.wrapBlob(Buffer.from(envelope, 'utf8'));
+  let requestedKey = null;
+  r2.get = async (key) => { requestedKey = key; return blob; };
+
+  const memberGet = await app.inject({
+    method: 'GET',
+    url: `/commits/${commitId}`,
+    headers: { ...memberHeaders, 'x-note-id': noteId },
+  });
+  assert.equal(memberGet.statusCode, 200);
+  assert.equal(requestedKey, r2.commitKey(owner.id, commitId));
+  // GET /commits/:id returns the envelope as a JSON string (see the client's
+  // getCommitSnapshot), not as a parsed object.
+  assert.equal(memberGet.json(), envelope);
+
+  // A non-member sees no history and cannot fetch the blob.
+  const outsiderHistory = await app.inject({
+    method: 'GET',
+    url: `/commits/history?noteId=${encodeURIComponent(noteId)}`,
+    headers: outsiderHeaders,
+  });
+  assert.equal(outsiderHistory.statusCode, 200);
+  assert.equal(outsiderHistory.json().commits.length, 0);
+
+  const outsiderGet = await app.inject({
+    method: 'GET',
+    url: `/commits/${commitId}`,
+    headers: { ...outsiderHeaders, 'x-note-id': noteId },
+  });
+  assert.equal(outsiderGet.statusCode, 404);
+});
+
+test('a concurrent duplicate commit retry returns already_exists, not a 500', async (t) => {
+  const app = await makeApp();
+  t.after(async () => { await app.close(); });
+
+  // Simulate losing the check-then-insert race: the pre-check sees nothing and
+  // the insert hits the primary key.
+  const pkConflict = Object.assign(new Error('duplicate key value violates unique constraint'), { code: '23505' });
+  models.CommitMeta.create = async () => { throw pkConflict; };
+
+  const auth = await authHeaderFor();
+  const response = await app.inject({
+    method: 'POST',
+    url: '/commits',
+    headers: { 'content-type': 'application/json', authorization: auth, 'x-device-id': 'device_a' },
+    payload: JSON.stringify({
+      id: '1700000000000-device_a-1',
+      deviceId: 'device_a',
+      clock: 1,
+      ts: 1700000000000,
+      payload: { v: 3, nonce: 'aaaaaaaaaaaaaaaa', cipher: 'encrypteddata' },
+    }),
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { commitId: '1700000000000-device_a-1', status: 'already_exists' });
+});
+
+test('a foreign-account commit-id collision is a conflict, not a silent already_exists', async (t) => {
+  // Real model/r2 methods: this test exercises the actual primary-key collision.
+  Object.assign(models.CommitMeta, originalMethods.CommitMeta);
+  Object.assign(models.Subscription, originalMethods.Subscription);
+  Object.assign(models.Device, originalMethods.Device);
+  Object.assign(models.Session, originalMethods.Session);
+  Object.assign(r2, originalMethods.r2);
+
+  const { register, authHeaders } = require('./helpers/factory');
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+
+  const owner = await register('pro');
+  const squatter = await register('pro');
+  await query('UPDATE subscriptions SET storage_quota_bytes = 50000000000 WHERE account_id = $1', [owner.id]);
+  await query('UPDATE subscriptions SET storage_quota_bytes = 50000000000 WHERE account_id = $1', [squatter.id]);
+
+  const ownerHeaders = await authHeaders(owner.id);
+  const squatterHeaders = await authHeaders(squatter.id);
+  r2.put = async () => {};
+
+  const ts = Date.now();
+  const commitId = `${ts}-device_owner-1`;
+  const payload = JSON.stringify({
+    id: commitId,
+    deviceId: 'device_owner',
+    clock: 1,
+    ts,
+    payload: { v: 3, nonce: 'aaaaaaaaaaaaaaaa', cipher: 'encrypteddata' },
+  });
+
+  const first = await app.inject({
+    method: 'POST',
+    url: '/commits',
+    headers: { ...ownerHeaders, 'x-device-id': 'device_owner' },
+    payload,
+  });
+  assert.equal(first.statusCode, 201, first.body);
+
+  // The squatter reuses the owner's globally-unique commit id. It must NOT be
+  // told "already_exists": no row was written for the squatter, and a false
+  // success would silently drop their commit.
+  const collision = await app.inject({
+    method: 'POST',
+    url: '/commits',
+    headers: { ...squatterHeaders, 'x-device-id': 'device_owner' },
+    payload,
+  });
+  assert.equal(collision.statusCode, 409, collision.body);
+  assert.notEqual(collision.json().status, 'already_exists');
+
+  // The owner's commit row is untouched and still theirs.
+  const { rows } = await query('SELECT account_id FROM commits WHERE commit_id = $1', [commitId]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].account_id, owner.id);
+
+  // The owner's genuine idempotent retry stays a success.
+  const retry = await app.inject({
+    method: 'POST',
+    url: '/commits',
+    headers: { ...ownerHeaders, 'x-device-id': 'device_owner' },
+    payload,
+  });
+  assert.equal(retry.statusCode, 200, retry.body);
+  assert.equal(retry.json().status, 'already_exists');
 });

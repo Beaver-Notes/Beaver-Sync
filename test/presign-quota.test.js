@@ -210,3 +210,264 @@ test('sizes capped and missing sizes default to 0', async () => {
 
   await app.close();
 });
+
+test('proxy upload fails closed on the ledger quota (workspace and unresolvable)', async () => {
+  await cleanTestDb();
+  const { signAssetUpload } = require('../src/lib/asset-sign');
+  const origPut = r2.put;
+  r2.put = async () => {};
+  const app = await buildApp();
+  // buildApp() loads .env (which sets PLAN_OVERRIDE): this test is about the
+  // real per-ledger quota, so drop the dev/test escape hatch.
+  delete process.env.PLAN_OVERRIDE;
+  try {
+    // (a) A workspace over quota must refuse the signed proxy upload, even
+    // though the caller's personal subscription has plenty of room.
+    const acct = `acct-proxy-ws-${crypto.randomUUID().slice(0, 6)}`;
+    await createAccountWithQuota(acct, 'pro', 100_000_000);
+    const now = new Date().toISOString();
+    const orgId = `org-proxy-${crypto.randomUUID().slice(0, 6)}`;
+    const ws = `ws-proxy-${crypto.randomUUID().slice(0, 6)}`;
+    await query('INSERT INTO organizations (id, name_encrypted, slug, created_at) VALUES ($1,$2,$3,$4)', [orgId, 'e', `slug-${orgId}`, now]);
+    await query('INSERT INTO org_members (org_id, account_id, role, created_at) VALUES ($1,$2,$3,$4)', [orgId, acct, 'member', now]);
+    await query(
+      'INSERT INTO org_subscriptions (id, org_id, plan, status, seats, storage_quota_bytes, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+      [`sub-${orgId}`, orgId, 'team', 'active', 1, 100, now]
+    );
+    await query(
+      'INSERT INTO workspaces (id, name_encrypted, owner_id, org_id, storage_used_bytes, created_at) VALUES ($1,$2,$3,$4,$5,$6)',
+      [ws, 'e', acct, orgId, 200, now]
+    );
+    // The reservation is the authoritative record of which ledger the upload credits.
+    const assetKey = `assets--${ws}--note-1--over.png`;
+    await query(
+      `INSERT INTO asset_reservations (id, account_id, workspace_id, asset_key, size_bytes, status, expires_at, created_at)
+       VALUES ($1,$2,$3,$4,$5,'confirmed',$6,$7)`,
+      [crypto.randomUUID(), acct, ws, assetKey, 200, now, now]
+    );
+    const { url } = signAssetUpload(assetKey, acct, 3600);
+    const q = new URL(url).searchParams;
+    const uploadUrl = `/assets/upload?key=${encodeURIComponent(assetKey)}&userId=${acct}&expires=${q.get('expires')}&sig=${q.get('sig')}`;
+    const over = await app.inject({
+      method: 'PUT',
+      url: uploadUrl,
+      headers: { 'content-type': 'application/octet-stream' },
+      payload: Buffer.alloc(500),
+    });
+    assert.equal(over.statusCode, 507, `workspace-over-quota proxy upload must be refused, got ${over.statusCode}: ${over.body}`);
+    const wsRow = (await query('SELECT storage_used_bytes FROM workspaces WHERE id=$1', [ws])).rows[0];
+    assert.equal(Number(wsRow.storage_used_bytes), 200, 'refused upload must not touch the ledger');
+
+    // (b) An account whose quota cannot be resolved (no subscription) must not
+    // skip the gate: a falsy quota fails closed.
+    const noSub = `acct-proxy-nosub-${crypto.randomUUID().slice(0, 6)}`;
+    await query('INSERT INTO accounts (id, email_hmac, created_at, email_verified) VALUES ($1,$2,$3,$4)', [noSub, `${noSub}-hmac`, now, true]);
+    const noSubKey = 'proxy-nosub';
+    const noSubUrl = signAssetUpload(noSubKey, noSub, 3600).url;
+    const q2 = new URL(noSubUrl).searchParams;
+    const closed = await app.inject({
+      method: 'PUT',
+      url: `/assets/upload?key=${noSubKey}&userId=${noSub}&expires=${q2.get('expires')}&sig=${q2.get('sig')}`,
+      headers: { 'content-type': 'application/octet-stream' },
+      payload: Buffer.alloc(500),
+    });
+    assert.equal(closed.statusCode, 507, `unresolvable quota must fail closed, got ${closed.statusCode}: ${closed.body}`);
+  } finally {
+    r2.put = origPut;
+    await app.close();
+  }
+});
+
+test('batch-uploaded workspace assets debit the workspace ledger on delete', async () => {
+  await cleanTestDb();
+  const acct = `acct-batch-ledger-${crypto.randomUUID().slice(0, 6)}`;
+  await createAccountWithQuota(acct, 'pro', 100_000_000);
+  const now = new Date().toISOString();
+  const orgId = `org-batch-${crypto.randomUUID().slice(0, 6)}`;
+  const ws = `ws-batch-${crypto.randomUUID().slice(0, 6)}`;
+  await query('INSERT INTO organizations (id, name_encrypted, slug, created_at) VALUES ($1,$2,$3,$4)', [orgId, 'e', `slug-${orgId}`, now]);
+  await query('INSERT INTO org_members (org_id, account_id, role, created_at) VALUES ($1,$2,$3,$4)', [orgId, acct, 'owner', now]);
+  await query(
+    'INSERT INTO org_subscriptions (id, org_id, plan, status, seats, created_at) VALUES ($1,$2,$3,$4,$5,$6)',
+    [`sub-${orgId}`, orgId, 'team', 'active', 1, now]
+  );
+  await query(
+    'INSERT INTO workspaces (id, name_encrypted, owner_id, org_id, storage_used_bytes, created_at) VALUES ($1,$2,$3,$4,$5,$6)',
+    [ws, 'e', acct, orgId, 0, now]
+  );
+  await query(
+    'INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1,$2,$3,$4)',
+    [ws, acct, 'owner', now]
+  );
+
+  const app = await buildApp();
+  delete process.env.PLAN_OVERRIDE;
+  const origPut = r2.put;
+  const origDel = r2.del;
+  r2.put = async (key, body) => { r2.__inject(key, body.length); };
+  r2.del = async () => {};
+  try {
+    const headers = await authHeaders(acct);
+    const assetKey = `assets--${ws}--note-1--batch.png`;
+    const upload = await app.inject({
+      method: 'POST',
+      url: '/assets/batch',
+      headers,
+      payload: { workspaceId: ws, assets: [{ key: assetKey, data: Buffer.alloc(100).toString('base64') }] },
+    });
+    assert.equal(upload.statusCode, 200, upload.body);
+    assert.equal(upload.json().uploaded, 1);
+    const wsAfterUpload = (await query('SELECT storage_used_bytes FROM workspaces WHERE id=$1', [ws])).rows[0];
+    assert.equal(Number(wsAfterUpload.storage_used_bytes), 100, 'batch workspace upload must credit the workspace ledger');
+
+    const del = await app.inject({ method: 'DELETE', url: `/assets/${encodeURIComponent(assetKey)}`, headers });
+    assert.equal(del.statusCode, 200, del.body);
+    const wsAfterDel = (await query('SELECT storage_used_bytes FROM workspaces WHERE id=$1', [ws])).rows[0];
+    const subAfterDel = (await query('SELECT storage_used_bytes FROM subscriptions WHERE account_id=$1', [acct])).rows[0];
+    assert.equal(Number(wsAfterDel.storage_used_bytes), 0, 'delete must debit the workspace ledger the upload credited');
+    assert.equal(Number(subAfterDel.storage_used_bytes), 0, 'the account ledger must not be debited');
+  } finally {
+    r2.put = origPut;
+    r2.del = origDel;
+    await app.close();
+  }
+});
+
+test('asset key validation accepts client filenames and rejects traversal', () => {
+  const { isValidAssetKey } = require('../src/routes/assets-shared');
+
+  // Percent-encoded unicode/space/paren/plus and their raw legacy forms.
+  assert.equal(isValidAssetKey('assets--note-1--R%C3%A9sum%C3%A9%20(final)%2Bv2.pdf'), true);
+  assert.equal(isValidAssetKey('Résumé (final)+v2.pdf'), true);
+  assert.equal(isValidAssetKey("O'Brien's file!~*.txt"), true);
+  assert.equal(isValidAssetKey('report..final.pdf'), true);
+
+  // Opaque asset keys: `assets--<base64url token>` (encrypted structure).
+  // base64url is `A-Za-z0-9-_`, all inside the allowed set.
+  assert.equal(
+    isValidAssetKey('assets--' + crypto.randomBytes(120).toString('base64url')),
+    true
+  );
+
+  // Path traversal / unsafe keys stay rejected.
+  assert.equal(isValidAssetKey(''), false);
+  assert.equal(isValidAssetKey('a/b'), false);
+  assert.equal(isValidAssetKey('a\\b'), false);
+  assert.equal(isValidAssetKey('..'), false);
+  assert.equal(isValidAssetKey('.hidden'), false);
+  assert.equal(isValidAssetKey('a%2Fb'), false);
+  assert.equal(isValidAssetKey('bad%zz'), false);
+});
+
+test('asset listing is account-global; workspaceId no longer filters', async () => {
+  await cleanTestDb();
+  const acct = `acct-asset-list-${crypto.randomUUID().slice(0, 6)}`;
+  await createAccountWithQuota(acct, 'pro', 100_000);
+  const app = await buildApp();
+  const headers = await authHeaders(acct);
+  const opaque = 'assets--' + crypto.randomBytes(80).toString('base64url');
+  const legacy = 'assets--ws-1--n1--a.png';
+  const origList = r2.listKeys;
+  r2.listKeys = async () => [`${acct}/assets/${opaque}`, `${acct}/assets/${legacy}`];
+  try {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/assets?workspaceId=ws-1',
+      headers,
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    // Opaque keys cannot be scoped server-side, so the account-global list is
+    // returned; the client decrypts and filters. The legacy key is also present.
+    assert.deepEqual(
+      JSON.parse(res.body).keys.sort(),
+      [opaque, legacy].sort(),
+      'workspaceId must not silently drop opaque keys'
+    );
+  } finally {
+    r2.listKeys = origList;
+    await app.close();
+  }
+});
+
+test('asset delete debits the same workspace ledger the upload credited', async () => {
+  await cleanTestDb();
+  const acct = `acct-asset-ledger-${crypto.randomUUID().slice(0, 6)}`;
+  await createAccountWithQuota(acct, 'pro', 100_000_000);
+  const now = new Date().toISOString();
+  const ws = `ws-asset-ledger-${crypto.randomUUID().slice(0, 6)}`;
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1,$2,$3,$4)', [ws, 'e', acct, now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1,$2,$3,$4)', [ws, acct, 'owner', now]);
+  await query('UPDATE workspaces SET storage_used_bytes = 100 WHERE id=$1', [ws]);
+  await query(
+    `INSERT INTO asset_reservations (id, account_id, workspace_id, asset_key, size_bytes, status, expires_at, created_at)
+     VALUES ($1,$2,$3,$4,$5,'confirmed',$6,$7)`,
+    [crypto.randomUUID(), acct, ws, 'ledger-asset', 100, now, now]
+  );
+  r2.__inject(`${acct}/assets/ledger-asset`, 100);
+  const del = r2.del;
+  r2.del = async () => {};
+
+  const app = await buildApp();
+  const headers = await authHeaders(acct);
+  try {
+    const res = await app.inject({ method: 'DELETE', url: '/assets/ledger-asset', headers });
+    assert.equal(res.statusCode, 200, res.body);
+
+    const wsRow = (await query('SELECT storage_used_bytes FROM workspaces WHERE id=$1', [ws])).rows[0];
+    const subRow = (await query('SELECT storage_used_bytes FROM subscriptions WHERE account_id=$1', [acct])).rows[0];
+    assert.equal(Number(wsRow.storage_used_bytes), 0, 'workspace ledger must be debited');
+    assert.equal(Number(subRow.storage_used_bytes), 0, 'subscription ledger must be untouched');
+  } finally {
+    r2.del = del;
+    await app.close();
+  }
+});
+
+test('a non-member cannot credit or reserve against another workspace ledger', async () => {
+  await cleanTestDb();
+  const attacker = `acct-xws-attacker-${crypto.randomUUID().slice(0, 6)}`;
+  const victim = `acct-xws-victim-${crypto.randomUUID().slice(0, 6)}`;
+  await createAccountWithQuota(attacker, 'pro', 100_000_000);
+  await createAccountWithQuota(victim, 'pro', 100_000_000);
+
+  const now = new Date().toISOString();
+  const ws = `ws-xws-victim-${crypto.randomUUID().slice(0, 6)}`;
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1,$2,$3,$4)', [ws, 'e', victim, now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1,$2,$3,$4)', [ws, victim, 'owner', now]);
+  await query('UPDATE workspaces SET storage_used_bytes = 500 WHERE id=$1', [ws]);
+
+  const app = await buildApp();
+  const attackerHeaders = await authHeaders(attacker);
+
+  // Attacker's own asset exists in their own storage path, but they pass the
+  // victim workspace id for accounting.
+  r2.__inject(`${attacker}/assets/evil`, 1000);
+  const confirm = await app.inject({
+    method: 'POST', url: '/assets/confirm-seed', headers: attackerHeaders,
+    payload: { keys: ['evil'], workspaceId: ws },
+  });
+  assert.equal(confirm.statusCode, 403, `confirm-seed must reject a non-member, got ${confirm.statusCode}: ${confirm.body}`);
+  const afterConfirm = (await query('SELECT storage_used_bytes FROM workspaces WHERE id=$1', [ws])).rows[0];
+  assert.equal(Number(afterConfirm.storage_used_bytes), 500, 'victim ledger must be unchanged by a non-member');
+
+  const presign = await app.inject({
+    method: 'POST', url: '/assets/presign-batch', headers: attackerHeaders,
+    payload: { keys: ['evil2'], sizes: [1000], workspaceId: ws },
+  });
+  assert.equal(presign.statusCode, 403, `presign-batch must reject a non-member, got ${presign.statusCode}: ${presign.body}`);
+  const reservations = (await query('SELECT COUNT(*)::int AS c FROM asset_reservations WHERE workspace_id=$1', [ws])).rows[0].c;
+  assert.equal(reservations, 0, 'no reservation may be created against a foreign workspace');
+
+  // The legitimate member path still credits the workspace ledger.
+  const victimHeaders = await authHeaders(victim);
+  r2.__inject(`${victim}/assets/good`, 700);
+  const ok = await app.inject({
+    method: 'POST', url: '/assets/confirm-seed', headers: victimHeaders,
+    payload: { keys: ['good'], workspaceId: ws },
+  });
+  assert.equal(ok.statusCode, 200, `legitimate member confirm must succeed, got ${ok.statusCode}: ${ok.body}`);
+  const afterMember = (await query('SELECT storage_used_bytes FROM workspaces WHERE id=$1', [ws])).rows[0];
+  assert.equal(Number(afterMember.storage_used_bytes), 1200, 'member credit must be applied to the workspace ledger');
+
+  await app.close();
+});

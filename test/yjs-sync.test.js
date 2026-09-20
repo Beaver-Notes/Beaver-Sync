@@ -369,3 +369,42 @@ test('sparse sequence gaps are stored exactly, not collapsed by max clock', asyn
   const count = (await query('SELECT COUNT(*)::int c FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2', ['workspace-1', 'sparse-clock-note'])).rows[0].c;
   assert.equal(count, 4);
 });
+
+test('DELETE /yjs/updates removes only the requested keys, not the whole note journal', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const session = await createSession('account-1', { headers: {} });
+  const base = Date.now();
+  const keyA = `delete-keys-note~~device-a~~${base}~~1.yjs.json`;
+  const keyB = `delete-keys-note~~device-b~~${base + 1}~~1.yjs.json`;
+
+  await request(app, session, '/yjs/push-batch', {
+    workspaceId: 'workspace-1',
+    notes: [{ noteId: 'delete-keys-note', updates: [{ key: keyA, data: 'YQ==', deviceId: 'device-a', sequence: 1, ts: base }] }],
+  }, 'device-a');
+  await request(app, session, '/yjs/push-batch', {
+    workspaceId: 'workspace-1',
+    notes: [{ noteId: 'delete-keys-note', updates: [{ key: keyB, data: 'Yg==', deviceId: 'device-b', sequence: 1, ts: base + 1 }] }],
+  }, 'device-b');
+
+  const del = await app.inject({
+    method: 'DELETE',
+    url: '/yjs/updates',
+    headers: { authorization: `Bearer ${session}`, 'content-type': 'application/json', 'x-device-id': 'device-a' },
+    payload: { workspaceId: 'workspace-1', noteId: 'delete-keys-note', keys: [keyA] },
+  });
+  assert.equal(del.statusCode, 200);
+  assert.equal(del.json().deletedKeys, 1);
+
+  const rows = (await query('SELECT device_id FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2 ORDER BY device_id', ['workspace-1', 'delete-keys-note'])).rows;
+  assert.deepEqual(rows.map((r) => r.device_id), ['device-b']);
+
+  const wrongNote = await app.inject({
+    method: 'DELETE',
+    url: '/yjs/updates',
+    headers: { authorization: `Bearer ${session}`, 'content-type': 'application/json', 'x-device-id': 'device-b' },
+    payload: { workspaceId: 'workspace-1', noteId: 'other-note', keys: [keyA] },
+  });
+  assert.equal(wrongNote.statusCode, 400);
+  assert.equal(wrongNote.json().error, 'malformed_delete_key');
+});

@@ -227,25 +227,21 @@ test('relay e2e: ticket connect, y-sync handshake, journal persisted, second cli
   await ws2Promise;
   assert.equal(ws2GotUpdate, true);
 
-  // journal persisted (relay debounces 1s)
+  // The relay is ephemeral (src/db/yjs-persistence.js): it broadcasts edits but
+  // never persists plaintext Yjs into the journal. Durable history is written
+  // by clients through the encrypted REST push-batch path, so after the relay's
+  // debounce there must still be no relay-originated journal row.
   await new Promise(r => setTimeout(r, 1600));
-  const { rows } = await query(`SELECT device_id, update_data FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2 AND device_id='relay' ORDER BY ts DESC LIMIT 5`, ['ws-e2e', 'note-1']);
-  assert.ok(rows.length >= 1, 'journal should have relay row');
+  const { rows } = await query(`SELECT device_id FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2 AND device_id='relay'`, ['ws-e2e', 'note-1']);
+  assert.equal(rows.length, 0, 'relay must not persist plaintext rows');
 
-  // verify update is valid Yjs by applying
-  const fresh = new Y.Doc();
-  // after relay persisted, yjs_persistence writes incremental diff; applying should give hello e2e (or superset)
-  // we apply all relay rows
-  for (const r of rows) Y.applyUpdate(fresh, r.update_data);
-  // ws1 also had pre text but ws2 update may not contain pre; just check we have hello e2e state survived
-  // At minimum applying retrieved row should not throw and fresh doc text contains something
-  // Directly verify that the persisted bytes decode to a state containing hello e2e: apply and check
+  // The broadcast update is itself valid Yjs containing the edit.
   const check = new Y.Doc();
   Y.applyUpdate(check, update);
   assert.equal(check.getText('ct').toString(), 'hello e2e');
 
   ws1.close(); ws2.close();
-  doc1.destroy(); docUpdate.destroy(); fresh.destroy(); check.destroy();
+  doc1.destroy(); docUpdate.destroy(); check.destroy();
 });
 
 // REST push triggers PG NOTIFY -> second client JSON notification
@@ -288,7 +284,8 @@ test('negative: expired ticket rejected', async () => {
   assert.equal(tr.statusCode, 200);
   const ticket = tr.json().ticket;
   const { hashSessionId } = require('../src/lib/crypto');
-  const h = hashSessionId(ticket);
+  // Tickets are namespaced before hashing since 3210225 (src/routes/auth.js).
+  const h = hashSessionId(`ws-ticket:${ticket}`);
   await query(`UPDATE ws_tickets SET expires_at = NOW() - INTERVAL '1 hour' WHERE id_hash=$1`, [h]);
   const code = await expectWsUpgradeFail(wsUrl('workspace:ws-e2e:note:note-1', ticket, true));
   // ws library may return HTTP status or ws close code 1006; accept either 401/403 or 1006

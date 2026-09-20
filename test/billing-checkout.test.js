@@ -78,7 +78,7 @@ test('POST /billing/checkout-session requires auth', async (t) => {
   assert.equal(res.statusCode, 401);
 });
 
-test('POST /billing/checkout-session rejects unverified email', async (t) => {
+test('POST /billing/checkout-session proceeds for unverified email with advisory warning', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
   const account = await register('free', { emailVerified: false });
@@ -87,8 +87,10 @@ test('POST /billing/checkout-session rejects unverified email', async (t) => {
     headers: { authorization: `Bearer ${signToken(account.id)}`, 'content-type': 'application/json' },
     payload: { plan: 'starter', interval: 'monthly' },
   });
-  assert.equal(res.statusCode, 403);
-  assert.equal(res.json().error, 'EMAIL_NOT_VERIFIED');
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(res.json().emailVerified, false);
+  assert.equal(res.json().warning, 'EMAIL_NOT_VERIFIED');
+  assert.ok(res.json().url);
 });
 
 test('POST /billing/checkout-session creates Checkout Session with correct args', async (t) => {

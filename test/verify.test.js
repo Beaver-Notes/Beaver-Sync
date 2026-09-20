@@ -171,9 +171,10 @@ test('POST /account/verify-email/confirm requires token', async () => {
   assert.equal(res.statusCode, 400);
 });
 
-test('enforcement 403 EMAIL_NOT_VERIFIED on workspace invite creation', async () => {
+test('advisory: unverified owner can invite a workspace member, response shows warning', async () => {
   const ownerUnverified = await registerUnverified(`ws-invite-unv-${crypto.randomUUID()}@test.example`);
-  const target = await register('pro');
+  const targetEmail = `ws-target-${crypto.randomUUID()}@test.example`;
+  await register('pro', { email: targetEmail });
   // need org + workspace membership for owner
   const models = require('../src/models');
   const { seedOrg } = require('./helpers/factory');
@@ -182,59 +183,74 @@ test('enforcement 403 EMAIL_NOT_VERIFIED on workspace invite creation', async ()
   const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: ownerUnverified.id, orgId, createdAt: new Date() });
   await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: ownerUnverified.id, role: 'owner', createdAt: new Date() });
 
-  // try to invite while unverified -> 403
+  // Unverified owner: the invite now succeeds and advertises the unverified
+  // state instead of a hard 403.
   const invite = await app.inject({
     method: 'POST',
     url: `/workspaces/${ws.id}/members`,
     headers: authHeader(ownerUnverified.token),
-    payload: { email: `any-${crypto.randomUUID()}@test.example`, role: 'editor' },
+    payload: { email: targetEmail, role: 'editor' },
   });
-  assert.equal(invite.statusCode, 403, invite.body);
-  assert.equal(invite.json().error, 'EMAIL_NOT_VERIFIED');
+  assert.equal(invite.statusCode, 201, invite.body);
+  assert.equal(invite.json().emailVerified, false);
+  assert.equal(invite.json().warning, 'EMAIL_NOT_VERIFIED');
+  assert.ok(invite.json().token);
 
-  // verify owner then retry should not be EMAIL_NOT_VERIFIED (may be user_not_found etc but not that code)
-  await query('UPDATE accounts SET email_verified=true WHERE id=$1', [ownerUnverified.id]);
-  const invite2 = await app.inject({
+  // Unknown users are still a 404, never a verification block.
+  const missing = await app.inject({
     method: 'POST',
     url: `/workspaces/${ws.id}/members`,
     headers: authHeader(ownerUnverified.token),
     payload: { username: 'nouser-' + crypto.randomUUID().slice(0, 8), role: 'editor' },
   });
-  // should not be EMAIL_NOT_VERIFIED
-  assert.notEqual(invite2.json().error, 'EMAIL_NOT_VERIFIED');
+  assert.equal(missing.statusCode, 404, missing.body);
+  assert.notEqual(missing.json().error, 'EMAIL_NOT_VERIFIED');
 });
 
-test('enforcement 403 EMAIL_NOT_VERIFIED on collaboration invite and link creation', async () => {
-  const ownerUnv = await registerUnverified(`collab-unv-${crypto.randomUUID()}@test.example`);
+test('advisory: unverified owner can create a collaboration invite and link', async () => {
+  const owner = await register('pro', { emailVerified: false });
+  const ownerSession = await createSession(owner.id, { headers: {} });
+  const models = require('../src/models');
+  const { seedAccount } = require('./helpers/factory');
+  const wsId = `ws-collab-unv-${crypto.randomUUID()}`;
   const noteId = `note-verify-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}-${crypto.randomUUID().slice(0, 8)}`;
-  // bootstrap: owner will create note collaboration context via POST /collaboration/invite/:noteId but that itself is gated
+  const now = new Date().toISOString();
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', [wsId, 'e', owner.id, now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', [wsId, owner.id, 'owner', now]);
+  await query(
+    `INSERT INTO sync_document_state (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, updated_at)
+     VALUES ($1, $2, 0, '', 0, 0, $3)`,
+    [wsId, noteId, now]
+  );
+
+  // The invite target needs a valid KEM key or the invite 403s on
+  // keypair_required before any invite happens.
+  const { createMlKem768 } = require('mlkem');
+  const kem = await createMlKem768();
+  const [pk] = kem.generateKeyPair();
+  const targetId = `collab-target-${crypto.randomUUID()}`;
+  await seedAccount(targetId, Buffer.from(pk).toString('hex'));
+
   const invite = await app.inject({
     method: 'POST',
     url: `/collaboration/invite/${noteId}`,
-    headers: authHeader(ownerUnv.token),
-    payload: { email: `target-${crypto.randomUUID()}@test.example` },
+    headers: authHeader(ownerSession),
+    payload: { username: targetId },
   });
-  assert.equal(invite.statusCode, 403, invite.body);
-  assert.equal(invite.json().error, 'EMAIL_NOT_VERIFIED');
+  assert.equal(invite.statusCode, 201, invite.body);
+  assert.equal(invite.json().emailVerified, false);
+  assert.equal(invite.json().warning, 'EMAIL_NOT_VERIFIED');
 
   const link = await app.inject({
     method: 'POST',
     url: `/collaboration/links/${noteId}`,
-    headers: authHeader(ownerUnv.token),
+    headers: authHeader(ownerSession),
     payload: { role: 'viewer' },
   });
-  assert.equal(link.statusCode, 403);
-  assert.equal(link.json().error, 'EMAIL_NOT_VERIFIED');
-
-  // after verify, gate lifted (may still fail for other reasons but not EMAIL_NOT_VERIFIED)
-  await query('UPDATE accounts SET email_verified=true WHERE id=$1', [ownerUnv.id]);
-  const invite2 = await app.inject({
-    method: 'POST',
-    url: `/collaboration/invite/${noteId}`,
-    headers: authHeader(ownerUnv.token),
-    payload: { email: `target2-${crypto.randomUUID()}@test.example` },
-  });
-  assert.notEqual(invite2.json().error, 'EMAIL_NOT_VERIFIED');
+  assert.equal(link.statusCode, 201, link.body);
+  assert.equal(link.json().emailVerified, false);
+  assert.equal(link.json().warning, 'EMAIL_NOT_VERIFIED');
+  assert.ok(link.json().token);
 });
 
 test('reset emails deliver regardless: password reset request not gated (always 200 decoy)', async () => {

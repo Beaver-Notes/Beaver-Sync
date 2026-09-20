@@ -43,6 +43,16 @@ test.before(async () => {
   await seedAccount('nokey', null);
   await seedWorkspace('ws-1', 'alice', { nameEncrypted: 'cipher' });
 
+  // Bootstrap now requires provable note ownership: both notes live in the
+  // owner's workspace, so alice may claim them.
+  for (const noteId of ['note-e2e-keys-note-01', 'note-fresh-key-store']) {
+    await query(
+      `INSERT INTO sync_document_state (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, updated_at)
+       VALUES ('ws-1', $1, 0, '', 0, 0, $2) ON CONFLICT DO NOTHING`,
+      [noteId, now]
+    );
+  }
+
   app = await buildApp();
   await app.ready();
   aliceSession = await createSession('alice', {});

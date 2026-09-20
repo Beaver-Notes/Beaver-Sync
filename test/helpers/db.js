@@ -33,8 +33,11 @@ async function setupTestDb() {
   process.env.DATABASE_URL = resolveTestDatabaseUrl();
 
   process.env.NODE_ENV = process.env.NODE_ENV || 'test';
-  // Dev .env PLAN_OVERRIDE must never leak into the suite's plan gates.
+  // Dev .env values must never leak into the suite: PLAN_OVERRIDE would bypass
+  // plan gates, and INTERNAL_API_SECRET would gate the relay auth endpoints
+  // (verify-session/verify-ticket) behind a header the in-process tests don't send.
   delete process.env.PLAN_OVERRIDE;
+  delete process.env.INTERNAL_API_SECRET;
   process.env.SESSION_HMAC_KEY = process.env.SESSION_HMAC_KEY || 'test-session-hmac-key-at-least-32-characters-long';
   process.env.EMAIL_HMAC_KEY = process.env.EMAIL_HMAC_KEY || 'test-email-hmac-key-at-least-32-characters-long';
   process.env.COOKIE_SECRET = process.env.COOKIE_SECRET || 'test-cookie-secret-at-least-32-chars-long';
@@ -62,15 +65,15 @@ async function setupTestDb() {
 // FK-safe delete order: children before parents (workspaces before orgs/accounts).
 const TABLES = [
   'yjs_doc_updates', 'sync_document_state', 'sync_workspace_state',
-  'note_comments', 'note_invite_links', 'note_invitations', 'note_keys',
-  'vault_key_params', 'vault_proof_challenges',
-  'workspace_members', 'workspace_invites', 'workspace_keys',
+  'note_comments', 'note_activity', 'note_join_requests', 'note_invite_links', 'note_invitations', 'note_keys',
+  'vault_key_params', 'vault_proof_challenges', 'account_vault_key_params',
+  'workspace_join_requests', 'workspace_members', 'workspace_invites', 'workspace_keys',
   'compaction_locks', 'subscriptions', 'commits', 'sessions', 'ws_tickets', 'mfa_challenges',
   'devices', 'credentials', 'webauthn_challenges', 'quick_connect_codes',
   'email_aliases', 'audit_logs', 'sso_oidc_states', 'sso_configs',
   'asset_reservations',
   'workspaces',
-  'org_keys', 'org_subscriptions', 'org_invites', 'org_members',
+  'org_keys', 'org_subscriptions', 'org_join_requests', 'org_invites', 'org_members',
   'organizations',
   'accounts',
 ];

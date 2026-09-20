@@ -19,6 +19,8 @@ const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
 const { close, query } = require('../src/db');
 const models = require('../src/models');
+const r2 = require('../src/services/r2');
+const mlkem = require('../src/lib/mlkem');
 const { hashSessionId } = require('../src/lib/crypto');
 
 const users = {
@@ -106,6 +108,7 @@ test('a workspace member can read sync state', async (t) => {
     workspaceId: 'sync-workspace',
     status: 'empty',
     generation: 0,
+    initializationExpired: false,
     documents: [],
     vault: null,
   });
@@ -156,6 +159,24 @@ test('an expired claim can be reclaimed', async (t) => {
   await query('UPDATE sync_workspace_state SET initialization_expires_at = $1 WHERE workspace_id = $2', [new Date(Date.now() - 1_000).toISOString(), 'sync-workspace']);
   const response = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
   assert.equal(response.statusCode, 200);
+});
+
+test('state flags an expired in-flight initialization so clients can reclaim it', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+
+  const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
+  assert.equal(claim.statusCode, 200);
+
+  const fresh = await request(app, 'GET', '/sync/state?workspaceId=sync-workspace', users.member);
+  assert.equal(fresh.json().status, 'initializing');
+  assert.equal(fresh.json().initializationExpired, false);
+
+  await query('UPDATE sync_workspace_state SET initialization_expires_at = $1 WHERE workspace_id = $2', [new Date(Date.now() - 1_000).toISOString(), 'sync-workspace']);
+
+  const expired = await request(app, 'GET', '/sync/state?workspaceId=sync-workspace', users.member);
+  assert.equal(expired.json().status, 'initializing');
+  assert.equal(expired.json().initializationExpired, true);
 });
 
 test('completion rejects documents from a different snapshot generation', async (t) => {
@@ -346,6 +367,86 @@ test('completion rejects the wrong token and atomically initializes an empty map
   assert.equal(state.json().status, 'initialized');
   assert.equal(state.json().generation, 1);
   assert.deepEqual(state.json().documents, []);
+});
+
+test('reset requires explicit confirmation and audits the destroyed generation', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+
+  await query(`
+    INSERT INTO sync_document_state
+      (workspace_id, note_id, snapshot_generation, snapshot_key, checkpoint_ts, checkpoint_sequence, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7)
+  `, ['sync-workspace', 'doomed-note', 7, 'snapshot-key', 0, 0, new Date().toISOString()]);
+  await query('UPDATE sync_workspace_state SET status = $1, generation = $2, updated_at = $3 WHERE workspace_id = $4',
+    ['initialized', 7, new Date().toISOString(), 'sync-workspace']);
+
+  // No confirmation flag: refused, nothing destroyed.
+  const noConfirm = await request(app, 'POST', '/sync/initialize/reset', users.owner, { workspaceId: 'sync-workspace' });
+  assert.equal(noConfirm.statusCode, 400, noConfirm.body);
+  assert.equal((await query('SELECT generation FROM sync_workspace_state WHERE workspace_id = $1', ['sync-workspace'])).rows[0].generation, 7);
+
+  // Confirmation flag but the wrong typed id: refused.
+  const wrongId = await request(app, 'POST', '/sync/initialize/reset', users.owner, {
+    workspaceId: 'sync-workspace', confirm: true, confirmWorkspaceId: 'not-this-workspace',
+  });
+  assert.equal(wrongId.statusCode, 400, wrongId.body);
+  assert.equal((await query('SELECT COUNT(*)::int AS c FROM sync_document_state WHERE workspace_id = $1', ['sync-workspace'])).rows[0].c, 1);
+
+  // Explicit confirmation with the typed workspace id: destroyed.
+  const ok = await request(app, 'POST', '/sync/initialize/reset', users.owner, {
+    workspaceId: 'sync-workspace', confirm: true, confirmWorkspaceId: 'sync-workspace',
+  });
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.equal((await query('SELECT COUNT(*)::int AS c FROM sync_document_state WHERE workspace_id = $1', ['sync-workspace'])).rows[0].c, 0);
+  assert.equal((await query('SELECT generation FROM sync_workspace_state WHERE workspace_id = $1', ['sync-workspace'])).rows[0].generation, 0);
+
+  // The destroyed generation is audited.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const auditRows = (await query(
+    "SELECT action FROM audit_logs WHERE workspace_id = $1 AND action = 'sync_state_reset'",
+    ['sync-workspace']
+  )).rows;
+  assert.equal(auditRows.length, 1, 'reset must write an audit record');
+});
+
+test('the initialization-path pre-claim purge is audited like the push path', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+
+  // The snapshot existence check is not what this test exercises: satisfy it so
+  // completion reaches the pre-claim reconciliation.
+  const originalStat = r2.stat;
+  r2.stat = async () => ({ sizeBytes: 1 });
+  t.after(() => { r2.stat = originalStat; });
+
+  const noteId = 'note-preclaim-init';
+  // A non-member squatted an editor invitation while the note was unpushed.
+  await query(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1,$2,$3,$4,$5)',
+    [noteId, users.outsider, users.outsider, 'editor', new Date().toISOString()]
+  );
+
+  const claim = await request(app, 'POST', '/sync/initialize/claim', users.owner, { workspaceId: 'sync-workspace' });
+  const response = await request(app, 'POST', '/sync/initialize/complete', users.owner, {
+    workspaceId: 'sync-workspace',
+    token: claim.json().token,
+    generation: 1,
+    documents: [{ noteId, snapshotGeneration: 1, snapshotKey: `yjs/sync-workspace/${noteId}/1.yjs` }],
+  });
+  assert.equal(response.statusCode, 200, response.body);
+
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const rows = (await query(
+    "SELECT workspace_id, metadata_encrypted FROM audit_logs WHERE action = 'note_preclaim_purged'"
+  )).rows;
+  assert.equal(rows.length, 1, 'the initialization purge must write an audit record');
+  assert.equal(rows[0].workspace_id, 'sync-workspace');
+  const meta = JSON.parse(await mlkem.decryptMetadata(rows[0].metadata_encrypted));
+  assert.equal(meta.workspaceId, 'sync-workspace');
+  assert.ok(Array.isArray(meta.purged) && meta.purged.length === 1, 'the purged counts are recorded');
+  assert.equal(meta.purged[0].noteId, noteId);
+  assert.equal(meta.purged[0].invitations, 1);
 });
 
 test('snapshot-urls returns presigned URLs for batch upload', async (t) => {

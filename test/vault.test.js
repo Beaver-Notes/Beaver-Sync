@@ -26,6 +26,12 @@ test.before(async () => {
   await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['vault-workspace', 'vault-account', 'owner', now]);
   await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', ['vault-workspace-two', 'name', 'vault-account', now]);
   await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['vault-workspace-two', 'vault-account', 'owner', now]);
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', ['vault-workspace-three', 'name', 'vault-account', now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['vault-workspace-three', 'vault-account', 'owner', now]);
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', ['vault-workspace-four', 'name', 'vault-account', now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['vault-workspace-four', 'vault-account', 'owner', now]);
+  await query('INSERT INTO workspaces (id, name_encrypted, owner_id, created_at) VALUES ($1, $2, $3, $4)', ['vault-workspace-five', 'name', 'vault-account', now]);
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['vault-workspace-five', 'vault-account', 'owner', now]);
 });
 
 test.after(async () => {
@@ -85,16 +91,16 @@ test('rejects a proof issued for another workspace', async (t) => {
   t.after(async () => { await app.close(); });
   const session = await createSession('vault-account', { headers: {} });
   const headers = { authorization: `Bearer ${session}`, 'content-type': 'application/json' };
-  const challenge = await app.inject({ method: 'POST', url: '/vault/vault-workspace/challenge', headers, payload: {} });
+  const challenge = await app.inject({ method: 'POST', url: '/vault/vault-workspace-three/challenge', headers, payload: {} });
   const publish = await app.inject({
-    method: 'PUT', url: '/vault/vault-workspace/key-params', headers,
-    payload: { keyParams: 'blob-a', passphraseProof: 'proof-a', challenge: challenge.json().challenge },
+    method: 'PUT', url: '/vault/vault-workspace-three/key-params', headers,
+    payload: { keyParams: 'blob-three', passphraseProof: 'proof-three', challenge: challenge.json().challenge },
   });
   assert.equal(publish.statusCode, 200);
   const otherChallenge = await app.inject({ method: 'POST', url: '/vault/vault-workspace-two/challenge', headers, payload: {} });
   const verify = await app.inject({
-    method: 'POST', url: '/vault/vault-workspace/verify', headers,
-    payload: { passphraseProof: 'proof-a', challenge: otherChallenge.json().challenge },
+    method: 'POST', url: '/vault/vault-workspace-three/verify', headers,
+    payload: { passphraseProof: 'proof-three', challenge: otherChallenge.json().challenge },
   });
   assert.equal(verify.statusCode, 401);
 });
@@ -104,11 +110,11 @@ test('consumes a challenge exactly once', async (t) => {
   t.after(async () => { await app.close(); });
   const session = await createSession('vault-account', { headers: {} });
   const headers = { authorization: `Bearer ${session}`, 'content-type': 'application/json' };
-  const challenge = await app.inject({ method: 'POST', url: '/vault/vault-workspace/challenge', headers, payload: {} });
+  const challenge = await app.inject({ method: 'POST', url: '/vault/vault-workspace-four/challenge', headers, payload: {} });
   const payload = { keyParams: 'blob-replay', passphraseProof: 'proof-replay', challenge: challenge.json().challenge };
-  const first = await app.inject({ method: 'PUT', url: '/vault/vault-workspace/key-params', headers, payload });
+  const first = await app.inject({ method: 'PUT', url: '/vault/vault-workspace-four/key-params', headers, payload });
   assert.equal(first.statusCode, 200);
-  const replay = await app.inject({ method: 'PUT', url: '/vault/vault-workspace/key-params', headers, payload });
+  const replay = await app.inject({ method: 'PUT', url: '/vault/vault-workspace-four/key-params', headers, payload });
   assert.equal(replay.statusCode, 401);
 });
 
@@ -157,4 +163,28 @@ test('gates legacy rows until the owner republishes', async (t) => {
   });
   assert.equal(verify.statusCode, 409);
   assert.equal(verify.json().error, 'vault_republish_required');
+});
+
+test('concurrent vault publish returns 409 for the loser, never a 500', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const session = await createSession('vault-account', { headers: {} });
+  const headers = { authorization: `Bearer ${session}`, 'content-type': 'application/json' };
+  const c1 = await app.inject({ method: 'POST', url: '/vault/vault-workspace-five/challenge', headers, payload: {} });
+  const c2 = await app.inject({ method: 'POST', url: '/vault/vault-workspace-five/challenge', headers, payload: {} });
+
+  const [r1, r2] = await Promise.all([
+    app.inject({
+      method: 'PUT', url: '/vault/vault-workspace-five/key-params', headers,
+      payload: { keyParams: 'blob-race-a', passphraseProof: 'proof-race-a', challenge: c1.json().challenge },
+    }),
+    app.inject({
+      method: 'PUT', url: '/vault/vault-workspace-five/key-params', headers,
+      payload: { keyParams: 'blob-race-b', passphraseProof: 'proof-race-b', challenge: c2.json().challenge },
+    }),
+  ]);
+
+  assert.deepEqual([r1.statusCode, r2.statusCode].sort(), [200, 409]);
+  const loser = r1.statusCode === 409 ? r1 : r2;
+  assert.equal(loser.json().error, 'vault_already_exists');
 });
