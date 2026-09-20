@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Account, Workspace, WorkspaceMember, WorkspaceInvite, Session, OrgMember, Subscription } = require('../models');
+const { Account, Workspace, WorkspaceMember, WorkspaceInvite, OrgMember, Subscription } = require('../models');
 const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { audit } = require('../lib/audit');
 const { sendWorkspaceInviteEmail } = require('../email');
@@ -9,6 +9,10 @@ const { isFreePlan, resolvePlanForAccount } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
 const { resolveOrgSubscription } = require('../lib/plan-resolution');
 const { hashSessionId } = require('../lib/crypto');
+const { findAccountByUsername } = require('../repositories/account');
+const { addRecipientsIfAbsent, listEnvelopes, orderEnvelopes, selectScalarEnvelope } = require('../repositories/workspaceKeys');
+const { emailVerificationFields } = require('../lib/email-verification');
+const { query } = require('../db/postgres');
 
 const EMOJI_ALLOWLIST = Object.freeze([
   '📁', '📂', '🗂️', '📋', '📝', '📄', '📃', '📑', '📦', '🎒',
@@ -114,6 +118,9 @@ async function workspaceRoutes(app) {
       if (!r || typeof r.userId !== 'string' || typeof r.wrappedKey !== 'string' || !r.wrappedKey) {
         return reply.status(400).send({ error: 'validation_error', message: 'Each recipient needs userId and wrappedKey.' });
       }
+      if (r.deviceId !== undefined && (typeof r.deviceId !== 'string' || !r.deviceId)) {
+        return reply.status(400).send({ error: 'validation_error', message: 'deviceId must be a non-empty string when provided.' });
+      }
     }
 
     // Validate emoji if provided; optional, defaults to first allowlist glyph
@@ -165,14 +172,9 @@ async function workspaceRoutes(app) {
     const workspace = await Workspace.create({ nameEncrypted, ownerId: req.userId, orgId, vaultWrappedKeys: normalizedVaultWrappedKeys, emoji: validatedEmoji, color: validatedColor, createdAt: new Date() });
     await WorkspaceMember.create({ workspaceId: workspace.id, accountId: req.userId, role: 'owner', createdAt: new Date() });
 
-    const { WorkspaceKey } = require('../models');
-    for (const r of recipients) {
-      await WorkspaceKey.findOneAndUpdate(
-        { workspaceId: workspace.id, userId: r.userId },
-        { $set: { wrappedKey: r.wrappedKey } },
-        { upsert: true }
-      );
-    }
+    // Store the owner's (and any supplied) per-device envelopes. Add-only like
+    // the late-join path so a workspace key is never rotated.
+    await addRecipientsIfAbsent(workspace.id, recipients);
 
     // Initialize sync state for the new workspace so /sync/state doesn't 404
     await createEmptyState(workspace.id);
@@ -200,17 +202,23 @@ async function workspaceRoutes(app) {
 
     const { WorkspaceKey } = require('../models');
     const envelopeRows = await WorkspaceKey.find({ userId: req.userId }).lean();
-    const envelopeMap = {};
-    for (const e of envelopeRows) envelopeMap[e.workspaceId] = e.wrappedKey;
+    const envelopesByWs = new Map();
+    for (const e of envelopeRows) {
+      const list = envelopesByWs.get(e.workspaceId) || [];
+      list.push({ deviceId: e.deviceId ?? null, wrappedKey: e.wrappedKey });
+      envelopesByWs.set(e.workspaceId, list);
+    }
 
     const workspaces = [];
     for (const ws of wsDocs) {
       if (!ws) continue;
-      const wrappedKey = envelopeMap[ws.id] || null;
+      const envelopes = orderEnvelopes(envelopesByWs.get(ws.id) || [], req.sessionDeviceId);
+      const wrappedKey = selectScalarEnvelope(envelopes, req.sessionDeviceId);
       workspaces.push({
         id: ws.id,
         nameEncrypted: ws.nameEncrypted,
         wrappedKey,
+        wrappedKeys: envelopes,
         orgId: ws.orgId,
         emoji: ws.emoji,
         color: ws.color,
@@ -310,11 +318,10 @@ async function workspaceRoutes(app) {
   }, async (req, reply) => {
     const workspaceId = req.params.id;
 
-    // 02.3: soft gate — unverified accounts can use app but not invite
+    // 02.3: verification is advisory (never enforced by any pipeline); report
+    // the state in the success response instead of blocking the invite.
     const inviterAcct = await Account.findById(req.userId, { emailVerified: 1 }).lean();
-    if (!inviterAcct?.emailVerified) {
-      return reply.status(403).send({ error: 'EMAIL_NOT_VERIFIED', message: 'Please verify your email before inviting members.' });
-    }
+    const verification = emailVerificationFields(Boolean(inviterAcct?.emailVerified));
 
     try {
       await requireMember(app, req.userId, workspaceId, new Set(['owner', 'editor']));
@@ -338,7 +345,11 @@ async function workspaceRoutes(app) {
     let target = null;
     if (username) {
       const normalized = username.trim().toLowerCase();
-      target = await Account.findOne({ username: normalized }).lean();
+      const resolved = await findAccountByUsername(normalized);
+      if (resolved.ambiguous) {
+        return reply.status(409).send({ error: 'ambiguous_username', message: 'Multiple accounts use that username. Invite by email instead.' });
+      }
+      target = resolved.account;
     } else if (email) {
       const { createEmailHash } = require('../lib/crypto');
       const emailHash = createEmailHash(email.trim().toLowerCase());
@@ -403,6 +414,7 @@ async function workspaceRoutes(app) {
       expiresAt,
       role: inviteRole,
       requireApproval: !!requireApproval,
+      ...verification,
     });
   });
 
@@ -429,16 +441,13 @@ async function workspaceRoutes(app) {
     }
 
     const { WorkspaceKey } = require('../models');
-    await WorkspaceKey.deleteOne({ workspaceId, userId: targetUserId });
+    await WorkspaceKey.deleteMany({ workspaceId, userId: targetUserId });
 
-    try {
-      await Session.updateMany(
-        { accountId: targetUserId, workspaceId },
-        { revoked: true }
-      );
-    } catch (err) {
-      app.log.warn({ err: err.message, targetUserId, workspaceId }, 'Failed to revoke sessions on member removal');
-    }
+    // Removing a member from ONE workspace drops the membership only. Sessions
+    // are account-scoped (login does not know a workspace), so revoking here
+    // would log the member out of every other workspace too. Access is still
+    // denied because every workspace route re-checks membership per request.
+    // Account-wide revocation happens only on organization removal.
 
     app.log.info({ workspaceId, removedUser: targetUserId, byUser: req.userId }, 'Member removed from workspace');
     audit(req, 'member_removed', { workspaceId, targetUserId });
@@ -491,6 +500,24 @@ async function workspaceRoutes(app) {
       }
     }
 
+    // requireApproval invites are request-access links; the owner must approve
+    // explicitly. Record a durable per-account request (mirrors org join
+    // requests) so one approval grants only this account; the row's existence
+    // is the pending state.
+    if (invite.requireApproval) {
+      await query(
+        `INSERT INTO workspace_join_requests (id, workspace_id, invite_id, account_id, created_at)
+         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (invite_id, account_id) DO NOTHING`,
+        [crypto.randomUUID(), invite.workspaceId, tokenHash, req.userId, new Date().toISOString()]
+      );
+      return reply.status(202).send({
+        pending: true,
+        message: 'This invite link requires the workspace owner to approve you.',
+        workspaceId: invite.workspaceId,
+        role: invite.role,
+      });
+    }
+
     if (invite.maxUses > 0) {
       const upd = await WorkspaceInvite.updateOne({ tokenHash, usedCount: { $lt: invite.maxUses } }, { $inc: { usedCount: 1 } });
       if (upd.modifiedCount === 0) return reply.status(410).send({ error: 'invite_max_uses', message: 'This invite has reached its maximum number of uses.' });
@@ -500,6 +527,9 @@ async function workspaceRoutes(app) {
     try {
       await WorkspaceMember.create({ workspaceId: invite.workspaceId, accountId: req.userId, role: invite.role, createdAt: new Date() });
     } catch (e) {
+      // The membership insert failed: return the consumed use so a transient
+      // failure does not burn a limited invite.
+      await WorkspaceInvite.updateOne({ tokenHash }, { $inc: { usedCount: -1 } }).catch(() => {});
       if (String(e.message).toLowerCase().includes('unique') || String(e.message).includes('duplicate')) return reply.status(409).send({ error: 'already_member', message: 'You are already a member of this workspace.' });
       throw e;
     }
@@ -507,6 +537,165 @@ async function workspaceRoutes(app) {
     app.log.info({ workspaceId: invite.workspaceId, userId: req.userId, role: invite.role }, 'User joined workspace via invite');
 
     return reply.send({ workspaceId: invite.workspaceId, role: invite.role });
+  });
+
+  // Pending workspace join requests the caller (owner/admin) can act on, across
+  // every workspace they administer. Feeds the team approval queue.
+  app.get('/join-requests', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const { rows } = await query(
+      `SELECT r.id, r.workspace_id, r.account_id, r.created_at, i.role, a.username
+         FROM workspace_join_requests r
+         JOIN workspace_invites i ON i.token_hash = r.invite_id
+         LEFT JOIN accounts a ON a.id = r.account_id
+         JOIN workspace_members m
+           ON m.workspace_id = r.workspace_id AND m.account_id = $1 AND m.role IN ('owner', 'admin')
+        ORDER BY r.created_at ASC`,
+      [req.userId]
+    );
+    return reply.send({
+      requests: rows.map((r) => ({
+        id: r.id,
+        workspaceId: r.workspace_id,
+        accountId: r.account_id,
+        username: r.username || null,
+        role: r.role,
+        createdAt: r.created_at,
+      })),
+    });
+  });
+
+  // The caller's own outstanding workspace join requests, so the workspace
+  // switcher can show "Awaiting owner approval" instead of silently reloading.
+  app.get('/my-pending-requests', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const { rows } = await query(
+      `SELECT r.id, r.workspace_id, r.created_at, i.role
+         FROM workspace_join_requests r
+         JOIN workspace_invites i ON i.token_hash = r.invite_id
+        WHERE r.account_id = $1
+        ORDER BY r.created_at ASC`,
+      [req.userId]
+    );
+    return reply.send({
+      requests: rows.map((r) => ({
+        id: r.id,
+        workspaceId: r.workspace_id,
+        role: r.role,
+        createdAt: r.created_at,
+      })),
+    });
+  });
+
+  // Pending join requests for one workspace. Owner/admin only: requesters are
+  // never revealed to editors, viewers, or outsiders.
+  app.get('/:id/join-requests', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const workspaceId = req.params.id;
+    try {
+      await requireMember(app, req.userId, workspaceId, new Set(['owner', 'admin']));
+    } catch (err) {
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+    }
+    const { rows } = await query(
+      `SELECT r.id, r.workspace_id, r.account_id, r.created_at, i.role, a.username
+         FROM workspace_join_requests r
+         JOIN workspace_invites i ON i.token_hash = r.invite_id
+         LEFT JOIN accounts a ON a.id = r.account_id
+        WHERE r.workspace_id = $1
+        ORDER BY r.created_at ASC`,
+      [workspaceId]
+    );
+    return reply.send({
+      workspaceId,
+      requests: rows.map((r) => ({
+        id: r.id,
+        workspaceId: r.workspace_id,
+        accountId: r.account_id,
+        username: r.username || null,
+        role: r.role,
+        createdAt: r.created_at,
+      })),
+    });
+  });
+
+  // Approve a pending workspace join request: grants the invite's role and
+  // consumes the pending row. A second approve finds no row, so no double-grant.
+  app.post('/join-requests/:requestId/approve', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const { rows } = await query(
+      'SELECT id, workspace_id, invite_id, account_id FROM workspace_join_requests WHERE id = $1',
+      [req.params.requestId]
+    );
+    const request = rows[0];
+    if (!request) {
+      return reply.status(404).send({ error: 'not_found', message: 'Join request not found or already handled.' });
+    }
+    try {
+      await requireMember(app, req.userId, request.workspace_id, new Set(['owner', 'admin']));
+    } catch (err) {
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+    }
+
+    const { rows: inviteRows } = await query('SELECT role FROM workspace_invites WHERE token_hash = $1', [request.invite_id]);
+    const role = inviteRows[0]?.role;
+    if (!role) {
+      await query('DELETE FROM workspace_join_requests WHERE id = $1', [request.id]);
+      return reply.status(404).send({ error: 'not_found', message: 'The invite no longer exists.' });
+    }
+
+    await query(
+      `INSERT INTO workspace_members (workspace_id, account_id, role, created_at)
+       VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+      [request.workspace_id, request.account_id, role, new Date().toISOString()]
+    );
+    // Consume every pending request from this account for this workspace.
+    await query(
+      'DELETE FROM workspace_join_requests WHERE workspace_id = $1 AND account_id = $2',
+      [request.workspace_id, request.account_id]
+    );
+
+    app.log.info(
+      { workspaceId: request.workspace_id, approvedUser: request.account_id, byUser: req.userId, role },
+      'Workspace join request approved'
+    );
+    audit(req, 'member_added', { workspaceId: request.workspace_id, targetUserId: request.account_id, role });
+    return reply.send({ approved: true, workspaceId: request.workspace_id, userId: request.account_id, role });
+  });
+
+  // Deny a pending workspace join request: drops it without granting access.
+  app.post('/join-requests/:requestId/deny', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const { rows } = await query(
+      'SELECT id, workspace_id, account_id FROM workspace_join_requests WHERE id = $1',
+      [req.params.requestId]
+    );
+    const request = rows[0];
+    if (!request) {
+      return reply.status(404).send({ error: 'not_found', message: 'Join request not found or already handled.' });
+    }
+    try {
+      await requireMember(app, req.userId, request.workspace_id, new Set(['owner', 'admin']));
+    } catch (err) {
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+    }
+
+    await query('DELETE FROM workspace_join_requests WHERE id = $1', [request.id]);
+    app.log.info(
+      { workspaceId: request.workspace_id, deniedUser: request.account_id, byUser: req.userId },
+      'Workspace join request denied'
+    );
+    return reply.send({ denied: true, workspaceId: request.workspace_id, userId: request.account_id });
   });
 
   app.get('/:id/member-lookup', {
@@ -525,7 +714,11 @@ async function workspaceRoutes(app) {
     let target = null;
     if (username && typeof username === 'string') {
       const normalized = username.trim().toLowerCase();
-      target = await Account.findOne({ username: normalized }).lean();
+      const resolved = await findAccountByUsername(normalized);
+      if (resolved.ambiguous) {
+        return reply.send({ found: false, ambiguous: true });
+      }
+      target = resolved.account;
     } else if (email && typeof email === 'string') {
       const { createEmailHash } = require('../lib/crypto');
       target = await Account.findOne({ emailHmac: createEmailHash(email.trim().toLowerCase()) }).lean();
@@ -587,12 +780,32 @@ async function workspaceRoutes(app) {
     }
 
     // Single-owner invariant: promoting someone else to owner transfers the
-    // role, so the current owner steps down to admin.
+    // role, so the current owner steps down to admin. Promote first — if the
+    // target row vanished concurrently we must leave the workspace owned, not
+    // demote ourselves into an ownerless state.
     if (role === 'owner' && targetUserId !== req.userId) {
-      await WorkspaceMember.updateOne(
-        { workspaceId, accountId: req.userId },
+      const promoted = await WorkspaceMember.updateOne(
+        { workspaceId, accountId: targetUserId },
+        { $set: { role: 'owner' } }
+      );
+      if (promoted.modifiedCount === 0) {
+        return reply.status(404).send({ error: 'not_found', message: 'Member not found in this workspace.' });
+      }
+      const demoted = await WorkspaceMember.updateOne(
+        { workspaceId, accountId: req.userId, role: 'owner' },
         { $set: { role: 'admin' } }
       );
+      if (demoted.modifiedCount === 0) {
+        // Roll the promotion back so we never leave two owners or zero owners.
+        await WorkspaceMember.updateOne(
+          { workspaceId, accountId: targetUserId, role: 'owner' },
+          { $set: { role: target.role } }
+        );
+        return reply.status(409).send({ error: 'ownership_transfer_conflict', message: 'Ownership transfer could not be completed. Try again.' });
+      }
+
+      app.log.info({ workspaceId, targetUserId, role, byUser: req.userId }, 'Workspace member role changed');
+      return reply.send({ updated: true });
     }
 
     const result = await WorkspaceMember.updateOne(
@@ -623,23 +836,87 @@ async function workspaceRoutes(app) {
 
     const { WorkspaceKey } = require('../models');
     const keys = await WorkspaceKey.find({ workspaceId, userId: { $in: memberIds } }).lean();
-    const keySet = new Set(keys.map((k) => k.userId));
+    // Per-(user, device) envelopes. Legacy NULL rows are account-level (usable
+    // by any device) so they are tracked separately from device-specific ones.
+    const deviceWrapped = new Set();
+    const legacyWrapped = new Set();
+    for (const k of keys) {
+      if (k.deviceId == null) legacyWrapped.add(k.userId);
+      else deviceWrapped.add(`${k.userId}:${k.deviceId}`);
+    }
 
-    const accounts = await Account.find({ _id: { $in: memberIds } }, { username: 1, displayName: 1, kemPublicKey: 1 }).lean();
+    const accounts = await Account.find({ _id: { $in: memberIds } }, { id: 1, username: 1, kemPublicKey: 1, deviceKeys: 1 }).lean();
     const accountMap = {};
     for (const a of accounts) accountMap[a._id] = a;
 
     return reply.send({
-      members: members.map((m) => ({
-        userId: m.accountId,
-        role: m.role,
-        hasWrappedKey: keySet.has(m.accountId),
-        hasKeyPair: !!accountMap[m.accountId]?.kemPublicKey,
-        kemPublicKey: accountMap[m.accountId]?.kemPublicKey || null,
-        username: accountMap[m.accountId]?.username ?? null,
-        displayName: accountMap[m.accountId]?.displayName ?? null,
-      })),
+      members: members.map((m) => {
+        const acct = accountMap[m.accountId];
+        const deviceIds = (acct?.deviceKeys && acct.deviceKeys.length)
+          ? acct.deviceKeys.map((d) => d.deviceId)
+          : ['default'];
+        return {
+          userId: m.accountId,
+          role: m.role,
+          // Convenience flag for older callers: an envelope usable in the
+          // requesting context (own device, or the account-level legacy one).
+          // The authoritative per-device detail is in `devices`.
+          hasWrappedKey: legacyWrapped.has(m.accountId)
+            || (req.sessionDeviceId != null && deviceWrapped.has(`${m.accountId}:${req.sessionDeviceId}`)),
+          devices: deviceIds.map((deviceId) => ({
+            deviceId,
+            hasEnvelope: deviceWrapped.has(`${m.accountId}:${deviceId}`),
+          })),
+          hasKeyPair: !!acct?.kemPublicKey,
+          kemPublicKey: acct?.kemPublicKey || null,
+          username: acct?.username ?? null,
+        };
+      }),
     });
+  });
+
+  app.get('/:id/public-keys', {
+    ...rateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const workspaceId = req.params.id;
+    try {
+      await requireMember(app, req.userId, workspaceId);
+    } catch (err) {
+      return reply.status(err.statusCode).send({ error: err.code, message: err.message });
+    }
+
+    const members = await WorkspaceMember.find({ workspaceId }).lean();
+    const memberIds = members.map((m) => m.accountId);
+    const accounts = memberIds.length > 0
+      ? await Account.find({ _id: { $in: memberIds } }, { id: 1, kemPublicKey: 1, deviceKeys: 1 }).lean()
+      : [];
+
+    // Which (user, device) pairs already hold an envelope, so a key-holding
+    // member re-wraps only the devices still missing one. Existence only; no
+    // key material is exposed. Legacy rows (device_id NULL) are account-level
+    // and never satisfy a specific device.
+    const rows = await listEnvelopes(workspaceId);
+    const wrapped = new Set(
+      rows.filter((r) => r.device_id != null).map((r) => `${r.user_id}:${r.device_id}`)
+    );
+
+    const collaborators = [];
+    for (const a of accounts.filter((x) => x.kemPublicKey)) {
+      const devices = (a.deviceKeys && a.deviceKeys.length)
+        ? a.deviceKeys
+        : [{ deviceId: 'default', publicKey: a.kemPublicKey }];
+      for (const d of devices) {
+        collaborators.push({
+          userId: a._id,
+          deviceId: d.deviceId,
+          kemPublicKey: d.publicKey,
+          hasEnvelope: wrapped.has(`${a._id}:${d.deviceId}`),
+        });
+      }
+    }
+
+    return reply.send({ workspaceId, collaborators });
   });
 
   app.post('/:id/keys', {
@@ -648,35 +925,67 @@ async function workspaceRoutes(app) {
   }, async (req, reply) => {
     const workspaceId = req.params.id;
     try {
-      await requireMember(app, req.userId, workspaceId, new Set(['owner', 'admin']));
+      // Any member who holds the workspace key (owner/admin/editor) can wrap it
+      // for a member or device still missing an envelope, so a late joiner no
+      // longer depends on the owner/admin being online.
+      await requireMember(app, req.userId, workspaceId, new Set(['owner', 'admin', 'editor']));
     } catch (err) {
       return reply.status(err.statusCode).send({ error: err.code, message: err.message });
     }
 
-    const { userId, wrappedKey } = req.body ?? {};
-    if (!userId || typeof userId !== 'string') {
-      return reply.status(400).send({ error: 'validation_error', message: 'userId is required.' });
+    // Only a member who actually HOLDS the workspace key may wrap it for a
+    // member/device still missing an envelope (mirrors the note-key gate in
+    // collaboration.js). Writes are add-only, so without this a keyless member
+    // could inject a garbage envelope and permanently wedge that device.
+    // The workspace's first provisioner (no envelopes yet) is still allowed.
+    const existingEnvelopes = await listEnvelopes(workspaceId);
+    if (existingEnvelopes.length > 0 && !existingEnvelopes.some((e) => e.user_id === req.userId)) {
+      return reply.status(403).send({
+        error: 'forbidden',
+        message: 'Only a member who holds the workspace key can provision envelopes.',
+      });
     }
-    if (!wrappedKey || typeof wrappedKey !== 'string') {
-      return reply.status(400).send({ error: 'validation_error', message: 'wrappedKey is required.' });
+
+    const body = req.body ?? {};
+    // Preferred shape is a per-device list; keep accepting the legacy single
+    // {userId, wrappedKey} so older clients still provision.
+    let recipients = Array.isArray(body.recipients) ? body.recipients : null;
+    if (!recipients && body.userId && body.wrappedKey) {
+      recipients = [{ userId: body.userId, deviceId: body.deviceId, wrappedKey: body.wrappedKey }];
+    }
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      return reply.status(400).send({ error: 'validation_error', message: 'recipients array is required.' });
+    }
+    if (recipients.length > 200) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Too many recipients.' });
+    }
+    for (const r of recipients) {
+      if (!r || typeof r.userId !== 'string' || typeof r.wrappedKey !== 'string' || !r.wrappedKey) {
+        return reply.status(400).send({ error: 'validation_error', message: 'Each recipient needs userId and wrappedKey.' });
+      }
+      if (r.deviceId !== undefined && (typeof r.deviceId !== 'string' || !r.deviceId)) {
+        return reply.status(400).send({ error: 'validation_error', message: 'deviceId must be a non-empty string when provided.' });
+      }
     }
 
-    const target = await WorkspaceMember.findOne({ workspaceId, accountId: userId }).lean();
-    if (!target) {
-      return reply.status(404).send({ error: 'not_found', message: 'Target is not a workspace member.' });
+    const targetIds = [...new Set(recipients.map((r) => r.userId))];
+    const targets = await WorkspaceMember.find({ workspaceId, accountId: { $in: targetIds } }).lean();
+    const targetSet = new Set(targets.map((m) => m.accountId));
+    for (const id of targetIds) {
+      if (!targetSet.has(id)) {
+        return reply.status(404).send({ error: 'not_found', message: 'Target is not a workspace member.' });
+      }
     }
 
-    const { WorkspaceKey } = require('../models');
-    await WorkspaceKey.findOneAndUpdate(
-      { workspaceId, userId },
-      { $set: { wrappedKey } },
-      { upsert: true }
-    );
+    // Add-only: never overwrite an existing envelope, so a device that already
+    // holds the key cannot rotate (split) it. Concurrent provisioners race and
+    // the first accepted envelope wins.
+    const stored = await addRecipientsIfAbsent(workspaceId, recipients);
 
-    app.log.info({ workspaceId, targetUserId: userId, byUser: req.userId }, 'Workspace key provisioned for member');
-    audit(req, 'workspace_key_provisioned', { workspaceId, targetUserId: userId });
+    app.log.info({ workspaceId, targetUserIds: targetIds, byUser: req.userId, stored }, 'Workspace keys provisioned');
+    audit(req, 'workspace_key_provisioned', { workspaceId, targetUserIds: targetIds });
 
-    return reply.status(201).send({ provisioned: true });
+    return reply.status(201).send({ provisioned: true, stored, existing: stored < recipients.length });
   });
 }
 

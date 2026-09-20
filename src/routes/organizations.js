@@ -1,10 +1,39 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember, OrgKey, OrgInvite } = require('../models');
+const { Organization, OrgMember, OrgSubscription, Workspace, WorkspaceMember, OrgKey, OrgInvite, Session } = require('../models');
 const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { requireOrgMember, requireOrgAdmin, requireOrgOwner } = require('../middleware/org');
+const { orderEnvelopes, selectScalarEnvelope } = require('../repositories/workspaceKeys');
 const { VALID_PLANS } = require('../lib/plans');
+const { transaction, query } = require('../db/postgres');
+
+// Off-boarding an account from an organization must revoke every org-scoped
+// grant in one shot. Workspace routes authorize on `WorkspaceMember`, so
+// dropping only the org rows left a "removed" member with full workspace
+// read/write (S1). Remove their membership and every per-device key envelope
+// from each workspace in the org, matching `DELETE /workspaces/:id/members/:uid`.
+//
+// Decision: this applies to every org-workspace membership regardless of how it
+// was granted (org invite or a direct workspace invite). The join path is not
+// recorded, and any surviving row is exactly the access leak this closes. A
+// workspace the member owned is left ownerless for the org owner to re-assign.
+// All deletes run in one transaction so a partial failure cannot leave access
+// granted after the endpoint reports success.
+async function revokeOrgAccess(orgId, accountId) {
+  await transaction(async (client) => {
+    await client.query(
+      'DELETE FROM workspace_members WHERE account_id = $1 AND workspace_id IN (SELECT id FROM workspaces WHERE org_id = $2)',
+      [accountId, orgId]
+    );
+    await client.query(
+      'DELETE FROM workspace_keys WHERE user_id = $1 AND workspace_id IN (SELECT id FROM workspaces WHERE org_id = $2)',
+      [accountId, orgId]
+    );
+    await client.query('DELETE FROM org_members WHERE org_id = $1 AND account_id = $2', [orgId, accountId]);
+    await client.query('DELETE FROM org_keys WHERE org_id = $1 AND user_id = $2', [orgId, accountId]);
+  });
+}
 
 async function organizationRoutes(app) {
   await app.register(require('../middleware/auth'));
@@ -112,8 +141,12 @@ async function organizationRoutes(app) {
 
     const { WorkspaceKey } = require('../models');
     const wsEnvelopeRows = await WorkspaceKey.find({ userId: req.userId }).lean();
-    const wsEnvelopeMap = {};
-    for (const e of wsEnvelopeRows) wsEnvelopeMap[e.workspaceId] = e.wrappedKey;
+    const wsEnvelopesByWs = new Map();
+    for (const e of wsEnvelopeRows) {
+      const list = wsEnvelopesByWs.get(e.workspaceId) || [];
+      list.push({ deviceId: e.deviceId ?? null, wrappedKey: e.wrappedKey });
+      wsEnvelopesByWs.set(e.workspaceId, list);
+    }
 
     return reply.send({
       id: org.id,
@@ -126,13 +159,17 @@ async function organizationRoutes(app) {
         status: subscription.status,
         seats: subscription.seats,
       } : null,
-      workspaces: workspaces.map(ws => ({
-        id: ws.id,
-        nameEncrypted: ws.nameEncrypted,
-        wrappedKey: wsEnvelopeMap[ws.id] || null,
-        emoji: ws.emoji,
-        color: ws.color,
-      })),
+      workspaces: workspaces.map(ws => {
+        const envelopes = orderEnvelopes(wsEnvelopesByWs.get(ws.id) || [], req.sessionDeviceId);
+        return {
+          id: ws.id,
+          nameEncrypted: ws.nameEncrypted,
+          wrappedKey: selectScalarEnvelope(envelopes, req.sessionDeviceId),
+          wrappedKeys: envelopes,
+          emoji: ws.emoji,
+          color: ws.color,
+        };
+      }),
     });
   });
 
@@ -206,12 +243,50 @@ async function organizationRoutes(app) {
 
   app.patch('/:id/members/:uid', { preHandler: [app.authenticate, requireOrgOwner] }, async (req, reply) => {
     const { role } = req.body || {};
-    if (!['admin', 'member'].includes(role)) {
+    if (!['owner', 'admin', 'member'].includes(role)) {
       return reply.status(400).send({ error: 'invalid_role' });
     }
 
+    const targetUserId = req.params.uid;
+    const target = await OrgMember.findOne({ orgId: req.orgId, accountId: targetUserId }).lean();
+    if (!target) {
+      return reply.status(404).send({ error: 'not_found', message: 'Member not found.' });
+    }
+
+    // An org must always have an owner. The caller is the owner (requireOrgOwner)
+    // and the only way they could empty that role is by demoting themselves, so
+    // refuse rather than leave the org ownerless (S4).
+    if (targetUserId === req.userId) {
+      return reply.status(400).send({ error: 'cannot_demote_self', message: 'Transfer ownership to another member instead of changing your own role.' });
+    }
+
+    // Ownership transfer mirrors the workspace promote-then-demote-with-rollback:
+    // promote the target first, then step the current owner down. If the owner
+    // update misses, roll the promotion back so the org never has zero owners.
+    if (role === 'owner') {
+      const promoted = await OrgMember.updateOne(
+        { orgId: req.orgId, accountId: targetUserId },
+        { $set: { role: 'owner' } }
+      );
+      if (promoted.modifiedCount === 0) {
+        return reply.status(404).send({ error: 'not_found', message: 'Member not found.' });
+      }
+      const demoted = await OrgMember.updateOne(
+        { orgId: req.orgId, accountId: req.userId, role: 'owner' },
+        { $set: { role: 'admin' } }
+      );
+      if (demoted.modifiedCount === 0) {
+        await OrgMember.updateOne(
+          { orgId: req.orgId, accountId: targetUserId, role: 'owner' },
+          { $set: { role: target.role } }
+        );
+        return reply.status(409).send({ error: 'ownership_transfer_conflict', message: 'Ownership transfer could not be completed. Try again.' });
+      }
+      return reply.send({ updated: true });
+    }
+
     await OrgMember.updateOne(
-      { orgId: req.orgId, accountId: req.params.uid },
+      { orgId: req.orgId, accountId: targetUserId },
       { $set: { role } }
     );
     return reply.send({ updated: true });
@@ -222,8 +297,28 @@ async function organizationRoutes(app) {
       return reply.status(400).send({ error: 'cannot_remove_self' });
     }
 
-    await OrgMember.deleteOne({ orgId: req.orgId, accountId: req.params.uid });
-    await OrgKey.deleteOne({ orgId: req.orgId, userId: req.params.uid });
+    // The owner cannot be removed here: this route has no transfer step, and
+    // removing the (sole) owner would leave the org ownerless. Ownership moves
+    // through PATCH, which promotes the replacement first (S4).
+    const target = await OrgMember.findOne({ orgId: req.orgId, accountId: req.params.uid }).lean();
+    if (target?.role === 'owner') {
+      return reply.status(400).send({
+        error: 'owner_cannot_be_removed',
+        message: 'Transfer organization ownership to another member before removing the owner.',
+      });
+    }
+
+    await revokeOrgAccess(req.orgId, req.params.uid);
+
+    // Organization removal is a real revocation: the account no longer belongs,
+    // so log it out everywhere. Sessions are account-scoped and cannot be
+    // filtered per-org, so this revokes all of them.
+    try {
+      await Session.updateMany({ accountId: req.params.uid }, { revoked: true });
+    } catch (err) {
+      app.log.warn({ err: err?.message, targetUserId: req.params.uid, orgId: req.orgId }, 'Failed to revoke sessions on org member removal');
+    }
+
     return reply.send({ removed: true });
   });
 
@@ -232,7 +327,10 @@ async function organizationRoutes(app) {
       return reply.status(400).send({ error: 'owner_cannot_leave' });
     }
 
-    await OrgMember.deleteOne({ orgId: req.orgId, accountId: req.userId });
+    // Leaving is the member's own off-boarding path, so it must drop the same
+    // org-scoped workspace grants as an admin removal (S1) — otherwise a member
+    // facing removal could `/leave` first and keep workspace access.
+    await revokeOrgAccess(req.orgId, req.userId);
     return reply.send({ left: true });
   });
 
@@ -274,8 +372,23 @@ async function organizationRoutes(app) {
     if (!joiner || !joiner.kemPublicKey) {
       return reply.status(403).send({ error: 'keypair_required', message: 'Set up end-to-end encryption before joining.' });
     }
-    if (invite.requireApproval && !invite.approvedBy) {
-      return reply.status(202).send({ pending: true, message: 'Join request requires approval.' });
+    if (invite.requireApproval) {
+      // Approval is tracked per requesting account, so one admin approval never
+      // turns the link into an unlimited self-join. A request survives until
+      // this specific account is approved.
+      const now = new Date().toISOString();
+      await query(
+        `INSERT INTO org_join_requests (id, org_id, invite_id, account_id, status, created_at)
+         VALUES ($1,$2,$3,$4,'pending',$5) ON CONFLICT (invite_id, account_id) DO NOTHING`,
+        [crypto.randomUUID(), invite.orgId, invite.id, req.userId, now]
+      );
+      const { rows } = await query(
+        'SELECT status FROM org_join_requests WHERE invite_id = $1 AND account_id = $2',
+        [invite.id, req.userId]
+      );
+      if (rows[0]?.status !== 'approved') {
+        return reply.status(202).send({ pending: true, message: 'Join request requires approval.' });
+      }
     }
     const upd = await OrgInvite.updateOne({ tokenHash, revoked: 0, $or: [{ maxUses: 0 }, { usedCount: { $lt: invite.maxUses } }] }, { $inc: { usedCount: 1 } });
     if (upd.modifiedCount === 0 && invite.maxUses > 0) return reply.status(410).send({ error: 'invite_max_uses' });
@@ -285,6 +398,11 @@ async function organizationRoutes(app) {
       if (String(e.message).toLowerCase().includes('unique') || String(e.message).includes('duplicate')) return reply.status(409).send({ error: 'already_member' });
       throw e;
     }
+    // Consume the per-user approval so a later re-join (after leaving) needs a
+    // fresh approval rather than reusing the old one.
+    if (invite.requireApproval) {
+      await query('DELETE FROM org_join_requests WHERE invite_id = $1 AND account_id = $2', [invite.id, req.userId]);
+    }
     return reply.status(201).send({ orgId: invite.orgId, role: invite.role });
   });
 
@@ -292,7 +410,13 @@ async function organizationRoutes(app) {
     const tokenHash = crypto.createHash('sha256').update(req.params.token).digest('hex');
     const invite = await OrgInvite.findOne({ orgId: req.orgId, tokenHash, revoked: 0 }).lean();
     if (!invite) return reply.status(404).send({ error: 'invite_not_found' });
-    await OrgInvite.updateOne({ tokenHash }, { $set: { approvedBy: req.userId } });
+    // Approve the currently-pending request(s) for this invite. A requester who
+    // arrives after this approval is not covered and stays pending.
+    await query(
+      `UPDATE org_join_requests SET status = 'approved', approved_by = $1, approved_at = $2
+       WHERE invite_id = $3 AND status = 'pending'`,
+      [req.userId, new Date().toISOString(), invite.id]
+    );
     return reply.send({ approved: true });
   });
 

@@ -1,6 +1,6 @@
 'use strict';
 
-const { Workspace, WorkspaceMember, Device, Session, AuditLog } = require('../models');
+const { Workspace, WorkspaceMember, Device, Session, AuditLog, Account } = require('../models');
 const mlkem = require('../lib/mlkem');
 const { isEnterpriseMode } = require('../lib/license');
 const { resolvePlanForAccount } = require('../lib/plans');
@@ -61,6 +61,7 @@ async function adminRoutes(app) {
 
     const deviceCounts = {};
     const lastSeenMap = {};
+    const accountMap = {};
     if (accountIds.length > 0) {
       const allDevices = await Device.find({ accountId: { $in: accountIds } }, { accountId: 1 }).lean();
       for (const d of allDevices) {
@@ -76,15 +77,27 @@ async function adminRoutes(app) {
           lastSeenMap[s.accountId] = s.lastSeenAt;
         }
       }
+
+      // Human identity for the admin UI: an admin must never have to read UUIDs
+      // to know who is in their workspace. Only the username is exposed; a
+      // member's email stays private even from workspace owners/admins.
+      const accounts = await Account
+        .find({ _id: { $in: accountIds } }, { id: 1, username: 1 })
+        .lean();
+      for (const a of accounts) accountMap[a._id] = a;
     }
 
-    const enriched = members.map((m) => ({
-      userId: m.accountId,
-      role: m.role,
-      deviceCount: deviceCounts[m.accountId] ?? 0,
-      lastSeen: lastSeenMap[m.accountId] ?? null,
-      createdAt: m.createdAt,
-    }));
+    const enriched = members.map((m) => {
+      const acct = accountMap[m.accountId];
+      return {
+        userId: m.accountId,
+        username: acct?.username ?? null,
+        role: m.role,
+        deviceCount: deviceCounts[m.accountId] ?? 0,
+        lastSeen: lastSeenMap[m.accountId] ?? null,
+        createdAt: m.createdAt,
+      };
+    });
 
     return reply.send({ workspaceId, members: enriched });
   });
@@ -107,15 +120,9 @@ async function adminRoutes(app) {
       return reply.status(404).send({ error: 'not_found', message: 'Member not found in this workspace.' });
     }
 
-    try {
-      await Session.updateMany(
-        { accountId: targetUserId, workspaceId },
-        { revoked: true }
-      );
-    } catch (err) {
-      console.error('[admin] failed to revoke sessions for removed member:', err?.message);
-    }
-
+    // Workspace removal drops the membership only. Account-scoped sessions are
+    // NOT revoked here; that would log the member out of unrelated workspaces.
+    // Per-request membership checks remain the access guard.
     return reply.send({ deleted: true, workspaceId, userId: targetUserId });
   });
 

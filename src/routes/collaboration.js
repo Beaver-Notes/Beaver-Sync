@@ -2,9 +2,11 @@
 
 const crypto = require('crypto');
 const { z } = require('zod');
+const { transaction, query } = require('../db');
 const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models');
 const {
-  storeRecipients,
+  addRecipientsIfAbsent,
+  rotateNoteKey,
   noteHasAnyKey,
   getEnvelopesForUser,
   createKeyDistributionRequest,
@@ -12,10 +14,13 @@ const {
   deleteKeyDistributionRequest,
 } = require('../repositories/noteKeys');
 const { validatePublicKey } = require('../lib/recipient-wrap');
+const { findAccountByUsername } = require('../repositories/account');
+const { audit } = require('../lib/audit');
 const { sendNoteInviteEmail } = require('../email');
 const { isFreePlan } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
+const { emailVerificationFields } = require('../lib/email-verification');
 
 const BODY_LIMIT = parseInt(process.env.COLLAB_BODY_LIMIT_BYTES ?? '4096', 10);
 
@@ -56,32 +61,156 @@ const baseRateLimit = {
   bodyLimit: BODY_LIMIT,
 };
 
+// Unpushed-note bootstrap claims are the only path that trusts a client-named
+// workspace, so they get a tighter per-account budget. The check runs after
+// auth (in `enforcePreclaimLimit`) and only when the note is not yet
+// server-registered, so ordinary invites/links for a registered note are never
+// charged against it. The bucket is keyed per account (not per note), so
+// guessing fresh note ids does not buy a new allowance.
+const BOOTSTRAP_RATE_LIMIT_MAX = parseInt(
+  process.env.COLLAB_BOOTSTRAP_RATE_LIMIT_PER_MINUTE ?? '10',
+  10
+);
+
+async function noteIsServerRegistered(noteId) {
+  const { rows } = await query(`
+    SELECT 1 FROM sync_document_state WHERE note_id = $1
+    UNION ALL
+    SELECT 1 FROM yjs_doc_updates WHERE note_id = $1
+    LIMIT 1
+  `, [noteId]);
+  return rows.length > 0;
+}
+
+// A note belongs to the workspace(s) that already hold its journal/snapshot
+// rows. Bootstrap self-grant is only allowed to an owner/editor of such a
+// workspace — knowing a fresh noteId is not ownership.
+//
+// A note that has NOT been pushed to the server yet (no row anywhere) has no
+// provable owner from the server's point of view, but its legitimate owner must
+// still be able to share it. The client therefore names the workspace it is
+// sharing from (`workspaceId`): the claim is granted only when (a) the note is
+// absent from EVERY workspace, and (b) the caller is the workspace OWNER (not
+// merely an editor) of that workspace. A non-member is refused, and a member of
+// a different workspace cannot steal a note that already lives in someone
+// else's (the "absent everywhere" guard). Any row this leaves behind is purged
+// when the note first registers to its real workspace (repositories/noteClaims).
+async function callerOwnsNote(userId, noteId, workspaceId = null) {
+  const { rows } = await query(`
+    SELECT 1 FROM sync_document_state s
+      JOIN workspace_members m ON m.workspace_id = s.workspace_id
+    WHERE s.note_id = $1 AND m.account_id = $2 AND m.role IN ('owner', 'editor')
+    UNION ALL
+    SELECT 1 FROM yjs_doc_updates u
+      JOIN workspace_members m ON m.workspace_id = u.workspace_id
+    WHERE u.note_id = $1 AND m.account_id = $2 AND m.role IN ('owner', 'editor')
+    LIMIT 1
+  `, [noteId, userId]);
+  if (rows.length > 0) return true;
+
+  if (!workspaceId || typeof workspaceId !== 'string') return false;
+
+  const claimed = await query(`
+    SELECT 1 FROM sync_document_state WHERE note_id = $1
+    UNION ALL
+    SELECT 1 FROM yjs_doc_updates WHERE note_id = $1
+    LIMIT 1
+  `, [noteId]);
+  if (claimed.rows.length > 0) return false;
+
+  const member = await query(`
+    SELECT 1 FROM workspace_members
+    WHERE workspace_id = $1 AND account_id = $2 AND role = 'owner'
+    LIMIT 1
+  `, [workspaceId, userId]);
+  return member.rows.length > 0;
+}
+
 // Gate access to a note's collaboration context. The caller must already be a
 // collaborator. With `bootstrap: true` (invite creation only) a caller may
 // claim a note that has no collaborators yet - this is how the user who
-// created a note first invites people. Never self-grant onto a note that
-// already has collaborators, otherwise any authenticated user could claim
-// another user's note by guessing its ID.
-async function requireCollaborator(reply, noteId, userId, { bootstrap = false } = {}) {
+// created a note first invites people. The claim is atomic and requires
+// provable ownership, so a stranger who guesses a noteId cannot self-grant.
+async function requireCollaborator(reply, noteId, userId, { bootstrap = false, workspaceId = null, req = null } = {}) {
   const existing = await NoteInvitation.findOne({ noteId, userId }).lean();
   if (existing) return existing;
 
   if (bootstrap) {
-    const total = await NoteInvitation.countDocuments({ noteId });
-    if (total === 0) {
-      await NoteInvitation.create({ noteId, userId, invitedBy: userId, role: 'editor', createdAt: new Date() });
-      return true;
+    const owns = await callerOwnsNote(userId, noteId, workspaceId);
+    // Pre-claim attempts are auditable even when refused; the note owner naming
+    // their own workspace is indistinguishable from a squatter until the note
+    // registers, so record both outcomes.
+    if (req) audit(req, 'note_claim_attempt', { noteId, workspaceId, granted: owns });
+    if (!owns) {
+      reply.status(403).send({
+        error: 'note_ownership_required',
+        message: 'Only the owner of the workspace that owns this note can claim it.',
+      });
+      return null;
     }
+
+    const now = new Date().toISOString();
+    const claimed = await transaction(async (client) => {
+      // Serialize claims per note so two concurrent bootstraps cannot both
+      // create an editor (or race the primary key into a 500).
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)', [`note-collab:${noteId}`]);
+      const { rows } = await client.query('SELECT 1 FROM note_invitations WHERE note_id = $1 LIMIT 1', [noteId]);
+      if (rows.length > 0) return false;
+      await client.query(
+        `INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at)
+         VALUES ($1, $2, $2, 'editor', $3) ON CONFLICT DO NOTHING`,
+        [noteId, userId, now]
+      );
+      return true;
+    });
+    if (claimed) {
+      return await NoteInvitation.findOne({ noteId, userId }).lean();
+    }
+    // A concurrent claimant won; if it was us, the membership already exists.
+    const mine = await NoteInvitation.findOne({ noteId, userId }).lean();
+    if (mine) return mine;
   }
 
   reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
   return null;
 }
 
+// Only a note's editors (its owner is represented as an editor invitation) may
+// see and act on join requests. A viewer collaborator is not an approver.
+async function requireNoteApprover(reply, noteId, userId) {
+  const membership = await requireCollaborator(reply, noteId, userId);
+  if (!membership) return null;
+  if (membership !== true && membership.role !== 'editor') {
+    reply.status(403).send({ error: 'forbidden', message: 'Only editors can manage join requests.' });
+    return null;
+  }
+  return membership;
+}
+
 async function collaborationRoutes(app) {
   await app.register(require('../middleware/auth'));
 
   const protect = { preHandler: [app.authenticate] };
+
+  // One strict bucket per account for genuinely-unpushed-note bootstraps. It is
+  // checked after authentication and only for unregistered notes, so a paid
+  // user creating ordinary invites stays on the normal collaboration budget.
+  const preclaimLimit = app.createRateLimit({
+    max: BOOTSTRAP_RATE_LIMIT_MAX,
+    timeWindow: '1 minute',
+    keyGenerator: (req) => `preclaim:${req.userId}`,
+  });
+
+  async function enforcePreclaimLimit(req, reply) {
+    if (await noteIsServerRegistered(req.params.noteId)) return;
+    const result = await preclaimLimit(req);
+    if (result.isExceeded) {
+      return reply.status(429).send({
+        error: 'rate_limit_exceeded',
+        message: 'Too many requests. Please slow down.',
+      });
+    }
+  }
 
   app.post('/keys/:noteId/recipients', {
     ...baseRateLimit,
@@ -127,18 +256,109 @@ async function collaborationRoutes(app) {
       }
     }
 
-    // Idempotent provisioning: the first writer wins. If the note already has
-    // any key envelopes, refuse to overwrite so a late joiner or a concurrent
-    // provisioner cannot rotate an existing note key.
-    let outcome;
-    if (await NoteKey.countDocuments({ noteId }) > 0) {
-      outcome = { existing: true, stored: 0 };
-    } else {
-      await storeRecipients(noteId, recipients);
-      outcome = { existing: false, stored: recipients.length };
+    // Only a caller that already holds the note key (or the first provisioner
+    // on a keyless note) may wrap envelopes. Without this gate a collaborator
+    // with no envelope could insert one wrapping a fresh key and rotate (split)
+    // the note key. Writes stay add-only per (noteId, userId, deviceId), so a
+    // late joiner or newly-linked device can be re-wrapped without overwriting.
+    if (await noteHasAnyKey(noteId)) {
+      const { rowCount } = await query(
+        'SELECT 1 FROM note_keys WHERE note_id = $1 AND user_id = $2 LIMIT 1',
+        [noteId, req.userId]
+      );
+      if (rowCount === 0) {
+        return reply.send({ noteId, stored: 0, noteHasKey: true, existing: true });
+      }
     }
 
-    return reply.send({ noteId, stored: outcome.stored, noteHasKey: true, existing: outcome.existing });
+    const stored = await addRecipientsIfAbsent(noteId, recipients);
+    return reply.send({
+      noteId,
+      stored,
+      noteHasKey: true,
+      existing: stored < recipients.length,
+    });
+  });
+
+  // L8: rotate a note's key after a collaborator is removed. Only a caller that
+  // currently holds an envelope may rotate (the same key-holder gate as
+  // /recipients). The new set atomically REPLACES every envelope, so the removed
+  // user's devices lose theirs, an old envelope cannot be replayed, and the
+  // remaining collaborators are re-wrapped under the new generation. The server
+  // stays zero-knowledge: it only stores opaque wrapped strings and records the
+  // generation.
+  app.post('/keys/:noteId/rotate', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const noteId = req.params.noteId;
+    const parsed = NoteIdSchema.safeParse(noteId);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
+    }
+
+    const membership = await requireCollaborator(reply, noteId, req.userId);
+    if (!membership) return;
+    if (membership !== true && membership.role !== 'editor') {
+      return reply.status(403).send({ error: 'forbidden', message: 'Only editors can rotate the note key.' });
+    }
+
+    const { recipients } = req.body ?? {};
+    if (!Array.isArray(recipients) || recipients.length === 0) {
+      return reply.status(400).send({ error: 'validation_error', message: 'recipients array is required.' });
+    }
+    if (recipients.length > 200) {
+      return reply.status(400).send({ error: 'validation_error', message: 'Too many recipients.' });
+    }
+    for (const r of recipients) {
+      if (!r || typeof r.userId !== 'string' || typeof r.wrappedKey !== 'string' || !r.wrappedKey) {
+        return reply.status(400).send({ error: 'validation_error', message: 'Each recipient needs userId and wrappedKey.' });
+      }
+    }
+
+    // Key-holder gate: without a current envelope the caller cannot know the
+    // note key, so it may not rotate/split it. This also makes a replay by an
+    // already-removed member (whose envelope was deleted) impossible.
+    const { rowCount } = await query(
+      'SELECT 1 FROM note_keys WHERE note_id = $1 AND user_id = $2 LIMIT 1',
+      [noteId, req.userId]
+    );
+    if (rowCount === 0) {
+      return reply.status(403).send({
+        error: 'forbidden',
+        message: 'Only a key-holding collaborator can rotate the note key.',
+      });
+    }
+
+    // Every recipient must be a *current* collaborator with an E2E keypair, so a
+    // removed user cannot be re-wrapped back in by a malicious or stale caller.
+    const userIds = [...new Set(recipients.map((r) => r.userId))];
+    const [collabRows, accountRows] = await Promise.all([
+      NoteInvitation.find({ noteId, userId: { $in: userIds } }, { userId: 1 }).lean(),
+      Account.find({ id: { $in: userIds } }, { id: 1, kemPublicKey: 1 }).lean(),
+    ]);
+    const collaboratorIds = new Set(collabRows.map((c) => c.userId));
+    const keypairIds = new Set(accountRows.filter((a) => a.kemPublicKey).map((a) => a.id));
+    for (const r of recipients) {
+      if (!collaboratorIds.has(r.userId)) {
+        return reply.status(403).send({ error: 'forbidden', message: `User ${r.userId} is not a collaborator.` });
+      }
+      if (!keypairIds.has(r.userId)) {
+        return reply.status(403).send({ error: 'keypair_required', message: `User ${r.userId} has not set up end-to-end encryption.` });
+      }
+    }
+
+    const result = await rotateNoteKey(noteId, recipients);
+    app.log.info(
+      { noteId, byUser: req.userId, generation: result.generation, recipients: recipients.length },
+      'Note key rotated'
+    );
+    return reply.send({
+      noteId,
+      stored: result.stored,
+      generation: result.generation,
+      noteHasKey: true,
+    });
   });
 
   // Bootstrap a note's collaboration context by registering the caller as the
@@ -155,7 +375,7 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    const membership = await requireCollaborator(reply, noteId, req.userId, { bootstrap: true });
+    const membership = await requireCollaborator(reply, noteId, req.userId, { bootstrap: true, req });
     if (!membership) return;
 
     const noteHasKey = (await NoteKey.countDocuments({ noteId })) > 0;
@@ -163,11 +383,16 @@ async function collaborationRoutes(app) {
       return reply.send({ noteId, wrappedKey: null, noteHasKey: false });
     }
 
-    const row = await NoteKey.findOne({ noteId, userId: req.userId }).lean();
-    if (!row) {
-      return reply.send({ noteId, wrappedKey: null, noteHasKey: true });
-    }
-    return reply.send({ noteId, wrappedKey: row.wrappedKey, noteHasKey: true });
+    // Scalar convenience for older clients: the caller's own device envelope,
+    // else the account-level `default` one, else null. Never a foreign device's.
+    const envelopes = await getEnvelopesForUser(noteId, req.userId);
+    const rows = envelopes.rows;
+    const own = req.sessionDeviceId
+      ? rows.find((r) => r.device_id === req.sessionDeviceId)
+      : null;
+    const legacy = rows.find((r) => r.device_id === 'default');
+    const wrappedKey = own?.wrapped_key ?? legacy?.wrapped_key ?? null;
+    return reply.send({ noteId, wrappedKey, noteHasKey: true });
   });
 
   app.get('/keys/:noteId', {
@@ -327,13 +552,27 @@ async function collaborationRoutes(app) {
     const accounts = userIds.length > 0
       ? await Account.find({ id: { $in: userIds } }, { id: 1, kemPublicKey: 1, deviceKeys: 1 }).lean()
       : [];
+    // Which (user, device) pairs already hold an envelope: lets a key-holding
+    // collaborator re-wrap only for the devices still missing one. Existence
+    // only; no key material is ever exposed.
+    const { rows: envelopeRows } = await query(
+      'SELECT user_id, device_id FROM note_keys WHERE note_id = $1',
+      [noteId]
+    );
+    const wrapped = new Set(envelopeRows.map((r) => `${r.user_id}:${r.device_id}`));
+
     const collaborators = [];
     for (const a of accounts.filter((x) => x.kemPublicKey)) {
       const devices = (a.deviceKeys && a.deviceKeys.length)
         ? a.deviceKeys
         : [{ deviceId: 'default', publicKey: a.kemPublicKey }];
       for (const d of devices) {
-        collaborators.push({ userId: a.id, deviceId: d.deviceId, kemPublicKey: d.publicKey });
+        collaborators.push({
+          userId: a.id,
+          deviceId: d.deviceId,
+          kemPublicKey: d.publicKey,
+          hasEnvelope: wrapped.has(`${a.id}:${d.deviceId}`),
+        });
       }
     }
     return reply.send({ noteId, collaborators });
@@ -341,7 +580,7 @@ async function collaborationRoutes(app) {
 
   app.post('/invite/:noteId', {
     ...baseRateLimit,
-    ...protect,
+    preHandler: [app.authenticate, enforcePreclaimLimit],
   }, async (req, reply) => {
     const noteId = req.params.noteId;
     const parsed = NoteIdSchema.safeParse(noteId);
@@ -349,26 +588,33 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    // 02.3: soft gate
+    // 02.3: verification is advisory (never enforced by any pipeline); report
+    // the state in the success response instead of blocking the invite.
     const inviterAcct = await Account.findById(req.userId, { emailVerified: 1 }).lean();
-    if (!inviterAcct?.emailVerified) {
-      return reply.status(403).send({ error: 'EMAIL_NOT_VERIFIED', message: 'Please verify your email before inviting collaborators.' });
-    }
+    const verification = emailVerificationFields(Boolean(inviterAcct?.emailVerified));
 
     if (!(await requirePaidSharePlan(req, reply))) return;
 
-    const { username, email } = req.body ?? {};
+    const { username, email, workspaceId } = req.body ?? {};
     if ((!username || typeof username !== 'string') && (!email || typeof email !== 'string')) {
       return reply.status(400).send({ error: 'validation_error', message: 'Provide username or email of the user to invite.' });
     }
 
-    const membership = await requireCollaborator(reply, noteId, req.userId, { bootstrap: true });
+    const membership = await requireCollaborator(reply, noteId, req.userId, {
+      bootstrap: true,
+      workspaceId: typeof workspaceId === 'string' ? workspaceId : null,
+      req,
+    });
     if (!membership) return;
 
     let target = null;
     if (username) {
       const normalized = username.trim().toLowerCase();
-      target = await Account.findOne({ username: normalized }).lean();
+      const resolved = await findAccountByUsername(normalized);
+      if (resolved.ambiguous) {
+        return reply.status(409).send({ error: 'ambiguous_username', message: 'Multiple accounts use that username. Invite by email instead.' });
+      }
+      target = resolved.account;
     } else if (email) {
       const { createEmailHash } = require('../lib/crypto');
       const emailHash = createEmailHash(email.trim().toLowerCase());
@@ -389,7 +635,7 @@ async function collaborationRoutes(app) {
 
     const existing = await NoteInvitation.findOne({ noteId, userId: target.id }).lean();
     if (existing) {
-      return reply.send({ noteId, userId: target.id, role: existing.role, alreadyInvited: true });
+      return reply.send({ noteId, userId: target.id, role: existing.role, alreadyInvited: true, ...verification });
     }
 
     const role = req.body.role === 'viewer' ? 'viewer' : 'editor';
@@ -416,7 +662,7 @@ async function collaborationRoutes(app) {
 
     app.log.info({ noteId, invitedUser: target.id, byUser: req.userId }, 'User invited to note');
 
-    return reply.status(201).send({ noteId, userId: target.id, role, alreadyInvited: false });
+    return reply.status(201).send({ noteId, userId: target.id, role, alreadyInvited: false, ...verification });
   });
 
   app.get('/invitations/:noteId', {
@@ -477,21 +723,19 @@ async function collaborationRoutes(app) {
       return reply.status(404).send({ error: 'not_found', message: 'Invitation not found.' });
     }
 
-    await NoteKey.deleteOne({ noteId, userId: targetUserId });
+    await NoteKey.deleteMany({ noteId, userId: targetUserId });
 
     app.log.info({ noteId, removedUser: targetUserId, byUser: req.userId }, 'Invitation removed');
 
     return reply.send({ deleted: true, noteId, userId: targetUserId });
   });
 
-  app.post('/links/:noteId', { preHandler: [app.authenticate] }, async (req, reply) => {
+  app.post('/links/:noteId', { ...baseRateLimit, preHandler: [app.authenticate, enforcePreclaimLimit] }, async (req, reply) => {
     const { noteId } = req.params;
-    const { role = 'editor', requireApproval = false, expiresIn } = req.body;
+    const { role = 'editor', requireApproval = false, expiresIn, workspaceId } = req.body;
 
     const linkAcct = await Account.findById(req.userId, { emailVerified: 1 }).lean();
-    if (!linkAcct?.emailVerified) {
-      return reply.status(403).send({ error: 'EMAIL_NOT_VERIFIED', message: 'Please verify your email before creating invite links.' });
-    }
+    const verification = emailVerificationFields(Boolean(linkAcct?.emailVerified));
 
     if (!(await requirePaidSharePlan(req, reply))) return;
 
@@ -499,8 +743,16 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'validation_error', message: 'Role must be editor or viewer.' });
     }
 
-    const membership = await NoteInvitation.findOne({ noteId, userId: req.userId }).lean();
-    if (!membership || membership.role !== 'editor') {
+    // The note's owner (and an editor of the owning workspace) may create links
+    // even before it has been shared: bootstrap recognises the caller as the
+    // note's editor collaborator (see callerOwnsNote). A viewer stays refused.
+    const membership = await requireCollaborator(reply, noteId, req.userId, {
+      bootstrap: true,
+      workspaceId: typeof workspaceId === 'string' ? workspaceId : null,
+      req,
+    });
+    if (!membership) return;
+    if (membership.role !== 'editor') {
       return reply.status(403).send({ error: 'forbidden', message: 'Only editors can create invite links.' });
     }
 
@@ -531,6 +783,7 @@ async function collaborationRoutes(app) {
       requireApproval: requireApproval,
       expiresAt,
       createdAt: link.createdAt,
+      ...verification,
     });
   });
 
@@ -582,6 +835,24 @@ async function collaborationRoutes(app) {
       return reply.status(403).send({ error: 'keypair_required', message: 'Set up end-to-end encryption before joining.' });
     }
 
+    // `requireApproval` links are request-access links: joining silently would
+    // make the setting a lie. Record a durable per-account request (mirroring
+    // org_join_requests) so one editor approval can grant this account and no
+    // one else; the row's existence is the pending state.
+    if (link.requireApproval) {
+      await query(
+        `INSERT INTO note_join_requests (id, note_id, invite_id, account_id, created_at)
+         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (invite_id, account_id) DO NOTHING`,
+        [crypto.randomUUID(), link.noteId, link.id, req.userId, new Date().toISOString()]
+      );
+      return reply.status(202).send({
+        pending: true,
+        message: 'This invite link requires an editor to approve you.',
+        noteId: link.noteId,
+        role: link.role,
+      });
+    }
+
     await NoteInvitation.create({
       noteId: link.noteId,
       userId: req.userId,
@@ -594,6 +865,138 @@ async function collaborationRoutes(app) {
       noteId: link.noteId,
       role: link.role,
     });
+  });
+
+  // Pending note join requests for one note. Editor-gated: the server never
+  // reveals who is asking to join to a viewer or an outsider.
+  app.get('/notes/:noteId/join-requests', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const noteId = req.params.noteId;
+    if (!NoteIdSchema.safeParse(noteId).success) {
+      return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
+    }
+    if (!(await requireNoteApprover(reply, noteId, req.userId))) return;
+
+    const { rows } = await query(
+      `SELECT r.id, r.note_id, r.account_id, r.created_at, l.role, a.username
+         FROM note_join_requests r
+         JOIN note_invite_links l ON l.id = r.invite_id
+         LEFT JOIN accounts a ON a.id = r.account_id
+        WHERE r.note_id = $1
+        ORDER BY r.created_at ASC`,
+      [noteId]
+    );
+    return reply.send({
+      noteId,
+      requests: rows.map((r) => ({
+        id: r.id,
+        noteId: r.note_id,
+        accountId: r.account_id,
+        username: r.username || null,
+        role: r.role,
+        createdAt: r.created_at,
+      })),
+    });
+  });
+
+  // Every pending note join request the caller can act on, across all notes
+  // they edit. Lets the team settings surface a single approval queue.
+  app.get('/join-requests', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const { rows } = await query(
+      `SELECT r.id, r.note_id, r.account_id, r.created_at, l.role, a.username
+         FROM note_join_requests r
+         JOIN note_invite_links l ON l.id = r.invite_id
+         LEFT JOIN accounts a ON a.id = r.account_id
+        WHERE EXISTS (
+          SELECT 1 FROM note_invitations ni
+           WHERE ni.note_id = r.note_id AND ni.user_id = $1 AND ni.role = 'editor'
+        )
+        ORDER BY r.created_at ASC`,
+      [req.userId]
+    );
+    return reply.send({
+      requests: rows.map((r) => ({
+        id: r.id,
+        noteId: r.note_id,
+        accountId: r.account_id,
+        username: r.username || null,
+        role: r.role,
+        createdAt: r.created_at,
+      })),
+    });
+  });
+
+  // Approve a pending note join request: grants the invite's role and consumes
+  // the pending row. A second approve finds no row and is rejected, so it can
+  // never double-grant.
+  app.post('/join-requests/:requestId/approve', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const { rows } = await query(
+      'SELECT id, note_id, invite_id, account_id FROM note_join_requests WHERE id = $1',
+      [req.params.requestId]
+    );
+    const request = rows[0];
+    if (!request) {
+      return reply.status(404).send({ error: 'not_found', message: 'Join request not found or already handled.' });
+    }
+    if (!(await requireNoteApprover(reply, request.note_id, req.userId))) return;
+
+    const { rows: linkRows } = await query('SELECT role FROM note_invite_links WHERE id = $1', [request.invite_id]);
+    const role = linkRows[0]?.role;
+    if (!role) {
+      await query('DELETE FROM note_join_requests WHERE id = $1', [request.id]);
+      return reply.status(404).send({ error: 'not_found', message: 'The invite link no longer exists.' });
+    }
+
+    // Idempotent insert, then consume the request. A concurrent double-approve
+    // cannot create two invitations (PK) and one delete is a no-op.
+    await query(
+      `INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at)
+       VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+      [request.note_id, request.account_id, req.userId, role, new Date().toISOString()]
+    );
+    // Consume every pending request from this account for this note, so a
+    // second invite link cannot leave a stale "pending" row for a collaborator.
+    await query(
+      'DELETE FROM note_join_requests WHERE note_id = $1 AND account_id = $2',
+      [request.note_id, request.account_id]
+    );
+
+    app.log.info(
+      { noteId: request.note_id, approvedUser: request.account_id, byUser: req.userId, role },
+      'Note join request approved'
+    );
+    return reply.send({ approved: true, noteId: request.note_id, userId: request.account_id, role });
+  });
+
+  // Deny a pending note join request: drops the request without granting access.
+  app.post('/join-requests/:requestId/deny', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const { rows } = await query(
+      'SELECT id, note_id, account_id FROM note_join_requests WHERE id = $1',
+      [req.params.requestId]
+    );
+    const request = rows[0];
+    if (!request) {
+      return reply.status(404).send({ error: 'not_found', message: 'Join request not found or already handled.' });
+    }
+    if (!(await requireNoteApprover(reply, request.note_id, req.userId))) return;
+
+    await query('DELETE FROM note_join_requests WHERE id = $1', [request.id]);
+    app.log.info(
+      { noteId: request.note_id, deniedUser: request.account_id, byUser: req.userId },
+      'Note join request denied'
+    );
+    return reply.send({ denied: true, noteId: request.note_id, userId: request.account_id });
   });
 }
 
