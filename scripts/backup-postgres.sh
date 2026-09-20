@@ -7,6 +7,9 @@
 # Env (all optional, defaults for `docker compose up -d`):
 #   POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, DATABASE_URL,
 #   BACKUP_DIR (default ./backups), BACKUP_RETENTION_DAYS (default 14)
+#   BACKUP_S3_TARGET (e.g. s3://beaver-backups/pg), BACKUP_S3_ENDPOINT
+#   (e.g. https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com for R2).
+#   Offsite copy needs `aws` CLI on PATH (host cron); sidecar skips if absent.
 set -euo pipefail
 
 BACKUP_DIR="${BACKUP_DIR:-./backups}"
@@ -27,6 +30,21 @@ OUT="$BACKUP_DIR/pg-$TS.sql.gz"
 echo "[backup] dumping to $OUT (retention ${RETENTION_DAYS}d)"
 pg_dump "$CONN" | gzip -9 >"$OUT"
 echo "[backup] wrote $(du -h "$OUT" | cut -f1) compressed"
+
+# Optional offsite copy (same failure domain otherwise). Skipped when unset
+# or when `aws` CLI is absent (default pg-backup sidecar).
+if [ -n "${BACKUP_S3_TARGET:-}" ]; then
+  if command -v aws >/dev/null 2>&1; then
+    # ponytail: host-cron upload only, sidecar has no aws cli by design
+    if [ -n "${BACKUP_S3_ENDPOINT:-}" ]; then
+      aws s3 cp "$OUT" "$BACKUP_S3_TARGET/" --endpoint-url "$BACKUP_S3_ENDPOINT" || echo "[backup] offsite copy failed"
+    else
+      aws s3 cp "$OUT" "$BACKUP_S3_TARGET/" || echo "[backup] offsite copy failed"
+    fi
+  else
+    echo "[backup] BACKUP_S3_TARGET set but 'aws' CLI not found — offsite copy skipped"
+  fi
+fi
 
 # Prune files older than retention; keep at least the newest dump regardless.
 if [ "$RETENTION_DAYS" -ge 0 ] 2>/dev/null; then
