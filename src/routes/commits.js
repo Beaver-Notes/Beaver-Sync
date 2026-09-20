@@ -8,7 +8,7 @@ const { createNoteHash } = require('../lib/crypto');
 const { audit } = require('../lib/audit');
 const { historyCutoffTs } = require('../lib/plan-lifecycle');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
-const { listHistory } = require('../repositories/commits');
+const { listHistory, userIsMemberOfNoteWorkspace } = require('../repositories/commits');
 const { DEVICE_ID_PATTERN } = require('../lib/patterns');
 
 const COMMIT_BODY_LIMIT_BYTES = parseInt(process.env.COMMIT_BODY_LIMIT_BYTES ?? '1048576', 10);
@@ -23,11 +23,12 @@ const CommitLegacyPayload = z.object({
 });
 
 // v4/v5 sync envelopes are sent as JSON strings (see Beaver-Notes crypto.js
-// encryptJSON). Raw non-envelope strings are still rejected.
+// encryptJSON). v6 is the shared note-key envelope the client uses for notes
+// with a collaboration key. Raw non-envelope strings are still rejected.
 const CommitEnvelopePayload = z.string().min(1).refine((s) => {
   try {
     const parsed = JSON.parse(s);
-    return !!parsed && (parsed.v === 4 || parsed.v === 5);
+    return !!parsed && (parsed.v === 4 || parsed.v === 5 || parsed.v === 6);
   } catch {
     return false;
   }
@@ -109,6 +110,8 @@ async function commitRoutes(app) {
       clock: { $gt: clock },
     }));
 
+    // The plan window applies here too, but it is surfaced explicitly via
+    // `historyLimited` so a limited/empty feed is never mistaken for data loss.
     const { plan } = await resolveEffectivePlan(req);
     const cutoffTs = historyCutoffTs(plan);
 
@@ -125,7 +128,7 @@ async function commitRoutes(app) {
       .limit(500)
       .lean();
 
-    return reply.send({ commits });
+    return reply.send({ commits, historyLimited: cutoffTs > 0 });
   });
 
   app.post('/', {
@@ -186,12 +189,26 @@ async function commitRoutes(app) {
       });
     }
 
-    const existing = await CommitMeta.findOne({ commitId: id, accountId: req.userId }).lean();
+    // `commits.commit_id` is a global primary key, so the pre-check must look
+    // up the id globally and compare ownership. An account-scoped lookup would
+    // miss a foreign row and the insert would then 23505 into a false
+    // `already_exists` (a squatter could vanish a victim's commit).
+    const existing = await CommitMeta.findOne({ commitId: id }).lean();
     if (existing) {
+      if (existing.accountId !== req.userId) {
+        app.recordSecurityEvent(req, 'commit_id_conflict', { commitId: id });
+        return reply.status(409).send({
+          error: 'commit_id_conflict',
+          message: 'This commit id already belongs to another account.',
+        });
+      }
       return reply.status(200).send({ commitId: id, status: 'already_exists' });
     }
 
-    const payloadString = JSON.stringify(payload);
+    // v4/v5/v6 envelopes arrive as JSON strings from the client (encryptJSON);
+    // storing JSON.stringify(string) would double-encode them and break decrypt
+    // on read. Legacy v3 arrives as an object and is serialized as before.
+    const payloadString = typeof payload === 'string' ? payload : JSON.stringify(payload);
     const key = r2.commitKey(req.userId, id);
     const payloadBuffer = await mlkem.wrapBlob(Buffer.from(payloadString, 'utf8'));
     await r2.put(key, payloadBuffer, 'application/json');
@@ -203,15 +220,34 @@ async function commitRoutes(app) {
       ? createNoteHash(noteIdHeader)
       : null;
 
-    await CommitMeta.create({
-      commitId: id,
-      accountId: req.userId,
-      deviceId,
-      noteIdHash,
-      clock,
-      ts,
-      sizeBytes,
-    });
+    try {
+      await CommitMeta.create({
+        commitId: id,
+        accountId: req.userId,
+        deviceId,
+        noteIdHash,
+        workspaceId: req.workspaceId ?? null,
+        clock,
+        ts,
+        sizeBytes,
+      });
+    } catch (err) {
+      // Concurrent retries of the same commit race the pre-check above; treat
+      // the unique-key loser as the idempotent success it is, not a 500. A row
+      // that turns out to belong to another account is a real conflict.
+      if (err?.code === '23505' || /unique|duplicate/i.test(String(err?.message ?? ''))) {
+        const clash = await CommitMeta.findOne({ commitId: id }).lean();
+        if (clash && clash.accountId !== req.userId) {
+          app.recordSecurityEvent(req, 'commit_id_conflict', { commitId: id });
+          return reply.status(409).send({
+            error: 'commit_id_conflict',
+            message: 'This commit id already belongs to another account.',
+          });
+        }
+        return reply.status(200).send({ commitId: id, status: 'already_exists' });
+      }
+      throw err;
+    }
 
     const deviceLabel = String(req.headers['x-device-label'] ?? 'Unknown Device').slice(0, 128);
     await Device.findOneAndUpdate(
@@ -263,9 +299,16 @@ async function commitRoutes(app) {
     const { plan } = await resolveEffectivePlan(req);
     const cutoffTs = historyCutoffTs(plan);
 
-    const commits = await listHistory({ userId: req.userId, noteIdHash, before, cutoffTs, limit });
+    // A member of the workspace that owns the note sees every collaborator's
+    // commits; everyone else (personal notes, non-members) sees only their own.
+    const allAccounts = await userIsMemberOfNoteWorkspace(req.userId, noteId);
 
-    return reply.send({ commits, noteId });
+    const commits = await listHistory({ userId: req.userId, noteIdHash, before, cutoffTs, limit, allAccounts });
+
+    // Surface the plan window explicitly: an empty result may mean "no history"
+    // or "older than your plan allows". `limited` lets the client explain it
+    // instead of rendering a false empty state.
+    return reply.send({ commits, noteId, historyLimited: cutoffTs > 0 });
   });
 
   app.get('/:id', {
@@ -286,10 +329,30 @@ async function commitRoutes(app) {
       });
     }
 
-    const meta = await CommitMeta.findOne({
-      commitId,
-      accountId: req.userId,
-    }).lean();
+    const noteIdHeader = req.headers['x-note-id'];
+    const noteId = typeof noteIdHeader === 'string' && noteIdHeader.length > 0 ? noteIdHeader : '';
+    const noteIdHash = noteId ? createNoteHash(noteId) : null;
+
+    let meta;
+    if (noteIdHash) {
+      // A collaborator can read a note's commits by note identity, not only the
+      // account that pushed them. Members of the owning workspace may read;
+      // anyone else only their own commit.
+      meta = await CommitMeta.findOne({ commitId, noteIdHash }).lean();
+      if (
+        meta &&
+        meta.accountId !== req.userId &&
+        !(await userIsMemberOfNoteWorkspace(req.userId, noteId))
+      ) {
+        meta = null;
+      }
+    } else {
+      // Legacy callers without X-Note-Id keep the account-scoped lookup.
+      meta = await CommitMeta.findOne({
+        commitId,
+        accountId: req.userId,
+      }).lean();
+    }
 
     if (!meta) {
       app.recordSecurityEvent(req, 'commit_access_denied', { commitId });
@@ -299,7 +362,8 @@ async function commitRoutes(app) {
       });
     }
 
-    const key = r2.commitKey(req.userId, commitId);
+    // The blob lives under the pusher's prefix, not the reader's.
+    const key = r2.commitKey(meta.accountId, commitId);
     const blob = await r2.get(key);
 
     if (!blob) {
@@ -310,15 +374,20 @@ async function commitRoutes(app) {
     }
 
     const plaintext = await mlkem.unwrapBlob(blob);
-    let parsedPayload;
+    // The client (Beaver-Notes getCommitSnapshot) reads the body as JSON and
+    // requires a STRING envelope, so reply with a JSON string literal. If the
+    // stored plaintext is itself a JSON string (legacy double-encoded rows),
+    // unwrap one level so the client still receives a single envelope string.
+    let payloadString = plaintext.toString('utf8');
     try {
-      parsedPayload = JSON.parse(plaintext.toString('utf8'));
+      const parsed = JSON.parse(payloadString);
+      if (typeof parsed === 'string') payloadString = parsed;
     } catch {
-      parsedPayload = plaintext.toString('utf8');
+      // Not JSON: return the raw bytes as a JSON string.
     }
 
     reply.header('Content-Type', 'application/json');
-    return reply.send(parsedPayload);
+    return reply.send(JSON.stringify(payloadString));
   });
 }
 

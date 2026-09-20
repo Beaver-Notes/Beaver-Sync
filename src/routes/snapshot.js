@@ -164,23 +164,46 @@ async function snapshotRoutes(app) {
 
         const deletedMeta = await CommitMeta.find(
           { accountId: userId, commitId: { $in: compactedCommitIds } },
-          { sizeBytes: 1 }
+          { sizeBytes: 1, workspaceId: 1 }
         ).lean();
 
-        const freedBytes = deletedMeta.reduce((sum, m) => sum + (m.sizeBytes ?? 0), 0);
+        // Credit the snapshot to its own ledger, and debit each freed commit
+        // back to the ledger it was credited to (commit uploads may be account-
+        // or workspace-scoped), so compaction never drifts one ledger against
+        // another.
         const snapshotSize = body.length;
-        const netChange = snapshotSize - freedBytes;
-
         if (req.workspaceId) {
           await Workspace.updateOne(
             { _id: req.workspaceId },
-            { $inc: { storageUsedBytes: netChange } }
+            { $inc: { storageUsedBytes: snapshotSize } }
           );
         } else {
           await Subscription.updateOne(
             { accountId: userId },
-            { $inc: { storageUsedBytes: netChange } }
+            { $inc: { storageUsedBytes: snapshotSize } }
           );
+        }
+
+        let freedAccount = 0;
+        const freedByWorkspace = new Map();
+        for (const m of deletedMeta) {
+          const size = m.sizeBytes ?? 0;
+          if (m.workspaceId) {
+            freedByWorkspace.set(m.workspaceId, (freedByWorkspace.get(m.workspaceId) ?? 0) + size);
+          } else {
+            freedAccount += size;
+          }
+        }
+        if (freedAccount > 0) {
+          await Subscription.updateOne(
+            { accountId: userId },
+            { $inc: { storageUsedBytes: -freedAccount } }
+          );
+        }
+        for (const [wsId, amount] of freedByWorkspace) {
+          if (amount > 0) {
+            await Workspace.updateOne({ _id: wsId }, { $inc: { storageUsedBytes: -amount } });
+          }
         }
 
         await CommitMeta.deleteMany({ accountId: userId, commitId: { $in: compactedCommitIds } });

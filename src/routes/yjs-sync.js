@@ -4,7 +4,8 @@ const { z } = require('zod');
 const persistence = require('../persistence/yjs');
 const { Device } = require('../models');
 const { audit } = require('../lib/audit');
-const { historyCutoffForAccount } = require('../lib/plan-lifecycle');
+const { isFreePlan } = require('../lib/plans');
+const { isEnterpriseMode } = require('../lib/license');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
 const { getPool } = require('../db/postgres');
 const { DEVICE_ID_PATTERN } = require('../lib/patterns');
@@ -117,11 +118,29 @@ function summarizeStoredBatch(result) {
   return { stored: result.accepted, sizeBytes: result.acceptedBytes };
 }
 
+// Cloud sync is collaboration-only on the free plan: a free account may sync a
+// workspace only when invited as a non-owner member, so an owner of a workspace
+// hits this wall with an explicit 402 instead of a silently empty journal.
+async function requirePaidWorkspaceOwner(req, reply, membership) {
+  if (isEnterpriseMode()) return true;
+  if (membership?.role !== 'owner') return true;
+  const { plan } = await resolveEffectivePlan(req);
+  if (!isFreePlan(plan)) return true;
+  reply.status(402).send({
+    error: 'plan_upgrade_required',
+    message: 'Cloud sync of a workspace you own requires a paid plan. Upgrade to sync.',
+    upgradeUrl: 'https://beaver.app/sync',
+  });
+  return false;
+}
+
 async function yjsSyncRoutes(app) {
   await app.register(require('../middleware/auth'));
 
   const protect = { preHandler: [app.authenticate] };
-  const protectWrite = { preHandler: [app.authenticate, app.requireActiveSync, app.requirePaidWrite, app.checkDeviceLimit] };
+  // requirePaidWrite is deliberately absent: paid gating is role-aware here
+  // (requirePaidWorkspaceOwner), so free invited collaborators may still push.
+  const protectWrite = { preHandler: [app.authenticate, app.requireActiveSync, app.checkDeviceLimit] };
   const jsonConfig = (rate) => ({
     bodyLimit: MAX_BODY_BYTES,
     config: {
@@ -139,7 +158,9 @@ async function yjsSyncRoutes(app) {
       return reply.status(403).send({ error: 'device_session_mismatch' });
     }
     const { workspaceId, notes } = parsed.data;
-    if (!await requireWorkspaceWriter(req, reply, workspaceId)) return;
+    const membership = await requireWorkspaceWriter(req, reply, workspaceId);
+    if (!membership) return;
+    if (!await requirePaidWorkspaceOwner(req, reply, membership)) return;
     req.workspaceId = workspaceId;
 
     for (const { noteId, updates } of notes) {
@@ -189,6 +210,9 @@ async function yjsSyncRoutes(app) {
       app.log.warn({ err: err?.message, deviceId }, 'device metadata update failed after push');
     }
     audit(req, 'yjs_push_batch', { accepted, duplicate, deviceId, workspaceId, noteCount: notes.length });
+    if (result.purgedClaims?.length) {
+      audit(req, 'note_preclaim_purged', { workspaceId, purged: result.purgedClaims });
+    }
 
     // Notify other connected clients via Postgres LISTEN/NOTIFY so they
     // can trigger an immediate HTTP pull instead of waiting for the next
@@ -220,9 +244,15 @@ async function yjsSyncRoutes(app) {
     const parsed = BatchPullSchema.safeParse(req.body ?? {});
     if (!parsed.success) return validationError(reply, parsed);
     const { workspaceId, notes } = parsed.data;
-    if (!await requireWorkspaceMember(req, reply, workspaceId)) return;
+    const membership = await requireWorkspaceMember(req, reply, workspaceId);
+    if (!membership) return;
+    if (!await requirePaidWorkspaceOwner(req, reply, membership)) return;
 
-    const { cutoffTs } = await historyCutoffForAccount(req.userId, workspaceId);
+    // The Yjs journal is live state, not version history: it must never be
+    // clamped by the plan's history window, or a reinstall/another device would
+    // pull zero updates and look like total data loss. History-length limiting
+    // belongs on /commits/history only.
+    const cutoffTs = 0;
 
     if (process.env.NODE_ENV !== 'production') {
       console.log(`[pull-batch] ws=${workspaceId} notes=${notes.length} cutoffTs=${cutoffTs} deviceId=${req.headers['x-device-id'] || 'none'}`);
@@ -257,9 +287,27 @@ async function yjsSyncRoutes(app) {
   app.delete('/updates', { ...protect, bodyLimit: 4096 }, async (req, reply) => {
     const parsed = DeleteSchema.safeParse(req.body ?? {});
     if (!parsed.success) return validationError(reply, parsed);
-    if (!await requireWorkspaceWriter(req, reply, parsed.data.workspaceId)) return;
-    await persistence.deleteUpdatesForNote(parsed.data.workspaceId, parsed.data.noteId);
-    return reply.send({ deleted: true });
+    const { workspaceId, noteId, keys } = parsed.data;
+    if (!await requireWorkspaceWriter(req, reply, workspaceId)) return;
+
+    // Delete exactly the journal rows named by `keys`, never the whole note.
+    // A blank `keys` array is rejected by the schema, so a compaction caller
+    // cannot accidentally wipe other devices' unsnapshotted updates.
+    const headerDeviceId = req.headers['x-device-id'];
+    const hasHeaderDevice = typeof headerDeviceId === 'string' && DEVICE_ID_PATTERN.test(headerDeviceId);
+    const rows = [];
+    for (const key of keys) {
+      const match = SYNC_KEY_PATTERN.exec(key);
+      if (!match || match[1] !== noteId) {
+        return reply.status(400).send({ error: 'malformed_delete_key' });
+      }
+      if (hasHeaderDevice && match[2] !== headerDeviceId) {
+        return reply.status(403).send({ error: 'device_id_mismatch' });
+      }
+      rows.push({ deviceId: match[2], clock: Number(match[4]) });
+    }
+    await persistence.deleteJournalRows(workspaceId, noteId, rows);
+    return reply.send({ deleted: true, deletedKeys: rows.length });
   });
 }
 

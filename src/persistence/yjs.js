@@ -2,6 +2,7 @@
 
 const { transaction, query } = require('../db');
 const { getQuotaBytes } = require('../lib/plans');
+const { reconcileNoteOwnership } = require('../repositories/noteClaims');
 const { identityOf, generateUpdateId, checkpointForRows } = require('./yjs-rooms');
 
 // Write path: storing yjs updates into the journal. Reads/deletes/sync-state
@@ -35,6 +36,7 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
   const now = new Date().toISOString();
   let accepted = 0;
   let acceptedBytes = 0;
+  let purgedClaims = [];
 
   const batch = notes.flatMap(({ noteId, updates }) => updates.map((u) => [
     generateUpdateId(),
@@ -49,7 +51,7 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
   ]));
 
   if (batch.length === 0) {
-    return { accepted: 0, duplicate: 0, acceptedBytes: 0, checkpoint: null, checkpoints: {} };
+    return { accepted: 0, duplicate: 0, acceptedBytes: 0, checkpoint: null, checkpoints: {}, purgedClaims: [] };
   }
 
   // Collapse within-batch duplicates (same note, device, clock) so each update
@@ -64,6 +66,21 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
   }
 
   await transaction(async (client) => {
+    // First registration: note ids absent from BOTH journals become server-
+    // known with this push. Reconcile their pre-existing collaboration rows so
+    // a squatter who claimed the id while it was unpushed cannot survive into
+    // key distribution. Detection is global (any workspace), matching
+    // callerOwnsNote's "claimed everywhere" rule.
+    const noteIds = [...new Set(notes.map((n) => n.noteId))];
+    const { rows: knownRows } = await client.query(`
+      SELECT DISTINCT note_id FROM yjs_doc_updates WHERE note_id = ANY($1)
+      UNION
+      SELECT note_id FROM sync_document_state WHERE note_id = ANY($1)
+    `, [noteIds]);
+    const known = new Set(knownRows.map((r) => r.note_id));
+    const firstRegistered = noteIds.filter((id) => !known.has(id));
+    purgedClaims = await reconcileNoteOwnership(client, workspaceId, firstRegistered);
+
     // Determine which identities already exist so acceptedBytes only counts
     // rows this call actually inserts.
     const existingIdentities = new Set();
@@ -150,6 +167,7 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
     acceptedBytes,
     checkpoint,
     checkpoints,
+    purgedClaims,
   };
 }
 

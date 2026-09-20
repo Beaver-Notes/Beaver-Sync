@@ -102,28 +102,18 @@ async function loadUpdatesAfter(workspaceId, noteId, checkpoint, limit, sinceTs 
     }
   }
 
-  // --- Stale cursor detection: 0 rows returned but server has newer data ---
-  // When the client sends a non-empty checkpoint and we return 0 rows, it
-  // could mean either "client is up to date" or "client's cursor is stale"
-  // (e.g. from a previous session, or after server data was compacted/rotated).
-  // A lightweight COUNT check distinguishes the two cases.
-  let stale = false;
-  if (page.length === 0 && hasCheckpoint) {
-    const { rows: existsRows } = await query(
-      `SELECT 1 FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = $2 LIMIT 1`,
-      [workspaceId, noteId]
-    );
-    if (existsRows.length > 0) {
-      console.log(`[pull-batch] note=${noteId} stale cursor detected (server has newer data, checkpoint returned 0)`);
-      stale = true;
-    }
-  }
+  // NOTE: no "0 rows + history exists = stale" check here. Zero rows with a
+  // valid checkpoint means the client is caught up, period: the exclusion
+  // filter above already returns every row the checkpoint does not cover
+  // (including post-compaction rows newer than a rotated cursor). Flagging
+  // the steady state as stale wiped client checkpoints and forced a full
+  // history re-pull on every other sync. Cursor age expiry above stays.
 
   return {
     updates: page,
     nextCheckpoint: last ? nextCheckpoint : {},
     hasMore,
-    stale,
+    stale: false,
   };
 }
 
