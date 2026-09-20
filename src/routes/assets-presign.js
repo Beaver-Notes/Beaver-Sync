@@ -4,8 +4,9 @@ const r2 = require('../services/r2');
 const { storageConfig } = require('../services/r2');
 const { Subscription, Workspace } = require('../models');
 const { mapWithConcurrency } = require('../lib/concurrency');
-const { ASSET_KEY_PATTERN, ASSET_UPLOAD_CONCURRENCY, MAX_ASSET_SIZE_BYTES } = require('./assets-shared');
+const { isValidAssetKey, ASSET_UPLOAD_CONCURRENCY, MAX_ASSET_SIZE_BYTES } = require('./assets-shared');
 const { reserveForPresign, confirmReservations } = require('../db/asset-reservations');
+const { requireWorkspaceWriter } = require('../middleware/org');
 
 async function registerAssetPresignRoutes(app, protect) {
   app.post('/presign-batch', {
@@ -27,15 +28,23 @@ async function registerAssetPresignRoutes(app, protect) {
 
     const workspaceId = bodyWorkspaceId || req.headers['x-workspace-id'] || null;
 
+    // The workspace id is client-supplied: only a member who can write to that
+    // workspace may reserve against its ledger. Otherwise an authenticated caller
+    // could reserve (and later confirm) against another tenant's quota (S3).
+    if (workspaceId) {
+      const membership = await requireWorkspaceWriter(req, reply, workspaceId);
+      if (!membership) return;
+    }
+
     // Build size map capped at MAX_ASSET_SIZE_BYTES. Missing sizes default to 0 (legacy clients).
     // Clients should send sizes array parallel to keys or object mapping key->size for accurate quota preflight.
-    const validKeys = keys.filter((k) => k && ASSET_KEY_PATTERN.test(k));
+    const validKeys = keys.filter((k) => k && isValidAssetKey(k));
     const sizeMap = new Map();
     if (Array.isArray(sizes) && sizes.length === keys.length) {
       keys.forEach((k, i) => {
         const raw = Number(sizes[i]);
         const capped = Number.isFinite(raw) ? Math.max(0, Math.min(raw, MAX_ASSET_SIZE_BYTES)) : 0;
-        if (k && ASSET_KEY_PATTERN.test(k)) sizeMap.set(k, capped);
+        if (k && isValidAssetKey(k)) sizeMap.set(k, capped);
       });
     } else if (sizes && typeof sizes === 'object' && !Array.isArray(sizes)) {
       for (const k of validKeys) {
@@ -89,14 +98,14 @@ async function registerAssetPresignRoutes(app, protect) {
       // MinIO: generate server-proxied HMAC-signed upload URLs
       const { signAssetUpload } = require('../lib/asset-sign');
       for (const assetKey of keys) {
-        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) continue;
+        if (!assetKey || !isValidAssetKey(assetKey)) continue;
         const { url } = signAssetUpload(assetKey, req.userId, PRESIGN_TTL);
         urls.push({ assetKey, url });
       }
     } else {
       // R2/S3: generate native presigned PUT URLs concurrently
       const presignPromises = keys.map((assetKey) => {
-        if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) return Promise.resolve(null);
+        if (!assetKey || !isValidAssetKey(assetKey)) return Promise.resolve(null);
         const key = r2.assetKey(req.userId, assetKey);
         return r2.presignPut(key, 'application/octet-stream', PRESIGN_TTL)
           .then((url) => ({ assetKey, url }))
@@ -135,7 +144,7 @@ async function registerAssetPresignRoutes(app, protect) {
     const PRESIGN_TTL = 3600;
 
     const entries = await mapWithConcurrency(keys, ASSET_UPLOAD_CONCURRENCY, async (assetKey) => {
-      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) return null;
+      if (!assetKey || !isValidAssetKey(assetKey)) return null;
       const key = r2.assetKey(req.userId, assetKey);
       try {
         const stat = await r2.stat(key);
@@ -177,8 +186,15 @@ async function registerAssetPresignRoutes(app, protect) {
 
     const workspaceId = bodyWorkspaceId || req.headers['x-workspace-id'] || req.workspaceId || null;
 
+    // Same client-supplied id as presign-batch: only a workspace writer may
+    // finalize accounting against that workspace's storage ledger (S3).
+    if (workspaceId) {
+      const membership = await requireWorkspaceWriter(req, reply, workspaceId);
+      if (!membership) return;
+    }
+
     const stats = await mapWithConcurrency(keys, ASSET_UPLOAD_CONCURRENCY, async (assetKey) => {
-      if (!assetKey || !ASSET_KEY_PATTERN.test(assetKey)) return null;
+      if (!assetKey || !isValidAssetKey(assetKey)) return null;
       const key = r2.assetKey(req.userId, assetKey);
       try {
         const stat = await r2.stat(key);

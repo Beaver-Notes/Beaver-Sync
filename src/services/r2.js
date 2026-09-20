@@ -287,11 +287,13 @@ async function delMany(keys) {
 }
 
 /**
- * List all object keys under a given prefix.
- * Returns an array of key strings (empty if none found).
+ * List all objects under a given prefix with their metadata.
+ * Returns an array of `{ key, lastModified, size }` (empty if none found).
+ * Asset GC needs `lastModified` to enforce its grace period; `listKeys`
+ * (keys only) remains for callers that do not.
  */
-async function listKeys(prefix) {
-  const keys = [];
+async function listObjects(prefix) {
+  const objects = [];
   let continuationToken;
 
   do {
@@ -303,13 +305,28 @@ async function listKeys(prefix) {
     const res = await r2.send(cmd);
     if (res.Contents) {
       for (const obj of res.Contents) {
-        if (obj.Key) keys.push(obj.Key);
+        if (obj.Key) {
+          objects.push({
+            key: obj.Key,
+            lastModified: obj.LastModified ?? null,
+            size: obj.Size ?? 0,
+          });
+        }
       }
     }
     continuationToken = res.NextContinuationToken;
   } while (continuationToken);
 
-  return keys;
+  return objects;
+}
+
+/**
+ * List all object keys under a given prefix.
+ * Returns an array of key strings (empty if none found).
+ */
+async function listKeys(prefix) {
+  const objects = await listObjects(prefix);
+  return objects.map((o) => o.key);
 }
 
 /**
@@ -368,6 +385,7 @@ module.exports = {
   del,
   delMany,
   listKeys,
+  listObjects,
   stat,
   presignGet,
   presignPut,

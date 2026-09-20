@@ -2,8 +2,14 @@
 
 const r2 = require('../services/r2');
 const { verifyAssetSignature } = require('../lib/asset-sign');
-const { Subscription } = require('../models');
-const { MAX_ASSET_SIZE_BYTES, ASSET_KEY_PATTERN } = require('./assets-shared');
+const { resolveQuotaAndUsed } = require('../db/asset-reservations');
+const {
+  MAX_ASSET_SIZE_BYTES,
+  isValidAssetKey,
+  ledgerWorkspaceForAsset,
+  creditAssetStorage,
+  debitAssetStorage,
+} = require('./assets-shared');
 
 // These bypass session auth — the HMAC token IS the authorization.
 // Used when STORAGE_BACKEND=minio (internal Docker hostnames are unresolvable
@@ -28,7 +34,7 @@ async function registerAssetProxyRoutes(app) {
       return reply.status(403).send({ error: 'invalid_signature', message: 'Invalid or expired download token.' });
     }
 
-    if (!ASSET_KEY_PATTERN.test(key)) {
+    if (!isValidAssetKey(key)) {
       return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
     }
 
@@ -78,7 +84,7 @@ async function registerAssetProxyRoutes(app) {
       return reply.status(403).send({ error: 'invalid_signature', message: 'Invalid or expired upload token.' });
     }
 
-    if (!ASSET_KEY_PATTERN.test(key)) {
+    if (!isValidAssetKey(key)) {
       return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
     }
 
@@ -92,27 +98,35 @@ async function registerAssetProxyRoutes(app) {
       return reply.status(400).send({ error: 'empty_body', message: 'Asset body cannot be empty.' });
     }
 
-    // Enforce quota even on the signed-proxy path (otherwise presign + proxy bypasses accounting)
-    try {
-      const statBefore = await r2.stat(r2.assetKey(userId, key)).catch(() => null);
-      const existingSize = statBefore?.sizeBytes ?? 0;
-      const delta = body.length - existingSize;
-      if (delta > 0) {
-        const sub = await Subscription.findOne({ accountId: userId }).lean();
-        if (sub) {
-          const { getQuotaBytes } = require('../lib/plans');
-          const quota = getQuotaBytes(sub.plan, sub.seats ?? 1);
-          if (quota && (sub.storageUsedBytes ?? 0) + delta > quota) {
-            return reply.status(507).send({
-              error: 'storage_quota_exceeded',
-              message: 'Asset would exceed your storage quota.',
-              storageUsedBytes: sub.storageUsedBytes ?? 0,
-              storageQuotaBytes: quota,
-            });
-          }
-        }
+    // Enforce quota even on the signed-proxy path (otherwise presign + proxy bypasses accounting).
+    // Resolve the SAME ledger the credit below uses (workspace when the asset
+    // has a reservation, else the account) and fail closed if it cannot be
+    // resolved — a falsy quota must never skip the gate.
+    const statBefore = await r2.stat(r2.assetKey(userId, key)).catch(() => null);
+    const existingSize = statBefore?.sizeBytes ?? 0;
+    const incomingDelta = body.length - existingSize;
+    if (incomingDelta > 0) {
+      const ledgerWorkspaceId = await ledgerWorkspaceForAsset(userId, key);
+      let quota;
+      let used;
+      try {
+        ({ quota, used } = await resolveQuotaAndUsed(userId, ledgerWorkspaceId));
+      } catch (err) {
+        req.log?.error?.({ err: err?.message }, '[assets-proxy] quota resolution failed');
+        return reply.status(507).send({
+          error: 'storage_quota_exceeded',
+          message: 'Storage quota could not be verified.',
+        });
       }
-    } catch { /* quota check best-effort; do not block upload on lookup failure */ }
+      if (!Number.isFinite(quota) || quota <= 0 || used + incomingDelta > quota) {
+        return reply.status(507).send({
+          error: 'storage_quota_exceeded',
+          message: 'Asset would exceed your storage quota.',
+          storageUsedBytes: used,
+          storageQuotaBytes: Number.isFinite(quota) ? quota : null,
+        });
+      }
+    }
 
     const r2Key = r2.assetKey(userId, key);
     let existingBefore;
@@ -128,8 +142,11 @@ async function registerAssetProxyRoutes(app) {
     }
 
     const delta = body.length - (existingBefore?.sizeBytes ?? 0);
-    if (delta !== 0) {
-      await Subscription.updateOne({ accountId: userId }, { $inc: { storageUsedBytes: delta } });
+    const ledgerWorkspaceId = await ledgerWorkspaceForAsset(userId, key);
+    if (delta > 0) {
+      await creditAssetStorage(userId, ledgerWorkspaceId, delta);
+    } else if (delta < 0) {
+      await debitAssetStorage(userId, ledgerWorkspaceId, -delta);
     }
 
     return reply.status(201).send({ assetKey: key, sizeBytes: body.length });

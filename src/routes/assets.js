@@ -5,8 +5,10 @@ const { Subscription, Workspace } = require('../models');
 const {
   MAX_ASSET_SIZE_BYTES,
   ASSET_URL_TTL_SECONDS,
-  ASSET_KEY_PATTERN,
+  isValidAssetKey,
   storeAssetBatch,
+  ledgerWorkspaceForAsset,
+  debitAssetStorage,
 } = require('./assets-shared');
 const { registerAssetProxyRoutes } = require('./assets-proxy');
 const { registerAssetPresignRoutes } = require('./assets-presign');
@@ -24,6 +26,23 @@ async function assetRoutes(app) {
 
   const BATCH_MAX_ITEMS = 20;
   const BATCH_MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+  // A batch that stored nothing is a failure, not a success with an empty
+  // `results` array the client may ignore.
+  const CLIENT_BATCH_ERRORS = new Set(['invalid_key', 'empty_body', 'too_large']);
+  function sendBatchResult(reply, results, total) {
+    const uploaded = results.filter((r) => r.status === 'uploaded').length;
+    const skipped = results.filter((r) => r.status === 'already_exists').length;
+    if (uploaded === 0 && skipped === 0) {
+      const storageFailure = results.some((r) => r.status === 'error' && !CLIENT_BATCH_ERRORS.has(r.error));
+      return reply.status(storageFailure ? 502 : 400).send({
+        error: 'batch_failed',
+        message: 'No assets were stored.',
+        results, uploaded, skipped, total,
+      });
+    }
+    return reply.send({ results, uploaded, skipped, total });
+  }
 
   app.post('/batch', {
     ...protectWrite,
@@ -44,9 +63,7 @@ async function assetRoutes(app) {
     }
 
     const results = await storeAssetBatch(req, assets);
-    const uploaded = results.filter((r) => r.status === 'uploaded').length;
-    const skipped = results.filter((r) => r.status === 'already_exists').length;
-    return reply.send({ results, uploaded, skipped, total: assets.length });
+    return sendBatchResult(reply, results, assets.length);
   });
 
   // Used during initial workspace seed to upload many assets at once.
@@ -72,9 +89,7 @@ async function assetRoutes(app) {
     }
 
     const results = await storeAssetBatch(req, assets);
-    const uploaded = results.filter((r) => r.status === 'uploaded').length;
-    const skipped = results.filter((r) => r.status === 'already_exists').length;
-    return reply.send({ results, uploaded, skipped, total: assets.length });
+    return sendBatchResult(reply, results, assets.length);
   });
 
   await registerAssetProxyRoutes(app);
@@ -105,6 +120,12 @@ async function assetRoutes(app) {
       .filter((k) => k.startsWith(prefix))
       .map((k) => k.slice(prefix.length));
 
+    // Workspace scoping can no longer be done server-side: asset keys are now
+    // opaque (`assets--<encrypted token>`) and the server must not be able to
+    // read the workspace id. The account-global list is returned; the client
+    // decrypts each key and filters locally. `?workspaceId=` is accepted and
+    // ignored for backward compatibility (it previously filtered, which would
+    // now silently drop every opaque asset).
     return reply.send({
       keys: assetKeys,
       count: assetKeys.length,
@@ -128,10 +149,10 @@ async function assetRoutes(app) {
   }, async (req, reply) => {
     const assetKey = req.params.key;
 
-    if (!ASSET_KEY_PATTERN.test(assetKey)) {
+    if (!isValidAssetKey(assetKey)) {
       return reply.status(400).send({
         error: 'invalid_key',
-        message: 'Asset key must be alphanumeric with dashes, underscores, or dots.',
+        message: 'Asset key must be a non-empty name without path separators.',
       });
     }
 
@@ -206,7 +227,7 @@ async function assetRoutes(app) {
   }, async (req, reply) => {
     const assetKey = req.params.key;
 
-    if (!ASSET_KEY_PATTERN.test(assetKey)) {
+    if (!isValidAssetKey(assetKey)) {
       return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
     }
 
@@ -249,7 +270,7 @@ async function assetRoutes(app) {
   }, async (req, reply) => {
     const assetKey = req.params.key;
 
-    if (!ASSET_KEY_PATTERN.test(assetKey)) {
+    if (!isValidAssetKey(assetKey)) {
       return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
     }
 
@@ -291,7 +312,7 @@ async function assetRoutes(app) {
   }, async (req, reply) => {
     const assetKey = req.params.key;
 
-    if (!ASSET_KEY_PATTERN.test(assetKey)) {
+    if (!isValidAssetKey(assetKey)) {
       return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
     }
 
@@ -316,10 +337,8 @@ async function assetRoutes(app) {
 
     await r2.del(key);
 
-    await Subscription.updateOne(
-      { accountId: req.userId },
-      { $inc: { storageUsedBytes: -stat.sizeBytes } }
-    );
+    const workspaceId = await ledgerWorkspaceForAsset(req.userId, assetKey);
+    await debitAssetStorage(req.userId, workspaceId, stat.sizeBytes);
 
     return reply.send({ deleted: true, assetKey });
   });

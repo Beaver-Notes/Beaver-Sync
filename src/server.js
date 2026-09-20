@@ -114,6 +114,14 @@ async function buildApp() {
           : undefined,
     },
     bodyLimit: parseInt(process.env.API_BODY_LIMIT_BYTES ?? '1048576', 10),
+    // Asset keys routinely exceed Fastify's default maxParamLength (100), which
+    // would 414 `GET/PUT/DELETE /assets/:key`. The new-scheme key
+    // (`assets--<ws>--<note>--<43-char hash>`) is already ~127 chars for two
+    // UUIDs, and legacy item-3 opaque tokens run to ~900. 2048 covers every
+    // legal key with margin, legacy included.
+    routerOptions: {
+      maxParamLength: parseInt(process.env.FASTIFY_MAX_PARAM_LENGTH ?? '2048', 10),
+    },
     trustProxy: process.env.TRUST_PROXY === 'true' ? true : false,
     requestTimeout: parseInt(process.env.REQUEST_TIMEOUT_MS ?? '30000', 10),
     connectionTimeout: parseInt(process.env.CONNECTION_TIMEOUT_MS ?? '10000', 10),
@@ -225,6 +233,7 @@ async function buildApp() {
   await app.register(require('./routes/admin'),       { prefix: '/admin' });
   await app.register(require('./routes/webhooks'),    { prefix: '/webhooks' });
   await app.register(require('./routes/comments'),    { prefix: '/comments' });
+  await app.register(require('./routes/activity'),    { prefix: '/activity' });
   await app.register(require('./routes/sso-admin'));
 
   app.get('/health', {
@@ -292,6 +301,15 @@ async function buildApp() {
     startGcScheduler(app);
   } catch (err) {
     app.log.warn({ err: err.message }, '[yjs-gc] scheduler init failed (non-fatal)');
+  }
+
+  // Scheduled orphan asset GC — separate job, env-toggled (off by default),
+  // dry-run unless explicitly armed, advisory-locked.
+  try {
+    const { startAssetGcScheduler } = require('./jobs/asset-gc');
+    startAssetGcScheduler(app);
+  } catch (err) {
+    app.log.warn({ err: err.message }, '[asset-gc] scheduler init failed (non-fatal)');
   }
 
   return app;
