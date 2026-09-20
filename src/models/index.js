@@ -286,6 +286,7 @@ const ALLOWED_TABLES = new Set([
   'sso_configs', 'sso_oidc_states', 'audit_logs', 'yjs_doc_updates',
   'vault_key_params', 'note_invite_links',
   'note_comments',
+  'note_activity',
   // New org tables
   'organizations', 'org_members', 'org_subscriptions', 'org_invites',
   // yjs_documents removed after migration to journal (Task 03.1) — table kept in schema for one release
@@ -319,7 +320,7 @@ const ALLOWED_COLUMNS = {
   quick_connect_codes: new Set(['code', 'secret', 'authorized', 'payload', 'expires_at', 'created_at']),
   compaction_locks: new Set(['id', 'locked_at', 'expires_at', 'created_at']),
   note_keys: new Set(['note_id', 'user_id', 'device_id', 'wrapped_key', 'created_at']),
-  workspace_keys: new Set(['workspace_id', 'user_id', 'wrapped_key', 'created_at']),
+  workspace_keys: new Set(['workspace_id', 'user_id', 'device_id', 'wrapped_key', 'created_at']),
   org_keys: new Set(['org_id', 'user_id', 'wrapped_key', 'created_at']),
   note_invitations: new Set(['note_id', 'user_id', 'invited_by', 'role', 'created_at']),
   email_aliases: new Set(['alias', 'account_id', 'email_encrypted', 'created_at', 'expires_at']),
@@ -342,6 +343,8 @@ const ALLOWED_COLUMNS = {
   note_comments: new Set(['id', 'note_id', 'thread_id', 'author_id', 'content_encrypted',
     'content_iv', 'anchor_from', 'anchor_to', 'resolved', 'parent_id', 'mentions',
     'created_at', 'updated_at']),
+  note_activity: new Set(['id', 'note_id', 'author_id', 'kind', 'content_encrypted',
+    'content_iv', 'created_at']),
   organizations: new Set(['id', 'name_encrypted', 'slug', 'created_at']),
   org_members: new Set(['org_id', 'account_id', 'role', 'created_at']),
   org_subscriptions: new Set(['id', 'org_id', 'plan', 'status', 'seats', 'provider', 'renews_at',
@@ -536,6 +539,7 @@ const WebAuthnChallenge = createModel('webauthn_challenges');
 const VaultKeyParams = createModel('vault_key_params');
 const NoteInviteLink = createModel('note_invite_links');
 const NoteComment = createModel('note_comments');
+const NoteActivity = createModel('note_activity');
 const Organization = createModel('organizations');
 const OrgMember = createModel('org_members', '_composite');
 const OrgSubscription = createModel('org_subscriptions');
@@ -548,6 +552,6 @@ module.exports = {
   NoteInvitation,
   Workspace, WorkspaceMember, WorkspaceInvite,
   AuditLog, SsoConfig, SsoOidcState, EmailAlias, WebAuthnChallenge,
-  VaultKeyParams, NoteInviteLink, NoteComment,
+  VaultKeyParams, NoteInviteLink, NoteComment, NoteActivity,
   Organization, OrgMember, OrgSubscription, OrgInvite,
 };

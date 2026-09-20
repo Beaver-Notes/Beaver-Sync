@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS note_keys (
   user_id     TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   device_id   TEXT NOT NULL DEFAULT 'default',
   wrapped_key TEXT NOT NULL,
+  generation  BIGINT NOT NULL DEFAULT 0,
   created_at  TEXT NOT NULL,
   PRIMARY KEY (note_id, user_id, device_id)
 );
@@ -155,9 +156,9 @@ CREATE TABLE IF NOT EXISTS note_keys (
 CREATE TABLE IF NOT EXISTS workspace_keys (
   workspace_id TEXT NOT NULL,
   user_id      TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id    TEXT,
   wrapped_key  TEXT NOT NULL,
-  created_at   TEXT NOT NULL,
-  PRIMARY KEY (workspace_id, user_id)
+  created_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS org_keys (
@@ -223,6 +224,21 @@ CREATE TABLE IF NOT EXISTS org_invites (
 );
 CREATE INDEX IF NOT EXISTS idx_org_invites_org ON org_invites(org_id);
 
+-- Approval is per requesting account, never per invite: approving one joiner
+-- must not turn a require-approval link into an unlimited self-join.
+CREATE TABLE IF NOT EXISTS org_join_requests (
+  id          TEXT PRIMARY KEY,
+  org_id      TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  invite_id   TEXT NOT NULL REFERENCES org_invites(id) ON DELETE CASCADE,
+  account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  status      TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved')),
+  approved_by TEXT,
+  approved_at TEXT,
+  created_at  TEXT NOT NULL,
+  UNIQUE (invite_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS idx_org_join_requests_invite ON org_join_requests(invite_id, status);
+
 CREATE TABLE IF NOT EXISTS note_invitations (
   note_id      TEXT NOT NULL,
   user_id      TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -246,6 +262,19 @@ CREATE TABLE IF NOT EXISTS note_invite_links (
 
 CREATE INDEX IF NOT EXISTS idx_note_invite_links_note ON note_invite_links(note_id);
 CREATE INDEX IF NOT EXISTS idx_note_invite_links_token ON note_invite_links(token_hash);
+
+-- Approval is per requesting account, never per invite: approving one joiner
+-- must not turn a require-approval link into an unlimited self-join. A row's
+-- existence means "pending"; approval grants the link role and deletes it.
+CREATE TABLE IF NOT EXISTS note_join_requests (
+  id          TEXT PRIMARY KEY,
+  note_id     TEXT NOT NULL,
+  invite_id   TEXT NOT NULL REFERENCES note_invite_links(id) ON DELETE CASCADE,
+  account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  created_at  TEXT NOT NULL,
+  UNIQUE (invite_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS idx_note_join_requests_note ON note_join_requests(note_id);
 
 CREATE TABLE IF NOT EXISTS email_aliases (
   alias            TEXT PRIMARY KEY,
@@ -281,6 +310,18 @@ CREATE TABLE IF NOT EXISTS workspace_invites (
   used_count       INTEGER NOT NULL DEFAULT 0,
   created_at       TEXT NOT NULL
 );
+
+-- Per-requester approval for require-approval workspace invites; mirrors
+-- note_join_requests. Existence means pending; approval grants and deletes.
+CREATE TABLE IF NOT EXISTS workspace_join_requests (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  invite_id     TEXT NOT NULL REFERENCES workspace_invites(token_hash) ON DELETE CASCADE,
+  account_id    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  created_at    TEXT NOT NULL,
+  UNIQUE (invite_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_join_requests_workspace ON workspace_join_requests(workspace_id);
 
 CREATE TABLE IF NOT EXISTS sso_configs (
   id                      TEXT PRIMARY KEY,
@@ -392,6 +433,19 @@ CREATE TABLE IF NOT EXISTS vault_key_params (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vault_key_params_workspace ON vault_key_params(workspace_id);
 
+-- Phase 2: one vault key per account. The account row is adopted
+-- deterministically from the oldest per-workspace row the account published and
+-- is never rewritten. The per-workspace `vault_key_params` rows above stay
+-- readable for migration and are never deleted by adoption.
+CREATE TABLE IF NOT EXISTS account_vault_key_params (
+  id                 TEXT PRIMARY KEY,
+  account_id         TEXT NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+  owner_id           TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  key_params_blob    TEXT NOT NULL,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS note_comments (
   id                TEXT PRIMARY KEY,
   note_id           TEXT NOT NULL,
@@ -410,6 +464,20 @@ CREATE TABLE IF NOT EXISTS note_comments (
 
 CREATE INDEX IF NOT EXISTS idx_note_comments_note ON note_comments(note_id);
 CREATE INDEX IF NOT EXISTS idx_note_comments_thread ON note_comments(thread_id);
+
+-- Opaque edit/activity entries for shared notes (Phase 2). Content is encrypted
+-- client-side with the shared note key; the server stores no plaintext.
+CREATE TABLE IF NOT EXISTS note_activity (
+  id                TEXT PRIMARY KEY,
+  note_id           TEXT NOT NULL,
+  author_id         TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  kind              TEXT,
+  content_encrypted TEXT NOT NULL,
+  content_iv        TEXT NOT NULL,
+  created_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_activity_note ON note_activity(note_id, created_at);
 
 CREATE TABLE IF NOT EXISTS vault_proof_challenges (
   id TEXT PRIMARY KEY,

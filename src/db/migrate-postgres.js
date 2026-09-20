@@ -82,6 +82,19 @@ async function ensureSchema() {
     try {
       await query('ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS org_id TEXT REFERENCES organizations(id)');
     } catch {}
+    // Workspace key envelopes are per-device now, so an account's second device
+    // can unwrap its own envelope. Existing rows keep device_id NULL and stay
+    // readable as a legacy account-level envelope. The old PK on
+    // (workspace_id, user_id) must go or only one device could ever hold a row.
+    try {
+      await query('ALTER TABLE workspace_keys ADD COLUMN IF NOT EXISTS device_id TEXT');
+    } catch {}
+    try {
+      await query('ALTER TABLE workspace_keys DROP CONSTRAINT IF EXISTS workspace_keys_pkey');
+    } catch {}
+    try {
+      await query('CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_keys_device ON workspace_keys(workspace_id, user_id, device_id)');
+    } catch {}
     // 04.1: asset quota reservations (presign preflight + reap)
     try {
       await query(`CREATE TABLE IF NOT EXISTS asset_reservations (
@@ -97,6 +110,18 @@ async function ensureSchema() {
     } catch {}
     try { await query('CREATE INDEX IF NOT EXISTS idx_asset_reservations_account ON asset_reservations(account_id, status, expires_at)'); } catch {}
     try { await query('CREATE INDEX IF NOT EXISTS idx_asset_reservations_expires ON asset_reservations(expires_at) WHERE status = \'pending\''); } catch {}
+    // L8: collaborator removal rotates the note key. The generation stamps each
+    // rotation so a replay of a pre-rotation envelope is distinguishable and
+    // the current generation is server-recorded.
+    try {
+      await query('ALTER TABLE note_keys ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0');
+    } catch {}
+    // Activity kind moves into the client-encrypted payload. Legacy rows keep
+    // their readable kind; new writes store NULL (drop the NOT NULL so an
+    // upgraded database accepts them).
+    try {
+      await query('ALTER TABLE note_activity ALTER COLUMN kind DROP NOT NULL');
+    } catch {}
   } finally {
     try {
       await lockClient.query('SELECT pg_advisory_unlock($1)', [SCHEMA_ADVISORY_LOCK_KEY]);
