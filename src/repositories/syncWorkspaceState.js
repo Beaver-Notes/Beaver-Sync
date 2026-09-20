@@ -1,6 +1,7 @@
 'use strict';
 
 const { query, transaction } = require('../db');
+const { reconcileNoteOwnership } = require('./noteClaims');
 
 async function createEmptyState(workspaceId) {
   await query(
@@ -10,7 +11,7 @@ async function createEmptyState(workspaceId) {
 }
 
 async function getStatus(workspaceId) {
-  const { rows } = await query('SELECT status, generation FROM sync_workspace_state WHERE workspace_id = $1', [workspaceId]);
+  const { rows } = await query('SELECT status, generation, initialization_expires_at FROM sync_workspace_state WHERE workspace_id = $1', [workspaceId]);
   return rows[0] ?? null;
 }
 
@@ -57,7 +58,9 @@ async function getInitializationClaim(workspaceId) {
 }
 
 // Atomic: validates the claim token, upserts document mappings, flips the
-// workspace to initialized. Resolves to an error-code string or null.
+// workspace to initialized. Resolves to `{ error, purged }`, where `error` is
+// null on success (or an error code) and `purged` lists the pre-claim rows
+// removed by reconciliation so the caller can audit them.
 async function completeInitialization({ workspaceId, token, generation, documents, now }) {
   return transaction(async (client) => {
     const { rows } = await client.query(`
@@ -66,8 +69,28 @@ async function completeInitialization({ workspaceId, token, generation, document
       WHERE workspace_id = $1 AND status = 'initializing'
     `, [workspaceId]);
     const state = rows[0];
-    if (!state || state.initialization_token !== token) return 'invalid_token';
-    if (!state.initialization_expires_at || state.initialization_expires_at <= now) return 'expired_token';
+    if (!state || state.initialization_token !== token) return { error: 'invalid_token', purged: [] };
+    if (!state.initialization_expires_at || state.initialization_expires_at <= now) return { error: 'expired_token', purged: [] };
+
+    // Documents newly mapped to this workspace are becoming server-known here;
+    // purge any collaboration row squatted while they were unpushed. The
+    // purged counts are returned so the route can audit them exactly like the
+    // push path does.
+    let purged = [];
+    const docNoteIds = [...new Set(documents.map((d) => d.noteId))];
+    if (docNoteIds.length > 0) {
+      const { rows: knownRows } = await client.query(`
+        SELECT DISTINCT note_id FROM yjs_doc_updates WHERE note_id = ANY($1)
+        UNION
+        SELECT note_id FROM sync_document_state WHERE note_id = ANY($1)
+      `, [docNoteIds]);
+      const known = new Set(knownRows.map((r) => r.note_id));
+      purged = await reconcileNoteOwnership(
+        client,
+        workspaceId,
+        docNoteIds.filter((id) => !known.has(id))
+      );
+    }
 
     if (documents.length > 0) {
       const columnCount = 8;
@@ -102,7 +125,7 @@ async function completeInitialization({ workspaceId, token, generation, document
           initialization_expires_at = NULL, updated_at = $2
       WHERE workspace_id = $3
     `, [generation, now, workspaceId]);
-    return null;
+    return { error: null, purged };
   });
 }
 

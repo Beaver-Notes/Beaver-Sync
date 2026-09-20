@@ -3,6 +3,7 @@
 const Stripe = require('stripe');
 const { Account, Subscription } = require('../models');
 const { getStripePriceId, SELF_SERVE_PLANS, VALID_INTERVALS } = require('../lib/plans');
+const { emailVerificationFields } = require('../lib/email-verification');
 
 async function billingRoutes(app) {
   await app.register(require('../middleware/auth'));
@@ -31,9 +32,9 @@ async function billingRoutes(app) {
     if (!account) {
       return reply.status(404).send({ error: 'not_found', message: 'Account not found.' });
     }
-    if (!account.emailVerified) {
-      return reply.status(403).send({ error: 'EMAIL_NOT_VERIFIED', message: 'Email verification required before checkout.' });
-    }
+    // Verification is advisory (no delivery pipeline ever sets it); proceed and
+    // report the state instead of blocking checkout.
+    const verification = emailVerificationFields(Boolean(account.emailVerified));
 
     let email = null;
     if (account.emailEncrypted) {
@@ -63,7 +64,7 @@ async function billingRoutes(app) {
         metadata: { userId: req.userId, plan, interval },
         subscription_data: { metadata: { userId: req.userId, plan, interval } },
       });
-      return reply.send({ url: session.url, id: session.id });
+      return reply.send({ url: session.url, id: session.id, ...verification });
     } catch (err) {
       req.log.error({ err: err.message }, 'Stripe checkout session creation failed');
       return reply.status(502).send({ error: 'stripe_error', message: err.message || 'Failed to create checkout session.' });

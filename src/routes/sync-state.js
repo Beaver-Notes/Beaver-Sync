@@ -13,6 +13,7 @@ const {
   listDownloadableSnapshots,
 } = require('../repositories/syncWorkspaceState');
 const { requireWorkspaceMember, requireWorkspaceOwner } = require('../middleware/org');
+const { audit } = require('../lib/audit');
 
 const CLAIM_TTL_MS = 30 * 60 * 1000;
 
@@ -21,6 +22,12 @@ const VERIFY_CONCURRENCY = 8;
 const { mapWithConcurrency } = require('../lib/concurrency');
 
 const WorkspaceSchema = z.object({ workspaceId: z.string().min(1) });
+// Destructive reset must be explicit: a boolean confirmation plus the caller
+// typing the workspace id back, so a mis-aimed request cannot wipe a live vault.
+const ResetSchema = WorkspaceSchema.extend({
+  confirm: z.literal(true),
+  confirmWorkspaceId: z.string().min(1),
+});
 const CompleteSchema = WorkspaceSchema.extend({
   token: z.string().min(1),
   generation: z.number().int().nonnegative(),
@@ -93,10 +100,19 @@ async function readState(workspaceId) {
   const documents = docRows.map(documentState);
   const vaultRow = await getVaultKeyParams(workspaceId);
 
+  // A claim that was never completed (e.g. the seeding device bailed before
+  // `/initialize/complete`) leaves the workspace `initializing` with a stale
+  // token. The server allows reclaiming it once the TTL lapses, so surface that
+  // so clients can retry seeding instead of skipping forever.
+  const initializationExpired = state.status === 'initializing'
+    && (!state.initialization_expires_at
+      || new Date(state.initialization_expires_at) <= new Date());
+
   return {
     workspaceId,
     status: state.status,
     generation: state.generation,
+    initializationExpired,
     documents,
     vault: vaultRow ? {
       id: vaultRow.id,
@@ -175,8 +191,13 @@ async function syncStateRoutes(app) {
 
     const now = new Date().toISOString();
     const complete = await completeInitialization({ workspaceId, token, generation, documents, now });
-    if (complete === 'expired_token') return reply.status(403).send({ error: 'initialization_token_expired' });
-    if (complete === 'invalid_token') return reply.status(403).send({ error: 'invalid_initialization_token' });
+    if (complete.error === 'expired_token') return reply.status(403).send({ error: 'initialization_token_expired' });
+    if (complete.error === 'invalid_token') return reply.status(403).send({ error: 'invalid_initialization_token' });
+    if (complete.purged.length > 0) {
+      // Same audit event as the push-path purge (routes/yjs-sync.js), so both
+      // registration doors leave the same forensic trail.
+      audit(req, 'note_preclaim_purged', { workspaceId, purged: complete.purged });
+    }
     return reply.send({ ok: true, workspaceId, status: 'initialized', generation });
   });
 
@@ -271,14 +292,21 @@ async function syncStateRoutes(app) {
   });
 
   app.post('/initialize/reset', protect, async (req, reply) => {
-    const parsed = WorkspaceSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
-    const { workspaceId } = parsed.data;
+    const parsed = ResetSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'confirmation_required', message: 'Reset requires confirm:true and confirmWorkspaceId matching the workspace id.' });
+    }
+    const { workspaceId, confirmWorkspaceId } = parsed.data;
+    if (confirmWorkspaceId !== workspaceId) {
+      return reply.status(400).send({ error: 'confirmation_required', message: 'confirmWorkspaceId must match workspaceId.' });
+    }
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
 
+    const state = await getStatus(workspaceId);
     const now = new Date().toISOString();
     await resetState({ workspaceId, now });
+    audit(req, 'sync_state_reset', { workspaceId, generation: state?.generation ?? 0 });
     return reply.send({ ok: true, workspaceId, status: 'empty' });
   });
 
