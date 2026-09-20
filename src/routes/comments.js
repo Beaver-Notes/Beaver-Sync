@@ -155,7 +155,9 @@ async function commentRoutes(app) {
       return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
     }
 
-    await NoteComment.deleteMany({ $or: [{ _id: commentId }, { parentId: commentId }] });
+    // Only the caller's own comment. Deleting a thread must never cascade into
+    // replies other users authored (they own their own words).
+    await NoteComment.deleteOne({ _id: commentId });
     return reply.send({ success: true });
   });
 
