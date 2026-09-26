@@ -96,10 +96,21 @@ async function noteIsServerRegistered(noteId) {
 // else's (the "absent everywhere" guard). Any row this leaves behind is purged
 // when the note first registers to its real workspace (repositories/noteClaims).
 async function callerOwnsNote(userId, noteId, workspaceId = null) {
+  // A workspace's owner_id is authoritative even when that workspace has no
+  // workspace_members row (a personal workspace), so both are accepted here or
+  // the owner would be locked out of their own unpushed note.
   const { rows } = await query(`
+    SELECT 1 FROM sync_document_state s
+      JOIN workspaces w ON w.id = s.workspace_id
+    WHERE s.note_id = $1 AND w.owner_id = $2
+    UNION ALL
     SELECT 1 FROM sync_document_state s
       JOIN workspace_members m ON m.workspace_id = s.workspace_id
     WHERE s.note_id = $1 AND m.account_id = $2 AND m.role IN ('owner', 'editor')
+    UNION ALL
+    SELECT 1 FROM yjs_doc_updates u
+      JOIN workspaces w ON w.id = u.workspace_id
+    WHERE u.note_id = $1 AND w.owner_id = $2
     UNION ALL
     SELECT 1 FROM yjs_doc_updates u
       JOIN workspace_members m ON m.workspace_id = u.workspace_id
@@ -119,6 +130,9 @@ async function callerOwnsNote(userId, noteId, workspaceId = null) {
   if (claimed.rows.length > 0) return false;
 
   const member = await query(`
+    SELECT 1 FROM workspaces
+    WHERE id = $1 AND owner_id = $2
+    UNION ALL
     SELECT 1 FROM workspace_members
     WHERE workspace_id = $1 AND account_id = $2 AND role = 'owner'
     LIMIT 1
@@ -375,7 +389,18 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    const membership = await requireCollaborator(reply, noteId, req.userId, { bootstrap: true, req });
+    // The client names the workspace it is sharing from so an unpushed note can
+    // be attributed to its owner (see callerOwnsNote). Without it the owner of a
+    // personal workspace cannot bootstrap their own note.
+    const bootstrapWorkspaceId =
+      typeof req.body?.workspaceId === 'string' ? req.body.workspaceId
+        : typeof req.query?.workspaceId === 'string' ? req.query.workspaceId
+          : null;
+    const membership = await requireCollaborator(reply, noteId, req.userId, {
+      bootstrap: true,
+      workspaceId: bootstrapWorkspaceId,
+      req,
+    });
     if (!membership) return;
 
     const noteHasKey = (await NoteKey.countDocuments({ noteId })) > 0;
