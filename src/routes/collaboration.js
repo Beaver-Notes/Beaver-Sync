@@ -745,15 +745,22 @@ async function collaborationRoutes(app) {
 
     // The note's owner (and an editor of the owning workspace) may create links
     // even before it has been shared: bootstrap recognises the caller as the
-    // note's editor collaborator (see callerOwnsNote). A viewer stays refused.
+    // note's editor collaborator (see callerOwnsNote). A viewer stays refused —
+    // unless they genuinely own the note's workspace, which can happen when a
+    // stale or accidental 'viewer' row exists for the owner (for example the
+    // owner joined their own share link), so ownership is re-checked explicitly.
+    const resolvedWorkspaceId = typeof workspaceId === 'string' ? workspaceId : null;
     const membership = await requireCollaborator(reply, noteId, req.userId, {
       bootstrap: true,
-      workspaceId: typeof workspaceId === 'string' ? workspaceId : null,
+      workspaceId: resolvedWorkspaceId,
       req,
     });
     if (!membership) return;
     if (membership.role !== 'editor') {
-      return reply.status(403).send({ error: 'forbidden', message: 'Only editors can create invite links.' });
+      const ownsNote = await callerOwnsNote(req.userId, noteId, resolvedWorkspaceId);
+      if (!ownsNote) {
+        return reply.status(403).send({ error: 'forbidden', message: 'Only editors can create invite links.' });
+      }
     }
 
     const rawToken = generateToken();

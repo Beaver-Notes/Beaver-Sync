@@ -208,3 +208,27 @@ test('a viewer collaborator still cannot create an invite link', async (t) => {
   assert.equal(link.statusCode, 403, link.body);
   assert.equal(link.json().message, 'Only editors can create invite links.');
 });
+
+test('a note owner can create an invite link even with a stale viewer row', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+
+  const { owner, wsId } = await seedPaidWorkspace('owner-stale-viewer-row');
+  const ownerHeaders = await authHeaders(owner.id);
+  const noteId = `note-${crypto.randomUUID()}`;
+  const now = new Date().toISOString();
+
+  // Reproduces the report: the owner somehow carries a 'viewer' invitation row
+  // (e.g. they opened their own share link), which used to block link creation.
+  await query(
+    'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1,$2,$3,$4,$5)',
+    [noteId, owner.id, owner.id, 'viewer', now]
+  );
+
+  const link = await post(app, `/collaboration/links/${noteId}`, ownerHeaders, {
+    role: 'editor',
+    workspaceId: wsId,
+  });
+  assert.equal(link.statusCode, 201, link.body);
+  assert.ok(link.json().token);
+});
