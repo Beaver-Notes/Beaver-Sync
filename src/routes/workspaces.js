@@ -185,10 +185,46 @@ async function workspaceRoutes(app) {
     return reply.status(201).send({ id: workspace.id, nameEncrypted, role: 'owner', vaultWrappedKeys: normalizedVaultWrappedKeys, emoji: validatedEmoji, color: validatedColor, createdAt: workspace.createdAt });
   });
 
+  // Every account needs somewhere to keep its notes, but the POST / handler
+  // above requires a paid plan and an organization (a Team/Enterprise concept),
+  // which left a Basic-plan individual with no workspace to share a note from.
+  // Provision a personal workspace directly instead: no organization and no plan
+  // gate (sync and history keep their own gates), with the owner membership row
+  // and empty sync state the rest of the stack expects.
+  async function ensureDefaultWorkspace(accountId) {
+    const owned = await Workspace.countDocuments({ ownerId: accountId });
+    if (owned > 0) return null;
+    const existingMembership = await WorkspaceMember.findOne({ accountId }).lean();
+    if (existingMembership) return null;
+
+    const workspace = await Workspace.create({
+      nameEncrypted: 'Personal',
+      ownerId: accountId,
+      orgId: null,
+      vaultWrappedKeys: null,
+      emoji: DEFAULT_EMOJI,
+      color: DEFAULT_COLOR,
+      createdAt: new Date(),
+    });
+    await WorkspaceMember.create({
+      workspaceId: workspace.id,
+      accountId,
+      role: 'owner',
+      createdAt: new Date(),
+    });
+    try {
+      await createEmptyState(workspace.id);
+    } catch (err) {
+      app.log.warn({ err, workspaceId: workspace.id }, 'default workspace state init failed');
+    }
+    return workspace;
+  }
+
   app.get('/', {
     ...rateLimit,
     ...protect,
   }, async (req, reply) => {
+    await ensureDefaultWorkspace(req.userId);
     const memberships = await WorkspaceMember.find({ accountId: req.userId }).lean();
     if (memberships.length === 0) return reply.send({ workspaces: [] });
 
