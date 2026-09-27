@@ -859,7 +859,7 @@ async function collaborationRoutes(app) {
 
     const existing = await NoteInvitation.findOne({ noteId: link.noteId, userId: req.userId }).lean();
     if (existing) {
-      return reply.send({ success: true, message: 'Already a member.', role: existing.role });
+      return reply.send({ success: true, message: 'Already a member.', noteId: link.noteId, role: existing.role });
     }
 
     const joiner = await Account.findById(req.userId, { kemPublicKey: 1 }).lean();
