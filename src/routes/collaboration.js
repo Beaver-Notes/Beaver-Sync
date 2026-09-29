@@ -17,19 +17,24 @@ const { validatePublicKey } = require('../lib/recipient-wrap');
 const { findAccountByUsername } = require('../repositories/account');
 const { audit } = require('../lib/audit');
 const { sendNoteInviteEmail } = require('../email');
-const { isFreePlan } = require('../lib/plans');
+const { getFlags } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
 const { emailVerificationFields } = require('../lib/email-verification');
 
 const BODY_LIMIT = parseInt(process.env.COLLAB_BODY_LIMIT_BYTES ?? '4096', 10);
 
-// Outbound note shares/invites require a paid plan (spec: free users can
-// receive shared notes as collaborators but cannot invite/share outbound).
+// Outbound note shares/invites require a plan with the shareNotes capability
+// (spec: free users can receive shared notes as collaborators but cannot
+// invite/share outbound). Reads the plans.js flag so the matrix stays the single
+// source of truth -- a hardcoded plan check here silently drifts from it.
+// Deliberately NOT applied to the /keys/* routes: a free user provisioning the
+// first key for their OWN note goes through POST /keys/:noteId/recipients, so
+// gating those would leave free users unable to open anything they create.
 async function requirePaidSharePlan(req, reply) {
   if (isEnterpriseMode()) return true;
   const { plan } = await resolveEffectivePlan(req);
-  if (isFreePlan(plan)) {
+  if (!getFlags(plan).shareNotes) {
     reply.status(403).send({
       error: 'plan_upgrade_required',
       message: 'Sharing notes requires a paid plan.',
