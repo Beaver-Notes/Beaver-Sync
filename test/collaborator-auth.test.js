@@ -27,7 +27,8 @@ test.after(async () => { await close(); });
 async function inject(app, session, payload) {
   return app.inject({
     method: 'POST', url: '/auth/verify-session',
-    headers: { 'content-type': 'application/json' },
+    // The relay presents this on every call (src/ws-relay-auth.js); the endpoint 503s without it.
+    headers: { 'content-type': 'application/json', 'x-internal-secret': process.env.INTERNAL_API_SECRET, },
     payload,
   });
 }

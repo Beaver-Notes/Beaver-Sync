@@ -34,10 +34,12 @@ async function setupTestDb() {
 
   process.env.NODE_ENV = process.env.NODE_ENV || 'test';
   // Dev .env values must never leak into the suite: PLAN_OVERRIDE would bypass
-  // plan gates, and INTERNAL_API_SECRET would gate the relay auth endpoints
-  // (verify-session/verify-ticket) behind a header the in-process tests don't send.
+  // plan gates. INTERNAL_API_SECRET is pinned rather than deleted so the relay auth
+  // endpoints (verify-session/verify-ticket) stay closed during tests; tests that
+  // exercise them send it as x-internal-secret.
   delete process.env.PLAN_OVERRIDE;
-  delete process.env.INTERNAL_API_SECRET;
+  process.env.INTERNAL_API_SECRET = process.env.INTERNAL_API_SECRET
+    || 'test-internal-api-secret-at-least-32-characters-long';
   process.env.SESSION_HMAC_KEY = process.env.SESSION_HMAC_KEY || 'test-session-hmac-key-at-least-32-characters-long';
   process.env.EMAIL_HMAC_KEY = process.env.EMAIL_HMAC_KEY || 'test-email-hmac-key-at-least-32-characters-long';
   process.env.COOKIE_SECRET = process.env.COOKIE_SECRET || 'test-cookie-secret-at-least-32-chars-long';

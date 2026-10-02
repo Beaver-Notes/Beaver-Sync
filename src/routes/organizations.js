@@ -6,6 +6,26 @@ const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { requireOrgMember, requireOrgAdmin, requireOrgOwner } = require('../middleware/org');
 const { orderEnvelopes, selectScalarEnvelope } = require('../repositories/workspaceKeys');
 const { VALID_PLANS } = require('../lib/plans');
+const { isEnterpriseMode } = require('../lib/license');
+
+// An org membership makes the org's plan the caller's effective plan for every quota
+// and feature gate (lib/plan-resolution.js isOrgParticipant + lib/plans.js org-first
+// resolution). Admitting a free account therefore hands it the paid org quota, so
+// both org entry points gate the target's own plan the way workspaces.js:409 does
+// for workspace members.
+async function requirePaidOrgParticipant(reply, accountId) {
+  if (isEnterpriseMode()) return true;
+  const { Subscription } = require('../models');
+  const sub = await Subscription.findOne({ accountId }).lean();
+  if ((sub?.plan || 'free') === 'free') {
+    reply.status(403).send({
+      error: 'plan_upgrade_required',
+      message: 'Free accounts can only be note collaborators, not organization members.',
+    });
+    return false;
+  }
+  return true;
+}
 const { transaction, query } = require('../db/postgres');
 
 // Off-boarding an account from an organization must revoke every org-scoped
@@ -231,6 +251,7 @@ async function organizationRoutes(app) {
     if (!wrappedKey || typeof wrappedKey !== 'string') {
       return reply.status(400).send({ error: 'validation_error', message: 'wrappedKey is required to add a member.' });
     }
+    if (!await requirePaidOrgParticipant(reply, accountId)) return;
 
     await OrgMember.create({ orgId: req.orgId, accountId, role, createdAt: new Date() });
     await OrgKey.findOneAndUpdate(
@@ -372,6 +393,7 @@ async function organizationRoutes(app) {
     if (!joiner || !joiner.kemPublicKey) {
       return reply.status(403).send({ error: 'keypair_required', message: 'Set up end-to-end encryption before joining.' });
     }
+    if (!await requirePaidOrgParticipant(reply, req.userId)) return;
     if (invite.requireApproval) {
       // Approval is tracked per requesting account, so one admin approval never
       // turns the link into an unlimited self-join. A request survives until

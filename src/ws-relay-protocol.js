@@ -50,18 +50,40 @@ function handleSyncMessage(decoder, room, conn, documentName, schedulePersist) {
 function handleAwarenessMessage(decoder, room, conn, wsToClientIds) {
   const update = decoding.readVarUint8Array(decoder);
 
-  // Track which awareness client IDs belong to this connection
+  // A clientID belongs to the socket that published it. y-protocols merges on
+  // clock, so a socket claiming someone else's id with a higher clock wins the
+  // state, and the disconnect handler would then erase it. Reject those entries
+  // and re-encode only what this socket is allowed to publish.
   const updateDecoder = decoding.createDecoder(update);
   const len = decoding.readVarUint(updateDecoder);
-  for (let i = 0; i < len; i++) {
-    const clientID = decoding.readVarUint(updateDecoder);
-    decoding.readVarUint(updateDecoder); // clock
-    decoding.readVarString(updateDecoder); // state JSON
-    if (!wsToClientIds.has(conn.ws)) wsToClientIds.set(conn.ws, new Set());
-    wsToClientIds.get(conn.ws).add(clientID);
+  const ownedByOthers = new Set();
+  for (const [ws, ids] of wsToClientIds) {
+    if (ws === conn.ws) continue;
+    for (const id of ids) ownedByOthers.add(id);
   }
 
-  awarenessProtocol.applyAwarenessUpdate(room.awareness, update, conn);
+  const mine = wsToClientIds.get(conn.ws) ?? new Set();
+  const accepted = [];
+  for (let i = 0; i < len; i++) {
+    const clientID = decoding.readVarUint(updateDecoder);
+    const clock = decoding.readVarUint(updateDecoder);
+    const state = decoding.readVarString(updateDecoder); // state JSON
+    if (ownedByOthers.has(clientID)) continue;
+    mine.add(clientID);
+    accepted.push([clientID, clock, state]);
+  }
+  wsToClientIds.set(conn.ws, mine);
+  if (accepted.length === 0) return;
+
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, accepted.length);
+  for (const [clientID, clock, state] of accepted) {
+    encoding.writeVarUint(encoder, clientID);
+    encoding.writeVarUint(encoder, clock);
+    encoding.writeVarString(encoder, state);
+  }
+
+  awarenessProtocol.applyAwarenessUpdate(room.awareness, encoding.toUint8Array(encoder), conn);
 }
 
 module.exports = { MSG_SYNC, MSG_AWARENESS, handleSyncMessage, handleAwarenessMessage };

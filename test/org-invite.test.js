@@ -27,6 +27,13 @@ async function seedOrg(orgId, ownerId) {
   await query('INSERT INTO org_members (org_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', [orgId, ownerId, 'owner', now]);
 }
 
+async function seedPaid(accountId, plan = 'pro') {
+  await query(
+    'INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES ($1,$2,$3,$4,$5,0,$6)',
+    [`${accountId}-sub`, accountId, plan, 'active', 50 * 1024 * 1024 * 1024, now]
+  );
+}
+
 async function inject(app, session, method, url, payload) {
   const headers = { authorization: `Bearer ${session}` };
   if (payload !== undefined) headers['content-type'] = 'application/json';
@@ -39,6 +46,11 @@ test.before(async () => {
   await seedAccount('inv-owner', PUBKEY);
   await seedAccount('inv-joiner', PUBKEY_2);
   await seedAccount('inv-joiner2', PUBKEY);
+  // Org membership carries the org's plan into every quota gate, so a free account
+  // must never be admitted. Joiners below get a paid personal subscription.
+  await seedPaid('inv-joiner');
+  await seedPaid('inv-joiner2');
+  await seedAccount('inv-free-joiner', PUBKEY);
   await seedOrg('org-invite-1', 'inv-owner');
   await seedOrg('org-invite-2', 'inv-owner');
 });
@@ -127,6 +139,8 @@ test('require-approval is per-user: approving one requester does not unlock the 
   await seedOrg('org-invite-3', 'inv-owner');
   await seedAccount('inv-requester-a', PUBKEY);
   await seedAccount('inv-requester-b', PUBKEY_2);
+  await seedPaid('inv-requester-a');
+  await seedPaid('inv-requester-b');
 
   const ownerSession = await createSession('inv-owner', { headers: {} });
   const aSession = await createSession('inv-requester-a', { headers: {} });
@@ -203,4 +217,23 @@ test('public-keys returns only collaborators with keypairs and 403s for outsider
   const forbidden = await inject(app, outsiderSession, 'GET', '/collaboration/public-keys/note-pubkey-test');
   assert.equal(forbidden.statusCode, 403);
   assert.equal(forbidden.json().error, 'forbidden');
+});
+
+test('a free account cannot join a team org through an invite link', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const ownerSession = await createSession('inv-owner', { headers: {} });
+  const freeSession = await createSession('inv-free-joiner', { headers: {} });
+
+  const create = await inject(app, ownerSession, 'POST', '/organizations/org-invite-2/invite', { role: 'member' });
+  assert.equal(create.statusCode, 201);
+
+  const join = await inject(app, freeSession, 'POST', `/organizations/join/${create.json().token}`);
+  assert.equal(
+    join.statusCode, 403,
+    'a free account in org_members inherits the org plan for every quota gate, so it must not be admitted');
+  assert.equal(join.json().error, 'plan_upgrade_required');
+
+  const { rows } = await query('SELECT 1 FROM org_members WHERE org_id=$1 AND account_id=$2', ['org-invite-2', 'inv-free-joiner']);
+  assert.equal(rows.length, 0, 'no membership row may be left behind by a refused join');
 });

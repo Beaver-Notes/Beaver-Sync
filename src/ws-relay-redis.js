@@ -37,7 +37,7 @@ function init(rooms, localBroadcast) {
       const buf = Buffer.from(payload, 'base64');
       // remote instance already broadcast locally via localBroadcast; just fan out here
       const u8 = new Uint8Array(buf);
-      localBroadcast(documentName, u8, null);
+      localBroadcast(documentName, u8, null, true);
     } catch {}
   });
 

@@ -44,7 +44,8 @@ async function post(app, url, payload, headers = {}) {
   return app.inject({
     method: 'POST',
     url,
-    headers: { 'content-type': 'application/json', ...headers },
+    // The relay presents this on every call (src/ws-relay-auth.js); the endpoint 503s without it.
+    headers: { 'content-type': 'application/json', 'x-internal-secret': process.env.INTERNAL_API_SECRET, ...headers },
     payload,
   });
 }

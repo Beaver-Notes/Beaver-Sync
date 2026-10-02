@@ -4,6 +4,7 @@ require('dotenv').config();
 
 const Fastify = require('fastify');
 const { getDb } = require('./db');
+const { hashSessionId } = require('./lib/crypto');
 
 // Crash-safety: a floating promise or thrown sync error must never vanish
 // without a trace. uncaughtException exits (state is undefined); unhandledRejection
@@ -78,6 +79,21 @@ function validateRequiredEnv() {
 }
 
 validateRequiredEnv();
+
+// The limiter runs on the plugin default hook (onRequest), which fires before
+// authenticate, so req.userId is never set here and the old `req.userId || req.ip`
+// key silently collapsed to the IP: every account behind one NAT, CGNAT or corporate
+// egress shared a bucket, so one client could lock out everyone else on that IP.
+// Key on an HMAC of the presented credential instead. The token never reaches the
+// rate-limit backend in the clear, and a caller with no credential still falls back
+// to the IP, which is what a login-attempt limit wants anyway.
+function rateLimitKey(req) {
+  if (req.userId) return `u:${req.userId}`;
+  const auth = req.headers?.authorization;
+  const raw = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : req.cookies?.bsession;
+  if (raw) return `c:${hashSessionId(`ratelimit:${raw}`)}`;
+  return `ip:${req.ip}`;
+}
 
 async function buildApp() {
   const { initErrorMonitoring } = require('./lib/error-monitoring');
@@ -198,7 +214,7 @@ async function buildApp() {
   await app.register(require('@fastify/rate-limit'), {
     max: parseInt(process.env.API_RATE_LIMIT_PER_MINUTE ?? '120'),
     timeWindow: '1 minute',
-    keyGenerator: (req) => req.userId || req.ip,
+    keyGenerator: rateLimitKey,
     ...(redisClient ? { redis: redisClient, nameSpace: 'beaver-ratelimit-', skipOnError: true } : {}),
     errorResponseBuilder: (_req, context) => ({
       statusCode: context.ban ? 403 : 429,

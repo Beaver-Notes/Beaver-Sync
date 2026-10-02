@@ -21,8 +21,14 @@ const baseRateLimit = {
 };
 
 async function requireCollaborator(noteId, userId) {
-  const invite = await NoteInvitation.findOne({ noteId, userId }).lean();
-  return !!invite;
+  return NoteInvitation.findOne({ noteId, userId }).lean();
+}
+
+// Reading and writing a comment of your own is open to every collaborator
+// (editor or viewer), but resolving is a note-level decision: same gate as
+// activity.js isEditor and collaboration.js requireNoteApprover.
+function isEditor(invite) {
+  return !!invite && invite.role === 'editor';
 }
 
 async function commentRoutes(app) {
@@ -176,8 +182,12 @@ async function commentRoutes(app) {
       return reply.status(404).send({ error: 'not_found', message: 'Comment not found.' });
     }
 
-    if (!await requireCollaborator(existing.noteId, req.userId)) {
+    const invite = await requireCollaborator(existing.noteId, req.userId);
+    if (!invite) {
       return reply.status(403).send({ error: 'forbidden', message: 'Not a collaborator on this note.' });
+    }
+    if (!isEditor(invite)) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Only editors can resolve comments.' });
     }
 
     const newResolved = existing.resolved ? 0 : 1;

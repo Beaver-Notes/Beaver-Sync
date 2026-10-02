@@ -133,14 +133,18 @@ async function authRoutes(app) {
     },
   }, async (req, reply) => {
     const internalSecret = process.env.INTERNAL_API_SECRET;
-    if (internalSecret) {
-      const providedSecret = req.headers['x-internal-secret'];
-      if (!providedSecret || !timingSafeEqualStr(providedSecret, internalSecret)) {
-        return reply.status(403).send({
-          error: 'forbidden',
-          message: 'Internal API access denied.',
-        });
-      }
+    if (!internalSecret) {
+      return reply.status(503).send({
+        error: 'internal_api_unavailable',
+        message: 'Internal API is not configured.',
+      });
+    }
+    const providedSecret = req.headers['x-internal-secret'];
+    if (!providedSecret || !timingSafeEqualStr(providedSecret, internalSecret)) {
+      return reply.status(403).send({
+        error: 'forbidden',
+        message: 'Internal API access denied.',
+      });
     }
 
     const { token, workspaceId, noteId } = req.body ?? {};
@@ -201,6 +205,16 @@ async function authRoutes(app) {
     },
   }, async (req, reply) => {
     const { workspaceId, noteId } = req.body ?? {};
+    // A ticket is bound to one room, so the room must be named at mint time.
+    // Without this an empty body resolves to no role, the ticket is stored with
+    // role NULL, and the relay's `role ?? 'editor'` default grants write access
+    // to whatever room the client then puts in the URL.
+    if (typeof workspaceId !== 'string' || workspaceId.length === 0) {
+      return reply.status(400).send({ error: 'invalid_request', message: 'Valid workspaceId required.' });
+    }
+    if (noteId !== undefined && (typeof noteId !== 'string' || noteId.length === 0)) {
+      return reply.status(400).send({ error: 'invalid_request', message: 'Invalid noteId.' });
+    }
     const resolved = await resolveAuthRole(req.userId, workspaceId, noteId);
     if (resolved.error) {
       return reply.status(resolved.error.status).send(resolved.error.payload);
@@ -211,8 +225,8 @@ async function authRoutes(app) {
     const { hashSessionId } = require('../lib/crypto');
     await getDb().query('DELETE FROM ws_tickets WHERE expires_at < NOW()');
     await getDb().query(
-      'INSERT INTO ws_tickets (id_hash, account_id, device_id, role, expires_at) VALUES ($1,$2,$3,$4, NOW() + make_interval(secs => $5))',
-      [hashSessionId(`ws-ticket:${ticket}`), req.userId, req.sessionDeviceId ?? null, resolved.role ?? null, ttlSeconds]
+      'INSERT INTO ws_tickets (id_hash, account_id, device_id, role, workspace_id, note_id, expires_at) VALUES ($1,$2,$3,$4,$5,$6, NOW() + make_interval(secs => $7))',
+      [hashSessionId(`ws-ticket:${ticket}`), req.userId, req.sessionDeviceId ?? null, resolved.role ?? null, workspaceId, noteId ?? null, ttlSeconds]
     );
     return reply.send({ ticket });
   });
@@ -225,11 +239,12 @@ async function authRoutes(app) {
     },
   }, async (req, reply) => {
     const internalSecret = process.env.INTERNAL_API_SECRET;
-    if (internalSecret) {
-      const providedSecret = req.headers['x-internal-secret'];
-      if (!providedSecret || !timingSafeEqualStr(providedSecret, internalSecret)) {
-        return reply.status(403).send({ error: 'forbidden', message: 'Internal API access denied.' });
-      }
+    if (!internalSecret) {
+      return reply.status(503).send({ error: 'internal_api_unavailable', message: 'Internal API is not configured.' });
+    }
+    const providedSecret = req.headers['x-internal-secret'];
+    if (!providedSecret || !timingSafeEqualStr(providedSecret, internalSecret)) {
+      return reply.status(403).send({ error: 'forbidden', message: 'Internal API access denied.' });
     }
     const { ticket } = req.body ?? {};
     if (!ticket || typeof ticket !== 'string' || ticket.length < 16) {
@@ -238,14 +253,20 @@ async function authRoutes(app) {
     const { getDb } = require('../db');
     const { hashSessionId } = require('../lib/crypto');
     const consumed = await getDb().query(
-      'DELETE FROM ws_tickets WHERE id_hash = $1 AND expires_at > NOW() RETURNING account_id, device_id, role',
+      'DELETE FROM ws_tickets WHERE id_hash = $1 AND expires_at > NOW() RETURNING account_id, device_id, role, workspace_id, note_id',
       [hashSessionId(`ws-ticket:${ticket}`)]
     );
     if (consumed.rows.length === 0) {
       return reply.status(401).send({ error: 'invalid_ticket', message: 'Ticket is invalid, used, or expired.' });
     }
     const row = consumed.rows[0];
-    const out = { userId: row.account_id };
+    // The room is part of the ticket so the relay can refuse a cross-tenant
+    // redemption. Older rows predate the columns; they are refused rather than
+    // trusted, since an unbound ticket is exactly what this check exists to stop.
+    if (!row.workspace_id) {
+      return reply.status(401).send({ error: 'invalid_ticket', message: 'Ticket is invalid, used, or expired.' });
+    }
+    const out = { userId: row.account_id, workspaceId: row.workspace_id, noteId: row.note_id ?? null };
     if (row.device_id) out.deviceId = row.device_id;
     if (row.role) out.role = row.role;
     return reply.send(out);

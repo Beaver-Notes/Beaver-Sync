@@ -3,8 +3,8 @@
 // Contract tests for the ws-relay <-> api auth boundary:
 //   POST /auth/verify-session, POST /auth/ws-ticket, POST /auth/verify-ticket,
 //   POST /sso/exchange.
-// INTERNAL_API_SECRET is read per-request inside the handlers, so both the
-// set and unset branches run in one process by flipping process.env.
+// INTERNAL_API_SECRET is read per-request inside the handlers, so the set/unset
+// branches both run in one process by flipping process.env.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -20,8 +20,6 @@ process.env.ENTERPRISE_MODE = 'false';
 process.env.VERIFY_SESSION_RATE_LIMIT_PER_MINUTE = '1000';
 process.env.WS_TICKET_RATE_LIMIT_PER_MINUTE = '1000';
 
-delete process.env.INTERNAL_API_SECRET;
-
 const { close } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { register, seedAccount, seedWorkspace } = require('./helpers/factory');
@@ -30,16 +28,17 @@ const { createSession } = require('../src/middleware/auth');
 const models = require('../src/models');
 
 const SECRET = 'contract-test-internal-secret';
+// The relay auth endpoints 503 unless this is set; setupTestDb() pins a value and
+// every call below presents it.
+process.env.INTERNAL_API_SECRET = SECRET;
 
 let app;
 
+// `x-internal-secret: undefined` is how a case asks for no header at all.
 function post(body, headers = {}) {
-  return app.inject({
-    method: 'POST',
-    url: '/auth/verify-session',
-    headers: { 'content-type': 'application/json', ...headers },
-    payload: body,
-  });
+  const merged = { 'content-type': 'application/json', 'x-internal-secret': SECRET, ...headers };
+  for (const [k, v] of Object.entries(merged)) if (v === undefined) delete merged[k];
+  return app.inject({ method: 'POST', url: '/auth/verify-session', headers: merged, payload: body });
 }
 
 test.before(async () => {
@@ -54,11 +53,10 @@ test.before(async () => {
 
 test.after(async () => {
   await app.close();
-  delete process.env.INTERNAL_API_SECRET;
   await close();
 });
 
-// --- Phase 1: INTERNAL_API_SECRET unset -------------------------------------
+// --- Happy paths with the internal secret presented --------------------------
 
 test('valid session + workspaceId returns { userId, role, deviceId }', async () => {
   const token = await createSession('contract-user', { headers: { 'x-device-id': 'contract-device' } });
@@ -109,14 +107,11 @@ test('missing body token returns 400 invalid_request', async () => {
   assert.equal(res.json().error, 'invalid_request');
 });
 
-// --- Phase 2: INTERNAL_API_SECRET set ---------------------------------------
-
-test('with secret set: missing/incorrect x-internal-secret is 403, correct passes', async () => {
-  process.env.INTERNAL_API_SECRET = SECRET;
+test('missing/incorrect x-internal-secret is 403, correct passes', async () => {
   try {
     const token = await createSession('contract-user', {});
 
-    const noHeader = await post({ token, workspaceId: 'contract-ws' });
+    const noHeader = await post({ token, workspaceId: 'contract-ws' }, { 'x-internal-secret': undefined });
     assert.equal(noHeader.statusCode, 403);
     assert.equal(noHeader.json().error, 'forbidden');
 
@@ -133,7 +128,9 @@ test('with secret set: missing/incorrect x-internal-secret is 403, correct passe
     assert.equal(ok.statusCode, 200);
     assert.deepEqual(ok.json(), { userId: 'contract-user', role: 'owner', deviceId: null });
   } finally {
-    delete process.env.INTERNAL_API_SECRET;
+    // The relay auth endpoints 503 unless this is set; setupTestDb() pins a value, and
+// every call below presents it.
+process.env.INTERNAL_API_SECRET = SECRET;
   }
 });
 
@@ -155,7 +152,7 @@ test('ws-ticket + verify-ticket round trip; redemption is single-use', async () 
   const redeem = await app.inject({
     method: 'POST',
     url: '/auth/verify-ticket',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-internal-secret': SECRET },
     payload: { ticket },
   });
   assert.equal(redeem.statusCode, 200);
@@ -168,7 +165,7 @@ test('ws-ticket + verify-ticket round trip; redemption is single-use', async () 
   const second = await app.inject({
     method: 'POST',
     url: '/auth/verify-ticket',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-internal-secret': SECRET },
     payload: { ticket },
   });
   assert.equal(second.statusCode, 401);
@@ -203,7 +200,9 @@ test('verify-ticket honors x-internal-secret when set', async () => {
     });
     assert.equal(allowed.statusCode, 200);
   } finally {
-    delete process.env.INTERNAL_API_SECRET;
+    // The relay auth endpoints 503 unless this is set; setupTestDb() pins a value, and
+// every call below presents it.
+process.env.INTERNAL_API_SECRET = SECRET;
   }
 });
 

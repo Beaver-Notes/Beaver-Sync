@@ -28,12 +28,48 @@ const { createSession } = require('../src/middleware/auth');
 
 const WS_PORT = 18081;
 const MSG_SYNC = 0;
+const MSG_AWARENESS = 1;
+
+function encodeAwareness(entries) {
+  const outer = encoding.createEncoder();
+  encoding.writeVarUint(outer, MSG_AWARENESS);
+  const inner = encoding.createEncoder();
+  encoding.writeVarUint(inner, entries.length);
+  for (const [clientID, clock, state] of entries) {
+    encoding.writeVarUint(inner, clientID);
+    encoding.writeVarUint(inner, clock);
+    encoding.writeVarString(inner, JSON.stringify(state));
+  }
+  encoding.writeVarUint8Array(outer, encoding.toUint8Array(inner));
+  return encoding.toUint8Array(outer);
+}
+
+// Decode one relay frame into a map of clientID -> { clock, state }. Returns
+// null for anything that is not an awareness frame.
+function awarenessFrom(bytes) {
+  try {
+    const d = decoding.createDecoder(bytes);
+    if (decoding.readVarUint(d) !== MSG_AWARENESS) return null;
+    const inner = decoding.createDecoder(decoding.readVarUint8Array(d));
+    const len = decoding.readVarUint(inner);
+    const out = new Map();
+    for (let i = 0; i < len; i++) {
+      const clientID = decoding.readVarUint(inner);
+      const clock = decoding.readVarUint(inner);
+      out.set(clientID, { clock, state: decoding.readVarString(inner) });
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
 
 async function post(app, url, payload, headers = {}) {
   return app.inject({
     method: 'POST',
     url,
-    headers: { 'content-type': 'application/json', ...headers },
+    // The relay presents this on every call (src/ws-relay-auth.js); the endpoint 503s without it.
+    headers: { 'content-type': 'application/json', 'x-internal-secret': process.env.INTERNAL_API_SECRET, ...headers },
     payload,
   });
 }
@@ -280,7 +316,7 @@ test('relay e2e: REST push triggers second-client JSON notification', async () =
 
 test('negative: expired ticket rejected', async () => {
   const session = await createSession('e2e-owner', { headers: { 'x-device-id': 'dev-owner' } });
-  const tr = await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e' }, { authorization: `Bearer ${session}` });
+  const tr = await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-1' }, { authorization: `Bearer ${session}` });
   assert.equal(tr.statusCode, 200);
   const ticket = tr.json().ticket;
   const { hashSessionId } = require('../src/lib/crypto');
@@ -294,7 +330,7 @@ test('negative: expired ticket rejected', async () => {
 
 test('negative: replayed ticket rejected', async () => {
   const session = await createSession('e2e-owner', { headers: { 'x-device-id': 'dev-owner' } });
-  const tr = await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e' }, { authorization: `Bearer ${session}` });
+  const tr = await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-1' }, { authorization: `Bearer ${session}` });
   const ticket = tr.json().ticket;
   const ws1 = await connectWs(wsUrl('workspace:ws-e2e:note:note-1', ticket, true));
   await waitForJson(ws1, 'auth');
@@ -302,6 +338,46 @@ test('negative: replayed ticket rejected', async () => {
   const code = await expectWsUpgradeFail(wsUrl('workspace:ws-e2e:note:note-1', ticket, true));
   assert.ok([401,403,1006].includes(code), `replay should be 401/403 got ${code}`);
   ws1.close();
+});
+
+// A ticket must be redeemable for exactly one room. Before this guard a ticket
+// minted with an empty body carried role NULL, and the relay's `role ??
+// 'editor'` default turned it into write access on any room in any workspace.
+test('negative: a ticket is bound to the room it was minted for', async () => {
+  // A real member of ws-e2e: every mint below is legitimately authorised, so
+  // only the room binding can be what rejects the cross-room redemptions.
+  const owner = await createSession('e2e-owner', { headers: { 'x-device-id': 'dev-owner' } });
+  const auth = { authorization: `Bearer ${owner}` };
+
+  // An empty body must not mint a ticket at all.
+  const empty = await post(app, '/auth/ws-ticket', {}, auth);
+  assert.equal(empty.statusCode, 400);
+
+  // A legitimate ticket for ws-e2e / note-1 still works.
+  const ok = await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-1' }, auth);
+  assert.equal(ok.statusCode, 200);
+  const ticket = ok.json().ticket;
+
+  // The room it was minted for is accepted…
+  const ws = await connectWs(wsUrl('workspace:ws-e2e:note:note-1', ticket, true));
+  const authMsg = await waitForJson(ws, 'auth');
+  assert.equal(authMsg.readOnly, false);
+  ws.close();
+
+  // …but the same mint cannot be redeemed against another note in that
+  // workspace, against the foreign workspace, or against the meta room.
+  // Each attempt needs its own ticket: redemption is single-use, and a rejected
+  // redemption still consumes it.
+  for (const room of [
+    'workspace:ws-e2e:note:note-viewer-test',
+    'workspace:ws-foreign:note:note-foreign',
+    'workspace:ws-e2e:meta',
+  ]) {
+    const t = await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-1' }, auth);
+    assert.equal(t.statusCode, 200);
+    const code = await expectWsUpgradeFail(wsUrl(room, t.json().ticket, true));
+    assert.ok([401, 403, 1006].includes(code), `${room} should be rejected, got ${code}`);
+  }
 });
 
 test('negative: foreign-workspace join regression (03.3) - token path blocked', async () => {
@@ -393,4 +469,56 @@ test('deviceId exclusion: same device sockets not notified, other device notifie
   assert.equal(wsA2._jsonBuf.filter(m=>m.type==='notification').length, 0, 'dev-a socket 2 excluded');
 
   wsA1.close(); wsA2.close(); wsB.close();
+});
+
+// Awareness is shared room state, and the relay attributes a clientID to the
+// socket that last published it. Without an ownership check any socket can
+// claim another socket's clientID with a higher clock and then, on disconnect,
+// have that state removed. (relay e2e: hijack + wipe-on-disconnect)
+test('awareness: a socket cannot claim or erase a clientID another live socket owns', async () => {
+  const OWNER_ID = 900111;
+  const VIEWER_ID = 900222;
+
+  const sessOwner = await createSession('e2e-owner', { headers: { 'x-device-id': 'dev-aw-owner' } });
+  const tOwner = (await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-viewer-test' }, { authorization: `Bearer ${sessOwner}` })).json().ticket;
+  const sessViewer = await createSession('e2e-viewer', { headers: { 'x-device-id': 'dev-aw-viewer' } });
+  const tViewer = (await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-viewer-test' }, { authorization: `Bearer ${sessViewer}` })).json().ticket;
+
+  const room = 'workspace:ws-e2e:note:note-viewer-test';
+  const owner = await connectWs(wsUrl(room, tOwner, true));
+  await waitForJson(owner, 'auth');
+
+  owner.send(encodeAwareness([[OWNER_ID, 1, { name: 'OWNER-REAL' }]]));
+  const echoed = await waitForBinary(owner, (b) => awarenessFrom(b)?.get(OWNER_ID)?.state === '{"name":"OWNER-REAL"}');
+  assert.ok(echoed, 'CONTROL: a socket must receive its own awareness state');
+
+  const viewer = await connectWs(wsUrl(room, tViewer, true));
+  assert.equal((await waitForJson(viewer, 'auth')).readOnly, true);
+
+  // Hijack: the same clientID with a clock high enough to win the merge.
+  const mark = owner._binBuf.length;
+  viewer.send(encodeAwareness([[OWNER_ID, 99, { name: 'HIJACKED' }]]));
+  await new Promise((r) => setTimeout(r, 800));
+  const hijacked = owner._binBuf.slice(mark).some((b) => {
+    const m = awarenessFrom(new Uint8Array(b));
+    return m?.has(OWNER_ID) && m.get(OWNER_ID).state.includes('HIJACKED');
+  });
+  assert.equal(hijacked, false, "a socket must not overwrite another socket's awareness state");
+
+  // A read-only socket may still publish its own presence.
+  viewer.send(encodeAwareness([[VIEWER_ID, 1, { name: 'VIEWER' }]]));
+  const own = await waitForBinary(owner, (b) => awarenessFrom(b)?.has(VIEWER_ID), 3000).catch(() => null);
+  assert.ok(own, 'a read-only socket must still be able to publish its own presence');
+
+  // Disconnecting must not remove state that belongs to another socket.
+  const mark2 = owner._binBuf.length;
+  viewer.close();
+  await new Promise((r) => setTimeout(r, 800));
+  const wiped = owner._binBuf.slice(mark2).some((b) => {
+    const m = awarenessFrom(new Uint8Array(b));
+    return m?.has(OWNER_ID) && m.get(OWNER_ID).state === 'null';
+  });
+  assert.equal(wiped, false, "a viewer disconnect must not erase another clientID's presence");
+
+  owner.close();
 });

@@ -18,7 +18,12 @@ const rateLimit = {
   bodyLimit: BODY_LIMIT,
 };
 
-async function requirePlanAndOwner(app, req, reply, workspaceId) {
+// Owner-only gate for the workspace-scoped admin surface, shared with /audit so
+// the two cannot drift again. minPlan is the least tier that passes: the admin
+// surface is team+, the audit log is enterprise-only (plans.js flags.audit).
+const PLAN_MINIMUM = { team: ['team', 'enterprise'], enterprise: ['enterprise'] };
+
+async function requirePlanAndOwner(app, req, reply, workspaceId, minPlan = 'team') {
   const ws = await Workspace.findById(workspaceId, { nameEncrypted: 1, orgId: 1 }).lean();
   if (!ws) {
     return reply.status(404).send({ error: 'not_found', message: 'Workspace not found.' });
@@ -30,8 +35,9 @@ async function requirePlanAndOwner(app, req, reply, workspaceId) {
     sub = await Subscription.findOne({ accountId: req.userId }).lean();
     const orgSub = ws.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
     const effectivePlan = resolvePlanForAccount({ orgSub, sub });
-    if (!effectivePlan || (effectivePlan !== 'team' && effectivePlan !== 'enterprise')) {
-      return reply.status(403).send({ error: 'forbidden', message: 'Admin routes require a Team or Enterprise plan.' });
+    const allowed = PLAN_MINIMUM[minPlan] ?? PLAN_MINIMUM.team;
+    if (!effectivePlan || !allowed.includes(effectivePlan)) {
+      return reply.status(403).send({ error: 'forbidden', message: `This route requires ${allowed.join(' or ')} plan access.` });
     }
   }
 
@@ -180,9 +186,15 @@ async function adminRoutes(app) {
     }
 
     if (!isEnterpriseMode()) {
-      const { Subscription } = require('../models');
+      // Org-first, like the gate at admin.js:33. Reading only the account subscription
+      // refuses a workspace owner whose team plan is carried by the org subscription,
+      // which is how every team org is provisioned.
+      const { Subscription, OrgSubscription } = require('../models');
       const sub = await Subscription.findOne({ accountId: req.userId }).lean();
-      if (!sub || (sub.plan !== 'team' && sub.plan !== 'enterprise')) {
+      const ws = await Workspace.findById(req.params.id, { orgId: 1 }).lean();
+      const orgSub = ws?.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
+      const plan = resolvePlanForAccount({ orgSub, sub });
+      if (plan !== 'team' && plan !== 'enterprise') {
         return reply.status(403).send({ error: 'forbidden', message: 'Team or Enterprise plan required.' });
       }
     }
@@ -274,3 +286,4 @@ async function adminRoutes(app) {
 }
 
 module.exports = adminRoutes;
+module.exports.requirePlanAndOwner = requirePlanAndOwner;

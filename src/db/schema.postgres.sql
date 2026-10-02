@@ -30,12 +30,20 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_expires_at TIMESTAMPT
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_last_timestep BIGINT;
 
 CREATE TABLE IF NOT EXISTS ws_tickets (
-  id_hash    TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  device_id  TEXT,
-  role       TEXT,
-  expires_at TIMESTAMPTZ NOT NULL
+  id_hash       TEXT PRIMARY KEY,
+  account_id    TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  device_id     TEXT,
+  role          TEXT,
+  workspace_id  TEXT,
+  note_id       TEXT,
+  expires_at    TIMESTAMPTZ NOT NULL
 );
+
+-- A ws-ticket is redeemable for exactly one room. Without these columns the
+-- relay takes the room from the client URL path alone, so any authenticated
+-- account could mint a ticket with an empty body and get editor on any room.
+ALTER TABLE ws_tickets ADD COLUMN IF NOT EXISTS workspace_id TEXT;
+ALTER TABLE ws_tickets ADD COLUMN IF NOT EXISTS note_id TEXT;
 
 CREATE TABLE IF NOT EXISTS mfa_challenges (
   id_hash    TEXT PRIMARY KEY,

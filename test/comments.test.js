@@ -69,6 +69,33 @@ test('deleting a comment never cascades into another user\'s reply', async (t) =
   assert.equal(replyAfter.parentId, rootId);
 });
 
+test('only an editor collaborator can resolve a comment', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const author = await register('pro');
+  const viewer = await register('pro');
+  const noteId = 'note-comment-resolve-role';
+  await models.NoteInvitation.create({ noteId, userId: author.id, invitedBy: author.id, role: 'editor', createdAt: new Date() });
+  await models.NoteInvitation.create({ noteId, userId: viewer.id, invitedBy: author.id, role: 'viewer', createdAt: new Date() });
+  const authorHeaders = await authHeaders(author.id);
+  const viewerHeaders = await authHeaders(viewer.id);
+
+  const comment = await app.inject({ method: 'POST', url: `/comments/${noteId}`, headers: authorHeaders, payload: { contentEncrypted: 'c', contentIv: 'i' } });
+  assert.equal(comment.statusCode, 201, comment.body);
+  const commentId = comment.json().comment.id;
+
+  const resolve = await app.inject({ method: 'PATCH', url: `/comments/${commentId}/resolve`, headers: viewerHeaders });
+  assert.equal(resolve.statusCode, 403, resolve.body);
+  assert.equal((await models.NoteComment.findOne({ _id: commentId }).lean()).resolved, 0, 'a viewer must not resolve');
+
+  const unresolve = await app.inject({ method: 'PATCH', url: `/comments/${commentId}/resolve`, headers: viewerHeaders });
+  assert.equal(unresolve.statusCode, 403, unresolve.body);
+
+  const byEditor = await app.inject({ method: 'PATCH', url: `/comments/${commentId}/resolve`, headers: authorHeaders });
+  assert.equal(byEditor.statusCode, 200, byEditor.body);
+  assert.equal(byEditor.json().resolved, true);
+});
+
 test('a user cannot delete another user\'s comment', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });

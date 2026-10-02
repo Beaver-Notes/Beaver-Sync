@@ -98,7 +98,7 @@ function schedulePersist(documentName) {
   persistTimers.set(documentName, timer);
 }
 
-function broadcastToRoom(documentName, msg, excludeWs) {
+function broadcastToRoom(documentName, msg, excludeWs, fromRelay = false) {
   const room = rooms.get(documentName);
   if (!room) return;
   for (const conn of room.conns) {
@@ -107,7 +107,12 @@ function broadcastToRoom(documentName, msg, excludeWs) {
       try { conn.ws.send(msg); } catch { /* ignore */ }
     }
   }
-  try { redisRelay?.publish(documentName, msg); } catch {}
+  // A message that arrived over Redis already went to every replica. Publishing it
+  // again re-stamps origin with this instance's id, so the self-filter in
+  // ws-relay-redis.js never matches and the fan-out loops until the stack overflows.
+  if (!fromRelay) {
+    try { redisRelay?.publish(documentName, msg); } catch {}
+  }
 }
 
 function sendText(ws, obj) {
@@ -149,6 +154,14 @@ function handleUpgrade(req, socket, head) {
   authPromise
     .then((auth) => {
       const userId = auth.userId;
+      // The ticket is redeemable for exactly one room; a role is always present
+      // because ws-ticket now requires a workspaceId and resolveAuthRole either
+      // returns a role or 403s.
+      if (ticket) {
+        if (auth.workspaceId !== room.workspaceId || (auth.noteId ?? null) !== room.noteId) {
+          throw new Error('Ticket is not valid for this room');
+        }
+      }
       const role = auth.role ?? 'editor';
       const deviceId = auth.deviceId ?? null;
       const readOnly = role === 'viewer' || role === 'guest';

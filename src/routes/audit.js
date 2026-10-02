@@ -1,8 +1,8 @@
 'use strict';
 
-const { AuditLog, WorkspaceMember } = require('../models');
+const { AuditLog } = require('../models');
 const mlkem = require('../lib/mlkem');
-const { isEnterpriseMode } = require('../lib/license');
+const { requirePlanAndOwner } = require('./admin');
 
 const AUDIT_BODY_LIMIT = parseInt(process.env.AUDIT_BODY_LIMIT_BYTES ?? '4096', 10);
 
@@ -26,23 +26,14 @@ async function auditRoutes(app) {
     ...rateLimit,
     ...protect,
   }, async (req, reply) => {
-    if (!isEnterpriseMode()) {
-      const { Subscription } = require('../models');
-      const sub = await Subscription.findOne({ accountId: req.userId }).lean();
-      if (!sub || sub.plan !== 'enterprise') {
-        return reply.status(403).send({ error: 'forbidden', message: 'Audit log requires an Enterprise plan.' });
-      }
-    }
-
     const workspaceId = req.query.workspaceId;
     if (!workspaceId || typeof workspaceId !== 'string') {
       return reply.status(400).send({ error: 'validation_error', message: 'workspaceId query parameter is required.' });
     }
 
-    const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
-    if (!membership) {
-      return reply.status(403).send({ error: 'forbidden', message: 'Not a member of this workspace.' });
-    }
+    // Same gate as the admin audit route: owner-only, plan resolved org-first.
+    // Enterprise-only because plans.js gates the feature on flags.audit.
+    if (!await requirePlanAndOwner(app, req, reply, workspaceId, 'enterprise')) return;
 
     const filter = { workspaceId };
 
