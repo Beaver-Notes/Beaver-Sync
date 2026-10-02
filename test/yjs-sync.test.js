@@ -408,3 +408,55 @@ test('DELETE /yjs/updates removes only the requested keys, not the whole note jo
   assert.equal(wrongNote.statusCode, 400);
   assert.equal(wrongNote.json().error, 'malformed_delete_key');
 });
+
+// Regression: requireWorkspaceWriter returned the truthy reply object on the
+// role branch, so `if (!await ...) return;` fell through on a 403 and the
+// handler deleted journal rows anyway — a viewer caused silent data loss while
+// seeing a 403.
+test('DELETE /yjs/updates is refused for a viewer and deletes nothing', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  await seedAccount('viewer-1');
+  const viewer = await createSession('viewer-1', { headers: { 'x-device-id': 'device-v' } });
+  const base = Date.now();
+  const keyV = `viewer-delete-note~~device-a~~${base}~~1.yjs.json`;
+
+  await request(app, await createSession('account-1', { headers: {} }), '/yjs/push-batch', {
+    workspaceId: 'workspace-1',
+    notes: [{ noteId: 'viewer-delete-note', updates: [{ key: keyV, data: 'YQ==', deviceId: 'device-a', sequence: 1, ts: base }] }],
+  }, 'device-a');
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['workspace-1', 'viewer-1', 'viewer', now]);
+
+  const del = await app.inject({
+    method: 'DELETE',
+    url: '/yjs/updates',
+    // device-a is the header the key's device matches: a viewer who knows the
+    // key format clears the device_id_mismatch check at yjs-sync.js:356, so the
+    // membership/role gate is the only thing standing between them and a delete.
+    headers: { authorization: `Bearer ${viewer}`, 'content-type': 'application/json', 'x-device-id': 'device-a' },
+    payload: { workspaceId: 'workspace-1', noteId: 'viewer-delete-note', keys: [keyV] },
+  });
+  assert.equal(del.statusCode, 403);
+  assert.equal(del.json().error, 'workspace_write_forbidden');
+
+  const rows = (await query('SELECT device_id FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2', ['workspace-1', 'viewer-delete-note'])).rows;
+  assert.deepEqual(rows.map((r) => r.device_id), ['device-a']);
+});
+
+// Same truthy-reply trap on the membership branch: a non-member must not reach
+// the note-ids query.
+test('GET /yjs/note-ids is refused for a non-member and returns nothing', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  await seedAccount('outsider-1');
+  const outsider = await createSession('outsider-1', { headers: {} });
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/yjs/note-ids?workspaceId=workspace-1',
+    headers: { authorization: `Bearer ${outsider}` },
+  });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json().error, 'not_workspace_member');
+  assert.equal(res.json().noteIds, undefined);
+});

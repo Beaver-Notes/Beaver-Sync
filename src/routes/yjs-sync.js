@@ -2,7 +2,7 @@
 
 const { z } = require('zod');
 const persistence = require('../persistence/yjs');
-const { Device } = require('../models');
+const { Device, NoteInvitation, WorkspaceMember } = require('../models');
 const { audit } = require('../lib/audit');
 const { isFreePlan } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
@@ -121,6 +121,61 @@ function summarizeStoredBatch(result) {
 // Cloud sync is collaboration-only on the free plan: a free account may sync a
 // workspace only when invited as a non-owner member, so an owner of a workspace
 // hits this wall with an explicit 402 instead of a silently empty journal.
+// Notes an account was invited to individually (a "shared note": collaborator
+// on one note, not a member of the workspace that holds it). Used to authorize
+// push/pull of those notes without granting workspace membership.
+async function invitedNoteIds(userId, noteIds) {
+  if (!Array.isArray(noteIds) || noteIds.length === 0) return new Set();
+  const rows = await NoteInvitation.find(
+    { userId, noteId: { $in: noteIds } }
+  ).lean();
+  return new Set(rows.map((r) => r.noteId));
+}
+
+// Verifies the note actually lives in `workspaceId`'s journal, so an invitation
+// cannot be used to touch the same note id in a different workspace.
+async function notesOwnedByWorkspace(noteIds, workspaceId) {
+  if (!Array.isArray(noteIds) || noteIds.length === 0) return new Set();
+  const { rows } = await getPool().query(`
+    SELECT DISTINCT note_id FROM (
+      SELECT note_id FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = ANY($2)
+      UNION ALL
+      SELECT note_id FROM sync_document_state WHERE workspace_id = $1 AND note_id = ANY($2)
+    ) t
+  `, [workspaceId, noteIds]);
+  return new Set(rows.map((r) => r.note_id));
+}
+
+// A caller may push/pull a workspace's notes when they are a MEMBER of it, or
+// when EVERY note they touch is one they were individually invited to and that
+// note lives in this workspace. Returns the member row on the member path
+// (so downstream role checks still run), or the string 'invited', or null
+// (reply already sent with a 403).
+async function requireNoteAccess(req, reply, workspaceId, noteIds, { write }) {
+  // Look the membership up directly: the shared requireWorkspace* helpers send
+  // their own 403, which would short-circuit the invited fallback below.
+  const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
+  if (membership) {
+    if (!write || ['owner', 'editor'].includes(membership.role)) return membership;
+    reply.status(403).send({ error: 'workspace_write_forbidden' });
+    return null;
+  }
+
+  // Not a member: allow only if the caller is invited to every note in the
+  // batch, and each note belongs to this workspace.
+  const invited = await invitedNoteIds(req.userId, noteIds);
+  if (invited.size !== noteIds.length) {
+    reply.status(403).send({ error: 'not_workspace_member' });
+    return null;
+  }
+  const owned = await notesOwnedByWorkspace([...invited], workspaceId);
+  if (owned.size !== noteIds.length) {
+    reply.status(403).send({ error: 'note_workspace_mismatch' });
+    return null;
+  }
+  return 'invited';
+}
+
 async function requirePaidWorkspaceOwner(req, reply, membership) {
   if (isEnterpriseMode()) return true;
   if (membership?.role !== 'owner') return true;
@@ -158,7 +213,7 @@ async function yjsSyncRoutes(app) {
       return reply.status(403).send({ error: 'device_session_mismatch' });
     }
     const { workspaceId, notes } = parsed.data;
-    const membership = await requireWorkspaceWriter(req, reply, workspaceId);
+    const membership = await requireNoteAccess(req, reply, workspaceId, notes.map((n) => n.noteId), { write: true });
     if (!membership) return;
     if (!await requirePaidWorkspaceOwner(req, reply, membership)) return;
     req.workspaceId = workspaceId;
@@ -244,7 +299,7 @@ async function yjsSyncRoutes(app) {
     const parsed = BatchPullSchema.safeParse(req.body ?? {});
     if (!parsed.success) return validationError(reply, parsed);
     const { workspaceId, notes } = parsed.data;
-    const membership = await requireWorkspaceMember(req, reply, workspaceId);
+    const membership = await requireNoteAccess(req, reply, workspaceId, notes.map((n) => n.noteId), { write: false });
     if (!membership) return;
     if (!await requirePaidWorkspaceOwner(req, reply, membership)) return;
 

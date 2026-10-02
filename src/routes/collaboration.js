@@ -1035,6 +1035,42 @@ async function collaborationRoutes(app) {
     );
     return reply.send({ denied: true, noteId: request.note_id, userId: request.account_id });
   });
+
+  // Notes the caller was invited to as a collaborator but does not necessarily
+  // own a workspace for (a "shared note": invited to one note, not a member of
+  // the workspace that holds it). The client uses this to materialise the note
+  // locally, recover its key, and sync it against its owning workspace.
+  app.get('/shared-with-me', {
+    ...baseRateLimit,
+    ...protect,
+  }, async (req, reply) => {
+    const invitations = await NoteInvitation.find({ userId: req.userId }).lean();
+
+    // A note may not have been pushed to the server yet, so its owning workspace
+    // can be unknown; return null and let the client fall back.
+    const noteIds = invitations.map((i) => i.noteId).filter(Boolean);
+    const ownerByNote = new Map();
+    if (noteIds.length > 0) {
+      const { rows } = await query(`
+        SELECT note_id, MIN(workspace_id) AS workspace_id FROM (
+          SELECT note_id, workspace_id FROM yjs_doc_updates WHERE note_id = ANY($1)
+          UNION ALL
+          SELECT note_id, workspace_id FROM sync_document_state WHERE note_id = ANY($1)
+        ) t GROUP BY note_id
+      `, [noteIds]);
+      for (const row of rows) ownerByNote.set(row.note_id, row.workspace_id);
+    }
+
+    return reply.send({
+      shared: invitations.map((i) => ({
+        noteId: i.noteId,
+        role: i.role,
+        invitedBy: i.invitedBy ?? null,
+        createdAt: i.createdAt ?? null,
+        workspaceId: ownerByNote.get(i.noteId) ?? null,
+      })),
+    });
+  });
 }
 
 module.exports = collaborationRoutes;

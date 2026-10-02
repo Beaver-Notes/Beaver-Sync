@@ -2,7 +2,7 @@ version: '3.9'
 
 # Beaver Sync - Docker Compose (test / staging environment)
 #
-# Prod-mode stack for manual verification of a seeded tier:
+# Prod-mode stack for manual verification of a seeded tier:B
 #   PLAN_OVERRIDE=team npm run seed:tier -- team tester@example.com 'TestPassword123!'
 #   docker compose -f docker-compose.test.yml up -d
 #
@@ -36,41 +36,25 @@ services:
       timeout: 5s
       retries: 5
 
-  # MinIO (default self-hosted object storage)
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-02-28T09-55-16Z
-    container_name: beaver-sync-test-minio
+  # SeaweedFS (local S3-compatible object storage; free + self-hosted)
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.71
+    container_name: beaver-sync-test-seaweedfs
     restart: unless-stopped
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    command: server /data --console-address ":9001"
+    command: server -dir=/data -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json
     volumes:
-      - test_minio_data:/data
+      - test_seaweed_data:/data
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
     ports:
       - "0.0.0.0:9000:9000"
-      - "0.0.0.0:9001:9001"
     networks:
       - beaver-internal
     healthcheck:
-      test: ["CMD-SHELL", "mc ready local"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9333/cluster/status || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
-
-  minio-setup:
-    image: quay.io/minio/mc:RELEASE.2025-02-21T16-00-46Z
-    container_name: beaver-sync-test-minio-setup
-    depends_on:
-      minio:
-        condition: service_started
-    restart: "no"
-    entrypoint: >
-      /bin/sh -c "
-      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin}; do sleep 1; done &&
-      mc mb --ignore-existing local/${MINIO_BUCKET_NAME:-beaver-sync}"
-    networks:
-      - beaver-internal
+      retries: 10
+      start_period: 20s
 
   # API Server
   api:
@@ -82,7 +66,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio:
+      seaweedfs:
         condition: service_healthy
     env_file:
       - path: .env
@@ -100,12 +84,12 @@ services:
       COOKIE_SECRET: ${COOKIE_SECRET:-ci-smoke-cookie-secret-32-chars-long!!!}
       NOTE_HMAC_KEY: ${NOTE_HMAC_KEY:-ci-smoke-note-hmac-key-32-chars-long!!}
       INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
-      STORAGE_BACKEND: ${STORAGE_BACKEND:-minio}
-      STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://minio:9000}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-s3}
+      STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://seaweedfs:9000}
       STORAGE_PUBLIC_ENDPOINT: ${STORAGE_PUBLIC_ENDPOINT:-http://${LAN_IP:-localhost}:9000}
       STORAGE_BUCKET_NAME: ${STORAGE_BUCKET_NAME:-beaver-sync}
-      STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID:-minioadmin}
-      STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:-minioadmin}
+      STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID:-beaver}
+      STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:-beaver-dev-secret}
       STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
       STORAGE_FORCE_PATH_STYLE: ${STORAGE_FORCE_PATH_STYLE:-true}
       LEGACY_AUTH_ENABLED: ${LEGACY_AUTH_ENABLED:-true}
@@ -155,7 +139,7 @@ services:
 
 volumes:
   test_pg_data:
-  test_minio_data:
+  test_seaweed_data:
   beaver_data:
 
 networks:

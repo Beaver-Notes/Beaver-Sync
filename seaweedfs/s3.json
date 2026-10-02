@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "beaver",
+      "credentials": [ { "accessKey": "beaver", "secretKey": "beaver-dev-secret" } ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}
