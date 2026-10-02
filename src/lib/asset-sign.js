@@ -14,11 +14,15 @@ function getSigningKey() {
 
 /**
  * HMAC-SHA256 signature for asset URLs.
- * Payload: "{assetKey}:{userId}:{expires}"
+ * Payload: "{verb}:{assetKey}:{userId}:{expires}"
+ *
+ * The verb is inside the signature on purpose. Without it a download token and an
+ * upload token for the same asset are byte-identical, so a read-only share can
+ * overwrite the object it was only allowed to read.
  */
-function signPayload(assetKey, userId, expires) {
+function signPayload(assetKey, userId, expires, verb) {
   const key = getSigningKey();
-  const payload = `${assetKey}:${userId}:${expires}`;
+  const payload = `${verb}:${assetKey}:${userId}:${expires}`;
   return crypto.createHmac('sha256', key).update(payload).digest('hex');
 }
 
@@ -33,7 +37,7 @@ function signPayload(assetKey, userId, expires) {
 function signAssetDownload(assetKey, userId, ttlSec = 300, baseUrl) {
   const base = baseUrl || process.env.APP_URL || 'http://localhost:4000';
   const expires = Math.floor(Date.now() / 1000) + ttlSec;
-  const sig = signPayload(assetKey, userId, expires);
+  const sig = signPayload(assetKey, userId, expires, 'download');
 
   const url = new URL(`${base}/assets/download`);
   url.searchParams.set('key', assetKey);
@@ -55,7 +59,7 @@ function signAssetDownload(assetKey, userId, ttlSec = 300, baseUrl) {
 function signAssetUpload(assetKey, userId, ttlSec = 3600, baseUrl) {
   const base = baseUrl || process.env.APP_URL || 'http://localhost:4000';
   const expires = Math.floor(Date.now() / 1000) + ttlSec;
-  const sig = signPayload(assetKey, userId, expires);
+  const sig = signPayload(assetKey, userId, expires, 'upload');
 
   const url = new URL(`${base}/assets/upload`);
   url.searchParams.set('key', assetKey);
@@ -74,15 +78,16 @@ function signAssetUpload(assetKey, userId, ttlSec = 3600, baseUrl) {
  * @param {string} sig - hex signature to verify
  * @returns {boolean}
  */
-function verifyAssetSignature(assetKey, userId, expires, sig) {
+function verifyAssetSignature(assetKey, userId, expires, sig, verb) {
   if (!assetKey || !userId || !expires || !sig) return false;
   if (typeof expires !== 'number' || typeof sig !== 'string') return false;
   if (sig.length !== 64) return false; // SHA-256 hex = 64 chars
+  if (verb !== 'download' && verb !== 'upload') return false;
 
   const now = Math.floor(Date.now() / 1000);
   if (now > expires) return false;
 
-  const expected = signPayload(assetKey, userId, expires);
+  const expected = signPayload(assetKey, userId, expires, verb);
 
   try {
     return crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(expected, 'hex'));
@@ -95,4 +100,5 @@ module.exports = {
   signAssetDownload,
   signAssetUpload,
   verifyAssetSignature,
+  signPayload,
 };

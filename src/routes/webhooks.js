@@ -132,10 +132,15 @@ async function webhookRoutes(app) {
           const sub = obj;
           const accountId = sub.metadata?.userId;
           if (!accountId) break;
-          const plan = planFromPrice(
-            sub.items?.data?.[0]?.price?.id || '',
-            sub.items?.data?.[0]?.price?.product || ''
-          );
+          const priceId = sub.items?.data?.[0]?.price?.id || '';
+          const plan = planFromPrice(priceId);
+          if (!plan) {
+            // An unconfigured price cannot be attributed to a tier, so no tier is
+            // granted. Log it loudly: this means a checkout was created for a plan
+            // whose price id is missing from the environment.
+            app.log.error({ accountId, priceId, subscriptionId: sub.id }, 'Stripe price id is not configured for any sellable plan; subscription not applied');
+            break;
+          }
           const isCancelAtPeriodEnd = sub.cancel_at_period_end === true;
           let status;
           if (sub.status === 'active' || sub.status === 'trialing') {
@@ -288,7 +293,11 @@ async function webhookRoutes(app) {
         return reply.send({ received: true });
       }
 
-      const plan = planFromProductId(transactionInfo.productId || '');
+      const plan = planFromProductId('apple', transactionInfo.productId || '');
+      if (!plan) {
+        app.log.error({ productId: transactionInfo.productId, originalTransactionId: transactionInfo.originalTransactionId }, 'Apple product id is not configured for any sellable plan; subscription not applied');
+        return reply.send({ received: true, processed: false });
+      }
       const originalTransactionId = transactionInfo.originalTransactionId;
       const expiresMs = transactionInfo.expiresDate ? parseInt(transactionInfo.expiresDate) : null;
       const renewsAt = expiresMs ? new Date(expiresMs) : null;
@@ -351,7 +360,11 @@ async function webhookRoutes(app) {
       if (!notification) return reply.send({ received: true });
 
       const { notificationType, purchaseToken, subscriptionId } = notification;
-      const plan = planFromProductId(subscriptionId || '');
+      const plan = planFromProductId('google', subscriptionId || '');
+      if (!plan) {
+        app.log.error({ subscriptionId, purchaseToken }, 'Google subscription id is not configured for any sellable plan; notification not applied');
+        return reply.send({ received: true, processed: false });
+      }
 
       if (notificationType === 4) {
         const existing = await findByProvider({ provider: 'google', providerId: purchaseToken });

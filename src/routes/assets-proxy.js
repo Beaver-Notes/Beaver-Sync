@@ -30,7 +30,7 @@ async function registerAssetProxyRoutes(app) {
     }
 
     const expiresNum = parseInt(expires, 10);
-    if (!verifyAssetSignature(key, userId, expiresNum, sig)) {
+    if (!verifyAssetSignature(key, userId, expiresNum, sig, 'download')) {
       return reply.status(403).send({ error: 'invalid_signature', message: 'Invalid or expired download token.' });
     }
 
@@ -80,7 +80,7 @@ async function registerAssetProxyRoutes(app) {
     }
 
     const expiresNum = parseInt(expires, 10);
-    if (!verifyAssetSignature(key, userId, expiresNum, sig)) {
+    if (!verifyAssetSignature(key, userId, expiresNum, sig, 'upload')) {
       return reply.status(403).send({ error: 'invalid_signature', message: 'Invalid or expired upload token.' });
     }
 

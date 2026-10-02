@@ -144,7 +144,13 @@ test('selectOrphanAssets prunes a new-scheme dead note after grace and keeps a l
 test('a legacy opaque token is never a new-scheme GC candidate', () => {
   const now = 1_000 * DAY_MS;
   const old = new Date(now - 60 * DAY_MS).toISOString();
-  const opaque = 'assets--' + crypto.randomBytes(80).toString('base64url');
+  // A real opaque token is base64url(24-byte nonce || ciphertext), so it decodes
+  // to well over 40 bytes. The base64url alphabet includes '-', so about 2% of
+  // real tokens contain '--' and therefore look like a 3-segment legacy key
+  // (ty--note--file). This one does, so the case is deterministic instead of
+  // random: the token shape is the whole point of the test.
+  const opaque =
+    'assets--jDDmNyi51HAGc--FHE1wUbarIvcTFlGs8OuxHxHw4cPdH5mlqUD8fHZD1shwbVzC';
 
   const orphans = selectOrphanAssets(
     [{ assetKey: opaque, lastModified: old }],

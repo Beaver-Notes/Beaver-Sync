@@ -119,6 +119,42 @@ test('ensurePaidProvisioning is idempotent for an existing org + workspace', asy
   assert.equal((await models.Organization.find({}).lean()).filter((o) => o.id === first.orgId).length, 1);
 });
 
+// The org subscription is what resolvePlanForAccount reads (org-first), so a
+// stale org row silently masks the tier the account actually paid for.
+test('ensurePaidProvisioning upgrades a stale org subscription to the paid tier', async () => {
+  const account = await makeAccountWithPlan('starter');
+  const { orgId } = await ensurePaidProvisioning(account.id);
+  assert.equal((await models.OrgSubscription.findOne({ orgId }).lean()).plan, 'starter');
+
+  // The buyer upgrades their personal plan. upsertSubscription only writes the
+  // account Subscription, so the org row is still 'starter' here.
+  await models.Subscription.updateOne({ accountId: account.id }, { $set: { plan: 'team', status: 'active' } });
+
+  const second = await ensurePaidProvisioning(account.id);
+  assert.equal(second.orgId, orgId, 'must reuse the existing org');
+
+  const orgSub = await models.OrgSubscription.findOne({ orgId }).lean();
+  assert.equal(orgSub.plan, 'team', 'org subscription must track the paid tier');
+  assert.equal(orgSub.status, 'active');
+  // team is base 100GB + 25GB per seat, not the account sub's stamped quota.
+  assert.equal(Number(orgSub.storageQuotaBytes), 125 * 1024 ** 3);
+
+  const { resolvePlanForAccount } = require('../src/lib/plans');
+  const sub = await models.Subscription.findOne({ accountId: account.id }).lean();
+  assert.equal(resolvePlanForAccount({ orgSub, sub }), 'team');
+});
+
+test('ensurePaidProvisioning never lowers an org on a higher contractual tier', async () => {
+  const account = await makeAccountWithPlan('enterprise');
+  const { orgId } = await ensurePaidProvisioning(account.id);
+  assert.equal((await models.OrgSubscription.findOne({ orgId }).lean()).plan, 'enterprise');
+
+  await models.Subscription.updateOne({ accountId: account.id }, { $set: { plan: 'pro' } });
+  await ensurePaidProvisioning(account.id);
+
+  assert.equal((await models.OrgSubscription.findOne({ orgId }).lean()).plan, 'enterprise');
+});
+
 test('checkDowngrade blocks when storage exceeds new quota', async () => {
   const account = await makeAccount();
   await models.Subscription.create({ accountId: account.id, plan: 'pro', status: 'active', storageQuotaBytes: 50 * 1024 ** 3, storageUsedBytes: 20 * 1024 ** 3, createdAt: new Date() });

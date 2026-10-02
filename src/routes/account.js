@@ -262,17 +262,25 @@ async function accountRoutes(app) {
 
     const accountIdHash = hashSessionId(req.userId);
 
-    await deleteAccountData({ userId: req.userId, accountIdHash });
+    const { purgedWorkspaceIds } = await deleteAccountData({ userId: req.userId, accountIdHash });
 
     setImmediate(() => {
       (async () => {
         try {
-          const keys = await r2.listKeys(`${req.userId}/`);
+          // yjs snapshots are namespaced by workspace, not account, so the workspace
+          // ids captured before the cascade are the only way to find them. yjs-gc
+          // enumerates workspaces from the DB and asset-gc only looks under /assets/,
+          // so nothing else can reclaim these.
+          const prefixes = [`${req.userId}/`, ...purgedWorkspaceIds.map((id) => `yjs/${id}/`)];
+          const keys = [...new Set((await Promise.all(prefixes.map((p) => r2.listKeys(p)))).flat())];
           const CONCURRENT = 8;
           for (let i = 0; i < keys.length; i += CONCURRENT) {
             await Promise.allSettled(keys.slice(i, i + CONCURRENT).map((key) => r2.del(key)));
           }
-          app.log.info({ userId: req.userId, deletedKeys: keys.length }, 'R2 cleanup complete');
+          app.log.info(
+            { userId: req.userId, deletedKeys: keys.length, workspaces: purgedWorkspaceIds.length },
+            'R2 cleanup complete'
+          );
         } catch (err) {
           app.log.error({ err, userId: req.userId }, 'R2 cleanup failed');
         }

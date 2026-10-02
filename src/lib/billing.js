@@ -1,22 +1,18 @@
 'use strict';
 
 const { Subscription } = require('../models');
-const { getQuotaBytes } = require('./plans');
+const { getQuotaBytes, planFromStripePriceId, planFromStoreProductId } = require('./plans');
 
-function planFromPrice(priceId, productId) {
-  const id = (priceId + productId).toLowerCase();
-  if (id.includes('enterprise')) return 'enterprise';
-  if (id.includes('team')) return 'team';
-  if (id.includes('pro')) return 'pro';
-  return 'starter';
+// A subscription resolves to the tier whose id was configured for checkout, and to
+// nothing else. Substring matching is not usable here: every real Stripe product id
+// begins "prod_", which contains "pro", so it classified every genuine subscription
+// as the pro tier and handed out paid entitlements nobody bought.
+function planFromPrice(priceId) {
+  return planFromStripePriceId(priceId);
 }
 
-function planFromProductId(productId) {
-  const p = productId.toLowerCase();
-  if (p.includes('enterprise')) return 'enterprise';
-  if (p.includes('team')) return 'team';
-  if (p.includes('pro')) return 'pro';
-  return 'starter';
+function planFromProductId(provider, productId) {
+  return planFromStoreProductId(provider, productId);
 }
 
 async function upsertSubscription({

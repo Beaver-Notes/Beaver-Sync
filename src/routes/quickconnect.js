@@ -2,11 +2,20 @@
 
 const crypto = require('crypto');
 const { QuickConnectCode } = require('../models');
+const { hashSessionId } = require('../lib/crypto');
 
 const AUTH_BODY_LIMIT_BYTES = parseInt(process.env.AUTH_BODY_LIMIT_BYTES ?? '16384', 10);
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const CODE_REGEX = /^[A-Z0-9]{3}-[A-Z0-9]{3}$/;
+
+// The secret is a redeemable pairing credential, so it is stored as an HMAC like
+// every other secret here (sessions, SSO exchange codes, MFA challenges). The
+// prefix namespaces it away from the ws-ticket and sso-exchange hashes, which share
+// the same HMAC key.
+function hashSecret(secret) {
+  return hashSessionId(`quickconnect:${secret}`);
+}
 
 function generateCode() {
   let result = '';
@@ -40,7 +49,7 @@ async function quickconnectRoutes(app) {
     const secret = generateSecret();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-    await QuickConnectCode.create({ code, secret, authorized: false, payload: null, expiresAt });
+    await QuickConnectCode.create({ code, secret: hashSecret(secret), authorized: false, payload: null, expiresAt });
 
     return reply.status(201).send({ secret, code, expiresAt });
   });
@@ -114,7 +123,8 @@ async function quickconnectRoutes(app) {
       return reply.status(400).send({ error: 'missing_secret', message: 'Secret query parameter is required.' });
     }
 
-    const qc = await QuickConnectCode.findOne({ secret });
+    const secretHash = hashSecret(secret);
+    const qc = await QuickConnectCode.findOne({ secret: secretHash });
     if (!qc || qc.expiresAt < new Date()) {
       return reply.status(404).send({ error: 'not_found', message: 'Request expired or not found.' });
     }
@@ -123,7 +133,7 @@ async function quickconnectRoutes(app) {
       return reply.send({ authorized: false, payload: null });
     }
 
-    await QuickConnectCode.deleteOne({ secret });
+    await QuickConnectCode.deleteOne({ secret: secretHash });
 
     return reply.send({ authorized: true, payload: qc.payload });
   });

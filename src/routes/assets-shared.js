@@ -153,7 +153,29 @@ async function storeAssetBatch(req, assets) {
 // Mirror of Rust `decode_asset_key`: 4 segments is the new scheme (hash) or
 // legacy workspace-scoped (filename), 3 is legacy (workspaceId null). Returns
 // null for anything malformed, another type, or an opaque token.
+// `assets--`. Mirrors Rust `ASSET_KEY_WIRE_PREFIX`.
+const ASSET_KEY_WIRE_PREFIX = 'assets--';
+
 const FILENAME_HASH_LENGTH = 43;
+
+// Minimum opaque-token size: a 24-byte nonce plus a 16-byte Poly1305 tag.
+// Mirrors the length check in Rust `decode_opaque_asset_key`, but needs no key
+// material, so the server can apply it. Without this a real opaque token that
+// happens to contain '--' (about 2% of them, since base64url includes '-')
+// splits into 3 segments and is then read as a legacy `ty--note--file` key,
+// which made the GC delete assets it had no way of proving were orphans.
+const OPAQUE_TOKEN_MIN_BLOB_BYTES = 24 + 16;
+
+function isOpaqueToken(key) {
+  if (!key.startsWith(ASSET_KEY_WIRE_PREFIX)) return false;
+  const token = key.slice(ASSET_KEY_WIRE_PREFIX.length);
+  if (!/^[A-Za-z0-9_-]+$/.test(token)) return false;
+  const blob = Buffer.from(token, 'base64url');
+  // Canonical round-trip rejects keys that are only incidentally base64url,
+  // the same guard `isFilenameHash` uses.
+  if (blob.toString('base64url') !== token) return false;
+  return blob.length >= OPAQUE_TOKEN_MIN_BLOB_BYTES;
+}
 
 // `base64url-no-pad(32 bytes)` is exactly 43 chars. Mirrors Rust
 // `is_filename_hash`; the GC uses it to flag new-scheme keys.
@@ -177,6 +199,10 @@ function decodeAssetKey(key) {
   };
   const parts = key.split('--');
   if (parts.length === 3) {
+    // An opaque token that contains '--' also lands here, so reject it before
+    // reading a note id out of ciphertext. The 4-segment branch needs no such
+    // check: a new-scheme key is pinned by its 43-char hash.
+    if (isOpaqueToken(key)) return null;
     const [type, noteId, filename] = parts.map(decode);
     if (type === null || noteId === null || filename === null) return null;
     return { type, workspaceId: null, noteId, filename };

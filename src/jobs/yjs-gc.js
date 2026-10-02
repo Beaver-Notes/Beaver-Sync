@@ -80,17 +80,24 @@ async function compactNote(workspaceId, noteId, cutoffTs, ownerId, plan, now) {
   const aged = rows.filter((r) => new Date(r.created_at).getTime() < cutoffTs);
   if (aged.length === 0) return { compacted: 0, reclaimed: 0 };
 
+  // The server never holds note keys, so it cannot merge sealed envelopes into a
+  // Yjs snapshot: Y.applyUpdate throws, and the old concat fallback published an
+  // unreadable blob and then deleted the source rows. Skip instead. Compaction for
+  // encrypted notes belongs to the client, which owns the keys and already uploads
+  // snapshots through routes/sync-state.js /initialize/snapshot. Mirrors the
+  // update_encrypted = 0 filter in persistence/yjs-queries.js:176.
+  const sealed = aged.filter((r) => r.update_encrypted);
+  if (sealed.length > 0) return { compacted: 0, reclaimed: 0, skipped: aged.length };
+
   // Build snapshot from aged rows only
   let snapshotData;
   try {
     const doc = new Y.Doc();
-    for (const r of aged) {
-      // encrypted rows still contain bytes but not valid Yjs; try will throw -> fallback
-      Y.applyUpdate(doc, r.update_data);
-    }
+    for (const r of aged) Y.applyUpdate(doc, r.update_data);
     snapshotData = Y.encodeStateAsUpdate(doc);
   } catch {
-    snapshotData = Buffer.concat(aged.map((r) => r.update_data));
+    // A plaintext row we still cannot merge means the note would come back short.
+    return { compacted: 0, reclaimed: 0, skipped: aged.length };
   }
   const snapBuf = Buffer.isBuffer(snapshotData) ? snapshotData : Buffer.from(snapshotData);
   const snapshotSize = snapBuf.length;
@@ -176,6 +183,7 @@ async function runGc(opts = {}) {
   let bytesReclaimed = 0;
   let workspacesProcessed = 0;
   let notesProcessed = 0;
+  let notesSkipped = 0;
   try {
     // Collect workspace ids that have yjs data
     const { rows: wsRows } = await query(
@@ -208,6 +216,7 @@ async function runGc(opts = {}) {
             docsCompacted++;
             bytesReclaimed += res.reclaimed;
           }
+          notesSkipped += res.skipped ?? 0;
         }
       } finally {
         await unlockAdvisory(workspaceId);
@@ -217,8 +226,8 @@ async function runGc(opts = {}) {
     const swept = await sweepOrphanedRelayArtifacts();
 
     const duration = Date.now() - start;
-    console.log(`[yjs-gc] workspaces=${workspacesProcessed} notes=${notesProcessed} compacted=${docsCompacted} reclaimed=${bytesReclaimed} swept=${swept} reapedReservations=${reapedReservations} duration=${duration}ms`);
-    return { workspacesProcessed, notesProcessed, docsCompacted, bytesReclaimed, swept, reapedReservations, duration };
+    console.log(`[yjs-gc] workspaces=${workspacesProcessed} notes=${notesProcessed} compacted=${docsCompacted} skipped=${notesSkipped} reclaimed=${bytesReclaimed} swept=${swept} reapedReservations=${reapedReservations} duration=${duration}ms`);
+    return { workspacesProcessed, notesProcessed, docsCompacted, notesSkipped, bytesReclaimed, swept, reapedReservations, duration };
   } finally {
     await unlockGlobal();
   }

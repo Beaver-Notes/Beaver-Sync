@@ -130,7 +130,7 @@ test('tier cutoff respected: free deletes aged, enterprise retains', async () =>
   const oldTs = Date.now() - 100_000;
   for (let i=0;i<2;i++) {
     await query('INSERT INTO yjs_doc_updates (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-      [`free-${i}-${crypto.randomUUID()}`, wsFree, noteFree, Buffer.from(`free-${i}`), 0, 'dev-a', i+1, oldTs+i, new Date(oldTs+i).toISOString()]);
+      [`free-${i}-${crypto.randomUUID()}`, wsFree, noteFree, yUpdateFor(new Y.Doc(), `free-${i}`), 0, 'dev-a', i+1, oldTs+i, new Date(oldTs+i).toISOString()]);
   }
   // Enterprise workspace: same aged rows should NOT be pruned (cutoff 0)
   const wsEnt = 'ws-gc-ent-' + crypto.randomUUID().slice(0,6);
@@ -139,7 +139,7 @@ test('tier cutoff respected: free deletes aged, enterprise retains', async () =>
   const noteEnt = 'note-ent';
   for (let i=0;i<2;i++) {
     await query('INSERT INTO yjs_doc_updates (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-      [`ent-${i}-${crypto.randomUUID()}`, wsEnt, noteEnt, Buffer.from(`ent-${i}`), 0, 'dev-a', i+1, oldTs+i, new Date(oldTs+i).toISOString()]);
+      [`ent-${i}-${crypto.randomUUID()}`, wsEnt, noteEnt, yUpdateFor(new Y.Doc(), `ent-${i}`), 0, 'dev-a', i+1, oldTs+i, new Date(oldTs+i).toISOString()]);
   }
 
   const { runGc } = require('../src/jobs/yjs-gc');
@@ -160,7 +160,7 @@ test('advisory lock prevents concurrent double-compaction (global lock)', async 
   const owner = 'acct-lock-' + crypto.randomUUID().slice(0,6);
   await seedWorkspaceWithPlan(wsId, owner, 'free');
   await query('INSERT INTO yjs_doc_updates (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-    [`lock-${crypto.randomUUID()}`, wsId, 'note-lock', Buffer.from('x'), 0, 'dev-a', 1, 1000, new Date(Date.now()-100000).toISOString()]);
+    [`lock-${crypto.randomUUID()}`, wsId, 'note-lock', yUpdateFor(new Y.Doc(), 'lock'), 0, 'dev-a', 1, 1000, new Date(Date.now()-100000).toISOString()]);
 
   const { runGc, GC_ADVISORY_KEY } = require('../src/jobs/yjs-gc');
   const pool = getPool();
@@ -211,4 +211,35 @@ test('scheduler registration respects YJS_GC_INTERVAL_MS', async () => {
   assert.ok(app1);
   await app1.close();
   delete process.env.YJS_GC_INTERVAL_MS;
+});
+
+test('GC never deletes an encrypted note nor publishes a snapshot it cannot build', async () => {
+  await cleanTestDb();
+  // An earlier test calls buildApp(), which dotenv-loads the dev .env PLAN_OVERRIDE.
+  // With a paid override historyCutoffTs() is 0, nothing ages, and this test would
+  // pass for the wrong reason. Mirrors test/presign-quota.test.js:222.
+  delete process.env.PLAN_OVERRIDE;
+  const r2Store = stubR2();
+  const wsId = 'ws-gc-enc-' + crypto.randomUUID().slice(0,6);
+  const owner = 'acct-gc-enc-' + crypto.randomUUID().slice(0,6);
+  await seedWorkspaceWithPlan(wsId, owner, 'free'); // free => cutoff now => every row ages
+  const noteId = 'note-enc';
+  const oldTs = Date.now() - 100_000;
+  // Real envelopes are sealed ciphertext, so they are never valid Yjs updates.
+  const sealed = [Buffer.from('aabbcc11','hex'), Buffer.from('ddeeff22','hex')];
+  for (let i = 0; i < sealed.length; i++) {
+    await query('INSERT INTO yjs_doc_updates (id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+      [`enc-${i}-${crypto.randomUUID()}`, wsId, noteId, sealed[i], 1, 'dev-a', i+1, oldTs+i, new Date(oldTs+i).toISOString()]);
+  }
+
+  const { runGc } = require('../src/jobs/yjs-gc');
+  await runGc({ now: Date.now() });
+
+  const kept = (await query('SELECT COUNT(*)::int AS c FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2', [wsId, noteId])).rows[0].c;
+  assert.equal(kept, 2, 'encrypted journal rows must survive: the server cannot fold them into a snapshot');
+  const state = (await query('SELECT snapshot_key FROM sync_document_state WHERE workspace_id=$1 AND note_id=$2', [wsId, noteId])).rows[0];
+  assert.equal(state?.snapshot_key ?? null, null, 'GC must not publish a snapshot it failed to build');
+  assert.deepEqual([...r2Store.keys()].filter((k) => k.startsWith('yjs/')), [], 'no snapshot object may be written');
+
+  restoreR2();
 });

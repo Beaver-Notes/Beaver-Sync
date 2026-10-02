@@ -21,6 +21,7 @@ const { setupTestDb } = require('./helpers/db');
 const { authHeaderFor } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const models = require('../src/models');
+const { hashSessionId } = require('../src/lib/crypto');
 
 const originalMethods = {
   QuickConnectCode: {
@@ -76,7 +77,8 @@ test('initiate returns a code and a secret', async (t) => {
   assert.ok(new Date(body.expiresAt) > Date.now());
   assert.equal(stored.authorized, false);
   assert.equal(stored.payload, null);
-  assert.equal(stored.secret.length, 64);
+  assert.notEqual(stored.secret, body.secret, 'the row must hold the HMAC, not the redeemable secret');
+  assert.equal(stored.secret, hashSessionId(`quickconnect:${body.secret}`));
 });
 
 test('authorize code then connect returns payload', async (t) => {
@@ -87,9 +89,10 @@ test('authorize code then connect returns payload', async (t) => {
   const secret = crypto.randomBytes(32).toString('hex');
   const testPayload = 'session-token-xyz';
 
+  const secretHash = hashSessionId(`quickconnect:${secret}`);
   let qcDoc = {
     code,
-    secret,
+    secret: secretHash,
     authorized: false,
     payload: null,
     expiresAt: new Date(Date.now() + 10 * 60 * 1000),
@@ -97,7 +100,7 @@ test('authorize code then connect returns payload', async (t) => {
   };
 
   models.QuickConnectCode.findOne = async (filter) => {
-    if (filter.code === code || filter.secret === secret) return qcDoc;
+    if (filter.code === code || filter.secret === secretHash) return qcDoc;
     return null;
   };
 
@@ -117,7 +120,7 @@ test('authorize code then connect returns payload', async (t) => {
 
   let deleted = false;
   models.QuickConnectCode.deleteOne = async (filter) => {
-    if (filter.secret === secret || filter.code === code) deleted = true;
+    if (filter.secret === secretHash || filter.code === code) deleted = true;
     return { deletedCount: 1 };
   };
 
@@ -200,4 +203,37 @@ test('authorizing already-authorized code returns 409', async (t) => {
   });
 
   assert.equal(response.statusCode, 409);
+});
+
+test('the redeemable pairing secret is never stored in the clear', async (t) => {
+  const app = await makeApp();
+  t.after(async () => { await app.close(); });
+
+  let stored = null;
+  let lookup = null;
+  models.QuickConnectCode.create = async (data) => { stored = data; return { ...data }; };
+  models.QuickConnectCode.findOne = async (q) => {
+    lookup = q;
+    return { code: 'ABC-DEF', secret: q.secret, authorized: false, payload: null, expiresAt: new Date(Date.now() + 600000) };
+  };
+
+  const init = await app.inject({
+    method: 'POST',
+    url: '/auth/quickconnect/initiate',
+    headers: { 'content-type': 'application/json' },
+    payload: {},
+  });
+  assert.equal(init.statusCode, 201);
+  const { secret } = init.json();
+
+  assert.notEqual(
+    stored.secret, secret,
+    'the quick_connect_codes row must not hold the redeemable secret: a database read must never hand over a live pairing secret, and the column is UNIQUE-indexed in the clear');
+  assert.equal(
+    stored.secret, hashSessionId(`quickconnect:${secret}`),
+    'the stored value must be the HMAC that the connect path looks up, or the secret stops working');
+
+  const poll = await app.inject({ method: 'GET', url: `/auth/quickconnect/connect?secret=${secret}` });
+  assert.equal(poll.statusCode, 200, 'polling with the plaintext secret must still resolve');
+  assert.deepEqual(lookup, { secret: hashSessionId(`quickconnect:${secret}`) }, 'connect must find the row by hash');
 });

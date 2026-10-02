@@ -65,6 +65,32 @@ function getStripePriceId(plan, interval) {
   return process.env[key] || null;
 }
 
+// Apple/Google product ids are chosen per store listing, so there is nothing to
+// derive them from. They are configured the same way Stripe prices are, one
+// variable per sellable tier, and an unset variable resolves to nothing.
+function getStoreProductId(provider, plan) {
+  if (!provider || !SELF_SERVE_PLANS.has(plan)) return null;
+  return process.env[`${String(provider).toUpperCase()}_PRODUCT_${String(plan).toUpperCase()}`] || null;
+}
+
+function planFromStoreProductId(provider, productId) {
+  if (!productId) return null;
+  for (const plan of SELF_SERVE_PLANS) {
+    if (getStoreProductId(provider, plan) === productId) return plan;
+  }
+  return null;
+}
+
+function planFromStripePriceId(priceId) {
+  if (!priceId) return null;
+  for (const plan of SELF_SERVE_PLANS) {
+    for (const interval of VALID_INTERVALS) {
+      if (getStripePriceId(plan, interval) === priceId) return plan;
+    }
+  }
+  return null;
+}
+
 function isSelfServePlan(plan) {
   return SELF_SERVE_PLANS.has(plan);
 }
@@ -120,4 +146,5 @@ module.exports = {
   getPlan, getQuotaBytes, getHistoryDays,
   getDeviceLimit, getFlags, isFreePlan, isPaidPlan, resolvePlanForAccount,
   getStripePriceId, isSelfServePlan, isValidInterval,
+  getStoreProductId, planFromStoreProductId, planFromStripePriceId,
 };

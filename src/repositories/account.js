@@ -14,7 +14,18 @@ async function findAccountByUsername(username) {
 }
 
 async function deleteAccountData({ userId, accountIdHash }) {
+  // Captured before the cascade removes the rows: the caller needs these ids to
+  // purge the yjs/<workspaceId>/ objects, which no collector can find afterwards.
+  let purgedWorkspaceIds = [];
   await transaction(async (client) => {
+    const { rows: memberOf } = await client.query(
+      `SELECT DISTINCT workspace_id FROM workspace_members WHERE account_id = $1
+       UNION SELECT DISTINCT workspace_id FROM yjs_doc_updates WHERE workspace_id IN (
+         SELECT id FROM workspaces WHERE owner_id = $1)`,
+      [userId]
+    );
+    purgedWorkspaceIds = memberOf.map((r) => r.workspace_id).filter(Boolean);
+
     await client.query(`DELETE FROM audit_logs WHERE account_id_hash = $1`, [accountIdHash]);
 
     // Capture owned org IDs BEFORE deleting org_members, since subsequent
@@ -45,6 +56,7 @@ async function deleteAccountData({ userId, accountIdHash }) {
 
     await client.query(`DELETE FROM accounts WHERE id = $1`, [userId]);
   });
+  return { purgedWorkspaceIds };
 }
 
 module.exports = { deleteAccountData, findAccountByUsername };

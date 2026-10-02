@@ -7,6 +7,11 @@ const { isOrgParticipant } = require('./plan-resolution');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Plan ladder, lowest to highest. Used to sync an org subscription up to the
+// tier the account actually paid for without ever lowering it — an org may sit
+// on a contractually higher tier (e.g. enterprise) than the billing account.
+const PLAN_RANK = { free: 0, starter: 1, pro: 2, team: 3, enterprise: 4 };
+
 // Creates the org + personal workspace for a paid account that is missing one.
 // NOTE: the wrapped workspace-key envelope is NOT provisioned here. The client
 // runs its own workspace provisioning flow after the upgrade and supplies the
@@ -20,6 +25,22 @@ async function ensurePaidProvisioning(accountId) {
   for (const m of existingMemberships) {
     const existing = await Workspace.find({ orgId: m.orgId, ownerId: accountId }).lean();
     if (existing.length > 0) {
+      // The org subscription is what resolvePlanForAccount reads (org-first),
+      // so an upgrade that leaves it stale silently masks the paid tier. Sync
+      // it upward here. Without this, pro -> team buyers keep pro forever:
+      // upsertSubscription only writes the account Subscription, and
+      // organizations.js:434 rejects any manual non-free org plan change.
+      const orgSub = await OrgSubscription.findOne({ orgId: m.orgId }).lean();
+      const orgRank = PLAN_RANK[orgSub?.plan] ?? -1;
+      if (sub.status === 'active' && orgRank < PLAN_RANK[sub.plan]) {
+        await OrgSubscription.updateOne({ orgId: m.orgId }, {
+          $set: {
+            plan: sub.plan,
+            status: 'active',
+            storageQuotaBytes: getQuotaBytes(sub.plan, orgSub?.seats ?? 1),
+          },
+        });
+      }
       return { orgId: m.orgId, workspaceId: existing[0].id };
     }
   }
