@@ -77,6 +77,12 @@ const originalMethods = {
     findOne: models.Session.findOne,
     create: models.Session.create,
   },
+  // The routes now mint a rotating refresh token alongside the session, so the
+  // stub set must cover it too: unstubbed it hits the real table and fails the
+  // account_id foreign key, because Account.create above never writes a row.
+  RefreshToken: {
+    create: models.RefreshToken.create,
+  },
   Subscription: {
     findOne: models.Subscription.findOne,
   },
@@ -100,6 +106,7 @@ function resetStubs() {
   models.WebAuthnChallenge.create = async () => ({ id: 'challenge-id' });
   models.Session.findOne = async () => null;
   models.Session.create = async () => ({ id: 'sess-id' });
+  models.RefreshToken.create = async (data) => ({ id: 'refresh-id', ...data });
   models.Subscription.findOne = () => chain({
     accountId: '507f1f77bcf86cd799439011',
     plan: 'starter',
@@ -118,6 +125,7 @@ test.after(() => {
   Object.assign(models.Credential, originalMethods.Credential);
   Object.assign(models.WebAuthnChallenge, originalMethods.WebAuthnChallenge);
   Object.assign(models.Session, originalMethods.Session);
+  Object.assign(models.RefreshToken, originalMethods.RefreshToken);
   Object.assign(models.Subscription, originalMethods.Subscription);
   delete require.cache[swaPath];
   return close();
@@ -174,6 +182,10 @@ test('passkey registration complete verifies and creates credential', async (t) 
   assert.equal(response.statusCode, 201);
   const body = response.json();
   assert.ok(body.sessionToken);
+  // The desktop client reads `token` (performSignIn); `refreshToken` lets a 401
+  // recover silently instead of signing the user out.
+  assert.equal(body.token, body.sessionToken);
+  assert.ok(body.refreshToken);
   assert.equal(body.user.emailHash, TEST_EMAIL_HASH);
   assert.equal(credentialCreated.accountId, '507f1f77bcf86cd799439011');
   assert.equal(credentialCreated.credentialId, 'cred-1');
@@ -234,6 +246,8 @@ test('passkey login complete verifies and issues session', async (t) => {
   assert.equal(response.statusCode, 200);
   const body = response.json();
   assert.ok(body.sessionToken);
+  assert.equal(body.token, body.sessionToken);
+  assert.ok(body.refreshToken);
   assert.equal(body.user.emailHash, TEST_EMAIL_HASH);
   assert.equal(signCountUpdated, 1);
 });

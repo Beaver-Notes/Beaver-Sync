@@ -9,7 +9,7 @@ const {
 } = require('@simplewebauthn/server');
 
 const { Account, Credential, Subscription, WebAuthnChallenge } = require('../models');
-const { createSession, setSessionCookieIfAvailable, validateSession } = require('../middleware/auth');
+const { createSession, createRefreshToken, setSessionCookieIfAvailable, validateSession } = require('../middleware/auth');
 const { createEmailHash } = require('../lib/crypto');
 
 async function isAuthenticatedAs(req, accountId) {
@@ -192,9 +192,14 @@ async function passkeyRoutes(app) {
     });
 
     const token = await createSession(account.id, req);
+    const refreshToken = await createRefreshToken(account.id, token, req);
 
     return reply.status(201).send({
+      // `token` is what the desktop client reads (`performSignIn`); `sessionToken`
+      // is kept for existing callers and tests.
+      token,
       sessionToken: token,
+      refreshToken,
       user: {
         id: account.id,
         emailHash: account.emailHmac,
@@ -312,8 +317,11 @@ async function passkeyRoutes(app) {
     ).lean();
 
     setSessionCookieIfAvailable(app, reply, token);
+    const refreshToken = await createRefreshToken(account.id, token, req);
     return reply.send({
+      token,
       sessionToken: token,
+      refreshToken,
       user: {
         id: account.id,
         emailHash: account.emailHmac,

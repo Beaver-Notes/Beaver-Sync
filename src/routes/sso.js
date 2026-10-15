@@ -7,7 +7,7 @@ const { Issuer } = require('openid-client');
 const { SsoConfig, SsoOidcState, Account } = require('../models');
 const mlkem = require('../lib/mlkem');
 const { createEmailHash } = require('../lib/crypto');
-const { createSession } = require('../middleware/auth');
+const { createSession, createRefreshToken } = require('../middleware/auth');
 const { isEnterpriseMode } = require('../lib/license');
 
 const APP_URL = process.env.APP_URL ?? 'http://localhost:3000';
@@ -339,7 +339,8 @@ async function ssoRoutes(app) {
       return reply.status(401).send({ error: 'invalid_code', message: 'Exchange code is invalid or expired.' });
     }
     const token = await createSession(redeemed.rows[0].account_id, req);
-    return reply.send({ token });
+    const refreshToken = await createRefreshToken(redeemed.rows[0].account_id, token, req);
+    return reply.send({ token, sessionToken: token, refreshToken });
   });
 }
 

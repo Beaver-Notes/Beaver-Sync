@@ -58,6 +58,12 @@ const originalMethods = {
     updateOne: models.Session.updateOne,
     find: models.Session.find,
   },
+  // Login now also mints a rotating refresh token; unstubbed it reaches the
+  // real table and trips the account_id foreign key (the stubbed Account.create
+  // never writes a row), turning a 200 into a 500.
+  RefreshToken: {
+    create: models.RefreshToken.create,
+  },
   r2: {
     put: r2.put,
     get: r2.get,
@@ -110,6 +116,7 @@ function resetStubs() {
   models.Session.create = async () => ({ id: 'session-id' });
   models.Session.updateOne = async () => ({ modifiedCount: 1 });
   models.Session.find = () => chain([]);
+  models.RefreshToken.create = async (data) => ({ id: 'refresh-id', ...data });
 
   r2.put = async () => {};
   r2.get = async () => null;
@@ -135,6 +142,7 @@ test.after(() => {
   Object.assign(models.CommitMeta, originalMethods.CommitMeta);
   Object.assign(models.Device, originalMethods.Device);
   Object.assign(models.Session, originalMethods.Session);
+  Object.assign(models.RefreshToken, originalMethods.RefreshToken);
   Object.assign(r2, originalMethods.r2);
   return close();
 });
