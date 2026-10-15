@@ -4,7 +4,7 @@ const fs  = require('fs');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const fp  = require('fastify-plugin');
-const { Session } = require('../models');
+const { Session, RefreshToken } = require('../models');
 const { getDb } = require('../db');
 const { hashSessionId } = require('../lib/crypto');
 
@@ -170,9 +170,75 @@ async function authPlugin(app) {
   });
 }
 
+// --- refresh tokens -------------------------------------------------------
+// Opaque, single-use, rotating. The raw value is never stored — only its hash —
+// and every exchange replaces it. Presenting an already-rotated token proves
+// the value leaked, so the whole family is dropped instead of being re-issued.
+const REFRESH_TTL_DAYS = parseInt(process.env.REFRESH_TOKEN_TTL_DAYS ?? '30', 10);
+
+async function createRefreshToken(accountId, rawSessionId, req, familyHash = null) {
+  const raw = crypto.randomBytes(32).toString('base64url');
+  const now = new Date();
+
+  await RefreshToken.create({
+    idHash: hashSessionId(raw),
+    accountId,
+    // The family link is carried forward through every rotation, so a replay of
+    // any generation can still find (and burn) the whole set.
+    sessionIdHash: familyHash ?? (rawSessionId ? hashSessionId(rawSessionId) : null),
+    deviceLabel: String(req?.headers?.['x-device-label'] ?? 'Unknown Device').slice(0, 128),
+    deviceId: req?.headers?.['x-device-id'] || null,
+    expiresAt: new Date(now.getTime() + REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000),
+    lastUsedAt: null,
+    revoked: false,
+    rotatedTo: null,
+    createdAt: now,
+  });
+
+  return raw;
+}
+
+// Revoke every live token in a family: either the one bound to a session
+// (logout / revoke-all) or, when `stored` is given, the family that a replayed
+// token belonged to.
+async function revokeRefreshTokensForSession(rawSessionId, stored = null) {
+  const family = stored ? (stored.sessionIdHash ?? null) : hashSessionId(rawSessionId);
+  if (family) {
+    await RefreshToken.updateMany({ sessionIdHash: family, revoked: false }, { $set: { revoked: true } });
+    return;
+  }
+  // No family link survived (row predates the link): a replay means the value
+  // leaked, so drop every live token the account holds rather than leave one.
+  await RefreshToken.updateMany({ accountId: stored.accountId, revoked: false }, { $set: { revoked: true } });
+}
+
+async function rotateRefreshToken(raw, req) {
+  if (!raw || typeof raw !== 'string' || raw.length < 32) return null;
+  const stored = await RefreshToken.findOne({ idHash: hashSessionId(raw) });
+  if (!stored) return null;
+
+  if (stored.revoked) {
+    // Replay of a rotated or revoked token: treat it as leaked and burn the set.
+    await revokeRefreshTokensForSession(null, stored);
+    return null;
+  }
+  if (stored.expiresAt < new Date()) return null;
+
+  const next = await createRefreshToken(stored.accountId, null, req, stored.sessionIdHash ?? null);
+  stored.revoked = true;
+  stored.rotatedTo = hashSessionId(next);
+  stored.lastUsedAt = new Date();
+  await stored.save();
+
+  return { accountId: stored.accountId, refreshToken: next };
+}
+
 module.exports = fp(authPlugin);
 module.exports.createSession = createSession;
 module.exports.validateSession = validateSession;
+module.exports.createRefreshToken = createRefreshToken;
+module.exports.rotateRefreshToken = rotateRefreshToken;
+module.exports.revokeRefreshTokensForSession = revokeRefreshTokensForSession;
 module.exports.signToken = signToken;
 module.exports.setSessionCookieIfAvailable = function setSessionCookieIfAvailable(app, reply, rawId) {
   if (app && typeof app.setSessionCookie === 'function') {

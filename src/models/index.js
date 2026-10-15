@@ -286,12 +286,14 @@ const ALLOWED_TABLES = new Set([
   'sso_configs', 'sso_oidc_states', 'audit_logs', 'yjs_doc_updates',
   'vault_key_params', 'note_invite_links',
   'note_comments',
+  'note_comment_reactions',
   'note_activity',
   // New org tables
   'organizations', 'org_members', 'org_subscriptions', 'org_invites',
   // yjs_documents removed after migration to journal (Task 03.1) — table kept in schema for one release
   'yjs_documents',
   'asset_reservations',
+  'refresh_tokens',
 ]);
 
 function validateTableName(table) {
@@ -302,13 +304,15 @@ function validateTableName(table) {
 
 // Mirrors src/db/schema.postgres.sql (+ ALTER TABLE additions). Keep in sync.
 const ALLOWED_COLUMNS = {
-  accounts: new Set(['id', 'username', 'email_hmac', 'email_encrypted', 'kem_public_key',
-    'device_keys', 'password_hash', 'recovery_key_hash', 'recovery_code_hash', 'recovery_code_generated_at', 'email_verified', 'verification_token_hash', 'verification_expires_at', 'password_reset_token_hash', 'password_reset_expires_at', 'totp_secret_encrypted', 'totp_pending_secret_encrypted', 'totp_pending_expires_at', 'totp_last_timestep', 'failed_login_attempts',
+  accounts: new Set(['id', 'username', 'email_hmac', 'email_sealed', 'kem_public_key',
+    'device_keys', 'password_hash', 'recovery_key_hash', 'recovery_code_hash', 'recovery_code_generated_at', 'email_verified', 'verification_token_hash', 'verification_expires_at', 'password_reset_token_hash', 'password_reset_expires_at', 'totp_secret_sealed', 'totp_pending_secret_sealed', 'totp_pending_expires_at', 'totp_last_timestep', 'failed_login_attempts',
     'locked_until', 'kdf_salt', 'wrapped_aek', 'created_at', 'jwt_revoked_at']),
   sessions: new Set(['id_hash', 'account_id', 'workspace_id', 'device_label', 'device_id',
     'device_fingerprint_hash', 'ip_subnet', 'expires_at', 'last_seen_at', 'revoked', 'created_at']),
+  refresh_tokens: new Set(['id_hash', 'account_id', 'session_id_hash', 'device_label',
+    'device_id', 'expires_at', 'last_used_at', 'revoked', 'rotated_to', 'created_at']),
   commits: new Set(['commit_id', 'account_id', 'device_id', 'note_id_hash', 'workspace_id',
-    'payload_encrypted', 'clock', 'ts', 'size_bytes', 'created_at']),
+    'clock', 'ts', 'size_bytes', 'created_at']),
   workspaces: new Set(['id', 'name_encrypted', 'owner_id', 'org_id', 'vault_wrapped_keys',
     'storage_used_bytes', 'data_residency', 'emoji', 'color', 'created_at']),
   subscriptions: new Set(['id', 'account_id', 'plan', 'status', 'provider', 'renews_at',
@@ -322,17 +326,17 @@ const ALLOWED_COLUMNS = {
   note_keys: new Set(['note_id', 'user_id', 'device_id', 'wrapped_key', 'created_at']),
   workspace_keys: new Set(['workspace_id', 'user_id', 'device_id', 'wrapped_key', 'created_at']),
   org_keys: new Set(['org_id', 'user_id', 'wrapped_key', 'created_at']),
-  note_invitations: new Set(['note_id', 'user_id', 'invited_by', 'role', 'created_at']),
-  email_aliases: new Set(['alias', 'account_id', 'email_encrypted', 'created_at', 'expires_at']),
+  note_invitations: new Set(['note_id', 'user_id', 'invited_by', 'role', 'workspace_id', 'created_at']),
+  email_aliases: new Set(['alias', 'account_id', 'email_sealed', 'created_at', 'expires_at']),
   webauthn_challenges: new Set(['id', 'email_hmac', 'challenge', 'expires_at', 'created_at']),
   workspace_members: new Set(['workspace_id', 'account_id', 'role', 'created_at']),
   workspace_invites: new Set(['token_hash', 'workspace_id', 'role', 'require_approval',
     'expires_at', 'max_uses', 'used_count', 'created_at']),
   sso_configs: new Set(['id', 'workspace_id', 'protocol', 'slug', 'idp_entity_id', 'idp_sso_url',
-    'idp_cert_encrypted', 'oidc_issuer', 'oidc_client_id', 'oidc_client_secret_encrypted',
-    'sp_cert', 'sp_private_key_encrypted', 'allowed_email_domains', 'created_at']),
+    'idp_cert_sealed', 'oidc_issuer', 'oidc_client_id', 'oidc_client_secret_sealed',
+    'sp_cert', 'sp_private_key_sealed', 'allowed_email_domains', 'created_at']),
   sso_oidc_states: new Set(['state', 'code_verifier', 'nonce', 'slug', 'created_at']),
-  audit_logs: new Set(['id', 'account_id_hash', 'workspace_id', 'action', 'metadata_encrypted',
+  audit_logs: new Set(['id', 'account_id_hash', 'workspace_id', 'action', 'metadata_sealed',
     'ip_subnet', 'created_at']),
   yjs_doc_updates: new Set(['id', 'workspace_id', 'note_id', 'update_data', 'update_encrypted',
     'device_id', 'clock', 'ts', 'created_at']),
@@ -341,8 +345,10 @@ const ALLOWED_COLUMNS = {
   note_invite_links: new Set(['id', 'note_id', 'created_by', 'token_hash', 'role',
     'require_approval', 'expires_at', 'revoked', 'created_at']),
   note_comments: new Set(['id', 'note_id', 'thread_id', 'author_id', 'content_encrypted',
-    'content_iv', 'anchor_from', 'anchor_to', 'resolved', 'parent_id', 'mentions',
+    'content_iv', 'resolved', 'parent_id', 'mentions',
     'created_at', 'updated_at']),
+  note_comment_reactions: new Set(['id', 'comment_id', 'user_id', 'emojis_encrypted',
+    'emojis_iv', 'created_at']),
   note_activity: new Set(['id', 'note_id', 'author_id', 'kind', 'content_encrypted',
     'content_iv', 'created_at']),
   organizations: new Set(['id', 'name_encrypted', 'slug', 'created_at']),
@@ -518,6 +524,7 @@ function createModel(table, pkField) {
 
 const Account = createModel('accounts');
 const Session = createModel('sessions', 'id_hash');
+const RefreshToken = createModel('refresh_tokens', 'id_hash');
 const CommitMeta = createModel('commits', 'commit_id');
 const Device = createModel('devices');
 const Subscription = createModel('subscriptions');
@@ -539,6 +546,7 @@ const WebAuthnChallenge = createModel('webauthn_challenges');
 const VaultKeyParams = createModel('vault_key_params');
 const NoteInviteLink = createModel('note_invite_links');
 const NoteComment = createModel('note_comments');
+const NoteCommentReaction = createModel('note_comment_reactions');
 const NoteActivity = createModel('note_activity');
 const Organization = createModel('organizations');
 const OrgMember = createModel('org_members', '_composite');
@@ -546,12 +554,12 @@ const OrgSubscription = createModel('org_subscriptions');
 const OrgInvite = createModel('org_invites');
 
 module.exports = {
-  Account, Session, CommitMeta, Device, Subscription,
+  Account, Session, RefreshToken, CommitMeta, Device, Subscription,
   Credential, QuickConnectCode, CompactionLock,
   NoteKey, WorkspaceKey, OrgKey,
   NoteInvitation,
   Workspace, WorkspaceMember, WorkspaceInvite,
   AuditLog, SsoConfig, SsoOidcState, EmailAlias, WebAuthnChallenge,
-  VaultKeyParams, NoteInviteLink, NoteComment, NoteActivity,
+  VaultKeyParams, NoteInviteLink, NoteComment, NoteCommentReaction, NoteActivity,
   Organization, OrgMember, OrgSubscription, OrgInvite,
 };

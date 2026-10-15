@@ -4,7 +4,7 @@ const bcrypt = require('bcrypt');
 const { z }  = require('zod');
 const { Account, Subscription, Workspace, WorkspaceMember, Organization, OrgMember, OrgSubscription } = require('../models');
 const { createEmptyState } = require('../repositories/syncWorkspaceState');
-const { createSession, setSessionCookieIfAvailable } = require('../middleware/auth');
+const { createSession, createRefreshToken, setSessionCookieIfAvailable } = require('../middleware/auth');
 const { validatePublicKey } = require('../lib/recipient-wrap');
 const { createEmailHash, hashPasswordResetToken } = require('../lib/crypto');
 const mlkem = require('../lib/mlkem');
@@ -75,14 +75,14 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
 
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     const kdfSalt = require('crypto').randomBytes(32).toString('hex');
-    const emailEncrypted = await mlkem.encryptMetadata(email);
+    const emailSealed = await mlkem.encryptMetadata(email);
 
     const kemPublicKey = parsed.data.kemPublicKey;
     if (kemPublicKey && !validatePublicKey(kemPublicKey)) {
       return reply.status(400).send({ error: 'validation_error', message: 'Invalid kemPublicKey.' });
     }
     const sanitizedUsername = sanitizeUsername(parsed.data.username);
-    const accountData = { emailHmac: emailHash, emailEncrypted, passwordHash, kdfSalt };
+    const accountData = { emailHmac: emailHash, emailSealed, passwordHash, kdfSalt };
     if (kemPublicKey) accountData.kemPublicKey = kemPublicKey;
     if (sanitizedUsername) accountData.username = sanitizedUsername;
     const account = await Account.create(accountData);
@@ -118,9 +118,11 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
     audit(req, 'register', {});
 
     setSessionCookieIfAvailable(app, reply, token);
+    const refreshToken = await createRefreshToken(account.id, token, req);
     const profileUsername = sanitizedUsername || null;
     return reply.status(201).send({
       token,
+      refreshToken,
       user: {
         id:    account.id,
         username: profileUsername,
@@ -215,7 +217,7 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
     );
 
     // 02.5: TOTP MFA branch — if TOTP enabled, return single-use ticket instead of session
-    if (account.totpSecretEncrypted) {
+    if (account.totpSecretSealed) {
       const { hashSessionId } = require('../lib/crypto');
       const { getDb } = require('../db');
       const ticket = require('crypto').randomBytes(32).toString('base64url');
@@ -248,8 +250,12 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
     }
 
     setSessionCookieIfAvailable(app, reply, token);
+    // Opaque refresh credential: the session expires, this lets the client come
+    // back silently instead of telling the user to sign in again.
+    const refreshToken = await createRefreshToken(account.id, token, req);
     return reply.send({
       token,
+      refreshToken,
       user: {
         id:    account.id,
         emailHash: account.emailHmac,
@@ -325,7 +331,8 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
         else { subscription.plan = 'enterprise'; subscription.storageQuotaBytes = getQuotaBytes('enterprise'); }
       }
       setSessionCookieIfAvailable(app, reply, token);
-      return reply.send({ token, user: { id: account.id, emailHash: account.emailHmac, kdfSalt: account.kdfSalt, kemPublicKey: account.kemPublicKey || null }, subscription: subscription ?? null });
+      const refreshToken = await createRefreshToken(account.id, token, req);
+      return reply.send({ token, refreshToken, user: { id: account.id, emailHash: account.emailHmac, kdfSalt: account.kdfSalt, kemPublicKey: account.kemPublicKey || null }, subscription: subscription ?? null });
     }
 
     // TOTP path
@@ -333,11 +340,11 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
     if (!/^\d{6}$/.test(rawCode)) {
       return reply.status(401).send({ error: 'invalid_code', message: 'Invalid TOTP code.' });
     }
-    if (!account.totpSecretEncrypted) {
+    if (!account.totpSecretSealed) {
       return reply.status(400).send({ error: 'totp_not_enabled', message: 'TOTP is not enabled on this account.' });
     }
     let secret;
-    try { secret = await require('../lib/mlkem').decryptMetadata(account.totpSecretEncrypted); } catch { return reply.status(500).send({ error: 'decrypt_failed', message: 'Failed to decrypt TOTP secret.' }); }
+    try { secret = await require('../lib/mlkem').decryptMetadata(account.totpSecretSealed); } catch { return reply.status(500).send({ error: 'decrypt_failed', message: 'Failed to decrypt TOTP secret.' }); }
     const { totpVerify } = require('../lib/totp');
     const timestep = totpVerify(secret, rawCode, 1);
     if (timestep === null) {
@@ -358,7 +365,8 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
       else { subscription.plan = 'enterprise'; subscription.storageQuotaBytes = getQuotaBytes('enterprise'); }
     }
     setSessionCookieIfAvailable(app, reply, token);
-    return reply.send({ token, user: { id: account.id, emailHash: account.emailHmac, kdfSalt: account.kdfSalt, kemPublicKey: account.kemPublicKey || null }, subscription: subscription ?? null });
+    const refreshToken = await createRefreshToken(account.id, token, req);
+    return reply.send({ token, refreshToken, user: { id: account.id, emailHash: account.emailHmac, kdfSalt: account.kdfSalt, kemPublicKey: account.kemPublicKey || null }, subscription: subscription ?? null });
   });
 
   // 02.4: password reset — respects LEGACY_AUTH_ENABLED 410 gating

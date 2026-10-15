@@ -48,8 +48,15 @@ async function resolveAuthRole(userId, workspaceId, noteId) {
   if (membership) return { role: membership.role };
 
   // 2. Not a workspace member — verify note actually belongs to this workspace.
+  // Both journal tables, same union as `noteIsServerRegistered`: a note synced
+  // only through the Yjs path has rows in `yjs_doc_updates` and none in
+  // `sync_document_state`, and checking one table alone refused the ticket,
+  // which silently cost the collaborator realtime and presence.
   const { rows } = await query(
-    'SELECT 1 FROM sync_document_state WHERE workspace_id = $1 AND note_id = $2 LIMIT 1',
+    `SELECT 1 FROM sync_document_state WHERE workspace_id = $1 AND note_id = $2
+     UNION ALL
+     SELECT 1 FROM yjs_doc_updates WHERE workspace_id = $1 AND note_id = $2
+     LIMIT 1`,
     [workspaceId, noteId]
   );
   if (rows.length === 0) {
@@ -257,14 +264,14 @@ async function authRoutes(app) {
       [hashSessionId(`ws-ticket:${ticket}`)]
     );
     if (consumed.rows.length === 0) {
-      return reply.status(401).send({ error: 'invalid_ticket', message: 'Ticket is invalid, used, or expired.' });
+      return reply.status(401).send({ error: 'invalid_ticket', message: 'Ticket is invalid, used, or expired. Mint a fresh ws-ticket and retry.', retriable: true });
     }
     const row = consumed.rows[0];
     // The room is part of the ticket so the relay can refuse a cross-tenant
     // redemption. Older rows predate the columns; they are refused rather than
     // trusted, since an unbound ticket is exactly what this check exists to stop.
     if (!row.workspace_id) {
-      return reply.status(401).send({ error: 'invalid_ticket', message: 'Ticket is invalid, used, or expired.' });
+      return reply.status(401).send({ error: 'invalid_ticket', message: 'Ticket is invalid, used, or expired. Mint a fresh ws-ticket and retry.', retriable: true });
     }
     const out = { userId: row.account_id, workspaceId: row.workspace_id, noteId: row.note_id ?? null };
     if (row.device_id) out.deviceId = row.device_id;
@@ -329,7 +336,9 @@ async function authRoutes(app) {
     req.userId = account.id;
     audit(req, 'account_recovered', {});
     setSessionCookieIfAvailable(app, reply, rawId);
-    return reply.send({ token: rawId, sessionToken: rawId, requiresPasskeyEnroll: true, message: 'Account recovered. Please enroll a new passkey. This restores ACCOUNT access only; E2E data needs vault passphrase.' });
+    const { createRefreshToken } = require('../middleware/auth');
+    const refreshToken = await createRefreshToken(account.id, rawId, req);
+    return reply.send({ token: rawId, sessionToken: rawId, refreshToken, requiresPasskeyEnroll: true, message: 'Account recovered. Please enroll a new passkey. This restores ACCOUNT access only; E2E data needs vault passphrase.' });
   });
 
   await registerSessionRoutes(app);

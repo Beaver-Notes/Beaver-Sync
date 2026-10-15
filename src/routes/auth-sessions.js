@@ -27,6 +27,10 @@ async function registerSessionRoutes(app) {
       const { hashSessionId } = require('../lib/crypto');
       const sessionIdHash = hashSessionId(rawId);
       await Session.updateOne({ idHash: sessionIdHash }, { revoked: true });
+      // Refresh tokens outlive the session by design, so logging out has to
+      // kill them explicitly or a client could silently come back.
+      const { revokeRefreshTokensForSession } = require('../middleware/auth');
+      await revokeRefreshTokensForSession(rawId);
     }
 
     audit(req, 'logout', {});
@@ -140,6 +144,41 @@ async function registerSessionRoutes(app) {
 
     app.recordSecurityEvent(req, 'sessions_revoked_all', { revoked, keepCurrent: !!keepIdHash });
     return reply.send({ revoked, keepCurrent: !!keepIdHash });
+  });
+
+  // Exchange a refresh token for a fresh session. Deliberately unauthenticated:
+  // the refresh token is the credential, and it is presented precisely when the
+  // session it was issued with has already expired.
+  app.post('/refresh', {
+    config: {
+      security: { public: true, allowedContentTypes: ['application/json'] },
+      rateLimit: {
+        max: parseInt(process.env.REFRESH_RATE_LIMIT_PER_MINUTE ?? '30', 10),
+        timeWindow: '1 minute',
+      },
+    },
+  }, async (req, reply) => {
+    const { refreshToken } = req.body || {};
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      return reply.status(400).send({ error: 'validation_error', message: 'Refresh token is required.' });
+    }
+
+    // Lazy require: auth.js pulls in this module at load time, and
+    // middleware/auth must not be dragged into that cycle.
+    const { createSession, setSessionCookieIfAvailable, rotateRefreshToken } = require('../middleware/auth');
+    const rotated = await rotateRefreshToken(refreshToken, req);
+    if (!rotated) {
+      return reply.status(401).send({
+        error: 'invalid_refresh_token',
+        message: 'Your session has expired. Please log in again.',
+      });
+    }
+
+    const token = await createSession(rotated.accountId, req);
+    req.userId = rotated.accountId;
+    setSessionCookieIfAvailable(app, reply, token);
+    audit(req, 'session_refreshed', {});
+    return reply.send({ token, sessionToken: token, refreshToken: rotated.refreshToken });
   });
 }
 

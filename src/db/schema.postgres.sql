@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   id                    TEXT PRIMARY KEY,
   username              TEXT,
   email_hmac            TEXT NOT NULL UNIQUE,
-  email_encrypted       TEXT,
+  email_sealed          TEXT, -- sealed to the server with a server-held key, not end-to-end
   kem_public_key        TEXT,
   device_keys           JSONB NOT NULL DEFAULT '[]'::jsonb,
   password_hash         TEXT,
@@ -24,8 +24,8 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verification_token_hash TEXT;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMPTZ;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_reset_token_hash TEXT;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ;
-ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_secret_encrypted TEXT;
-ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_secret_encrypted TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_secret_sealed TEXT; -- sealed to the server with a server-held key, not end-to-end
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_secret_sealed TEXT; -- sealed to the server with a server-held key, not end-to-end
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_pending_expires_at TIMESTAMPTZ;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS totp_last_timestep BIGINT;
 
@@ -85,13 +85,32 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at              TEXT NOT NULL
 );
 
+-- Opaque, single-use, rotating refresh tokens. The raw value is never stored:
+-- only its hash, so a database leak yields nothing usable. Rotating on every
+-- use means a stolen token is detectable (replay) and revocable per session.
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  id_hash          TEXT PRIMARY KEY,
+  account_id       TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  session_id_hash  TEXT,
+  device_label     TEXT NOT NULL DEFAULT 'Unknown Device',
+  device_id        TEXT,
+  expires_at       TEXT NOT NULL,
+  last_used_at     TEXT,
+  revoked          INTEGER NOT NULL DEFAULT 0,
+  rotated_to       TEXT,
+  created_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS refresh_tokens_account_idx ON refresh_tokens (account_id);
+CREATE INDEX IF NOT EXISTS refresh_tokens_session_idx ON refresh_tokens (session_id_hash);
+
 CREATE TABLE IF NOT EXISTS commits (
   commit_id          TEXT PRIMARY KEY,
   account_id         TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   device_id          TEXT NOT NULL,
   note_id_hash       TEXT,
   workspace_id       TEXT,
-  payload_encrypted  TEXT,
+  
   clock              BIGINT NOT NULL,
   ts                 BIGINT NOT NULL,
   size_bytes         BIGINT NOT NULL DEFAULT 0,
@@ -252,6 +271,7 @@ CREATE TABLE IF NOT EXISTS note_invitations (
   user_id      TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   invited_by   TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   role         TEXT NOT NULL DEFAULT 'editor' CHECK(role IN ('editor', 'viewer')),
+  workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
   created_at   TEXT NOT NULL,
   PRIMARY KEY (note_id, user_id)
 );
@@ -287,7 +307,7 @@ CREATE INDEX IF NOT EXISTS idx_note_join_requests_note ON note_join_requests(not
 CREATE TABLE IF NOT EXISTS email_aliases (
   alias            TEXT PRIMARY KEY,
   account_id       TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  email_encrypted  TEXT NOT NULL,
+  email_sealed     TEXT NOT NULL, -- sealed to the server with a server-held key, not end-to-end
   created_at       TEXT NOT NULL,
   expires_at       TEXT
 );
@@ -338,12 +358,12 @@ CREATE TABLE IF NOT EXISTS sso_configs (
   slug                    TEXT NOT NULL UNIQUE,
   idp_entity_id           TEXT,
   idp_sso_url             TEXT,
-  idp_cert_encrypted      TEXT,
+  idp_cert_sealed         TEXT, -- sealed to the server with a server-held key, not end-to-end
   oidc_issuer             TEXT,
   oidc_client_id          TEXT,
-  oidc_client_secret_encrypted TEXT,
+  oidc_client_secret_sealed TEXT, -- sealed to the server with a server-held key, not end-to-end
   sp_cert                 TEXT,
-  sp_private_key_encrypted TEXT,
+  sp_private_key_sealed   TEXT, -- sealed to the server with a server-held key, not end-to-end
   allowed_email_domains   TEXT,
   created_at              TEXT NOT NULL
 );
@@ -361,7 +381,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   account_id_hash   TEXT NOT NULL,
   workspace_id      TEXT,
   action            TEXT NOT NULL,
-  metadata_encrypted TEXT,
+  metadata_sealed   TEXT, -- sealed to the server with a server-held key, not end-to-end
   ip_subnet         TEXT,
   created_at        TEXT NOT NULL
 );
@@ -461,8 +481,7 @@ CREATE TABLE IF NOT EXISTS note_comments (
   author_id         TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   content_encrypted TEXT NOT NULL,
   content_iv        TEXT NOT NULL,
-  anchor_from       BIGINT,
-  anchor_to         BIGINT,
+  
   resolved          INTEGER NOT NULL DEFAULT 0,
   parent_id         TEXT,
   mentions          TEXT NOT NULL DEFAULT '[]',
@@ -472,6 +491,20 @@ CREATE TABLE IF NOT EXISTS note_comments (
 
 CREATE INDEX IF NOT EXISTS idx_note_comments_note ON note_comments(note_id);
 CREATE INDEX IF NOT EXISTS idx_note_comments_thread ON note_comments(thread_id);
+
+-- One row per (comment, user): the user's emoji list encrypted with the note
+-- key (emojis_encrypted/emojis_iv), same privacy as comment bodies — the
+-- server sees who reacted, never what.
+CREATE TABLE IF NOT EXISTS note_comment_reactions (
+  id               TEXT PRIMARY KEY,
+  comment_id       TEXT NOT NULL REFERENCES note_comments(id) ON DELETE CASCADE,
+  user_id          TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  emojis_encrypted TEXT NOT NULL,
+  emojis_iv        TEXT NOT NULL,
+  created_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_comment_reactions_comment ON note_comment_reactions(comment_id);
 
 -- Opaque edit/activity entries for shared notes (Phase 2). Content is encrypted
 -- client-side with the shared note key; the server stores no plaintext.
