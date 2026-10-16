@@ -52,6 +52,16 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+// LINK_TOKEN_SECRET lets the server recompute a link's raw token from its id
+// (only sha256(token) is stored), so GET /links can re-show the URL after a
+// restart or on another device. Unset ⇒ random tokens, URLs stay session-only.
+// Set once (openssl rand -hex 32); rotating the secret invalidates derived links.
+function derivedLinkToken(linkId) {
+  const secret = process.env.LINK_TOKEN_SECRET;
+  if (!secret) return null;
+  return crypto.createHmac('sha256', secret).update(linkId).digest('hex');
+}
+
 // noteIds are claim keys for unclaimed notes; floor blocks brute-forceable short IDs (M-2)
 const NoteIdSchema = z.string().min(16).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 
@@ -145,6 +155,35 @@ async function callerOwnsNote(userId, noteId, workspaceId = null) {
   return member.rows.length > 0;
 }
 
+// Join-time workspace routing: a collaborator joining via invite link or
+// approval must land in the workspace the note lives in, or clients open the
+// note under the wrong workspace. Returns null when nothing resolves so the
+// join still succeeds with the previous NULL behavior.
+async function resolveNoteWorkspaceId(noteId, preferredUserId = null) {
+  if (preferredUserId) {
+    const { rows } = await query(
+      `SELECT workspace_id FROM note_invitations WHERE note_id = $1 AND user_id = $2 AND workspace_id IS NOT NULL LIMIT 1`,
+      [noteId, preferredUserId]
+    );
+    if (rows[0]?.workspace_id) return rows[0].workspace_id;
+  }
+  const { rows: anyRows } = await query(
+    `SELECT workspace_id FROM note_invitations WHERE note_id = $1 AND workspace_id IS NOT NULL LIMIT 1`,
+    [noteId]
+  );
+  if (anyRows[0]?.workspace_id) return anyRows[0].workspace_id;
+  const { rows: stateRows } = await query(
+    `SELECT workspace_id FROM sync_document_state WHERE note_id = $1 LIMIT 1`,
+    [noteId]
+  );
+  if (stateRows[0]?.workspace_id) return stateRows[0].workspace_id;
+  const { rows: journalRows } = await query(
+    `SELECT workspace_id FROM yjs_doc_updates WHERE note_id = $1 ORDER BY created_at DESC, ts DESC LIMIT 1`,
+    [noteId]
+  );
+  return journalRows[0]?.workspace_id ?? null;
+}
+
 // Gate access to a note's collaboration context. The caller must already be a
 // collaborator. With `bootstrap: true` (invite creation only) a caller may
 // claim a note that has no collaborators yet - this is how the user who
@@ -176,9 +215,9 @@ async function requireCollaborator(reply, noteId, userId, { bootstrap = false, w
       const { rows } = await client.query('SELECT 1 FROM note_invitations WHERE note_id = $1 LIMIT 1', [noteId]);
       if (rows.length > 0) return false;
       await client.query(
-        `INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at)
-         VALUES ($1, $2, $2, 'editor', $3) ON CONFLICT DO NOTHING`,
-        [noteId, userId, now]
+        `INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at, workspace_id)
+         VALUES ($1, $2, $2, 'editor', $3, $4) ON CONFLICT DO NOTHING`,
+        [noteId, userId, now, typeof workspaceId === 'string' && workspaceId ? workspaceId : null]
       );
       return true;
     });
@@ -580,28 +619,69 @@ async function collaborationRoutes(app) {
     const invitations = await NoteInvitation.find({ noteId }).lean();
     const userIds = [...new Set(invitations.map((inv) => inv.userId))];
     const accounts = userIds.length > 0
-      ? await Account.find({ id: { $in: userIds } }, { id: 1, kemPublicKey: 1, deviceKeys: 1 }).lean()
+      ? await Account.find({ id: { $in: userIds } }, { id: 1, username: 1, kemPublicKey: 1, deviceKeys: 1 }).lean()
       : [];
+    // One entry per user, carrying the role they were actually invited with.
+    // An unknown/missing role must never widen to 'editor', so it falls back
+    // to the least privileged value instead.
+    const roleByUser = new Map(
+      invitations.map((inv) => [inv.userId, inv.role === 'editor' ? 'editor' : 'viewer'])
+    );
     // Which (user, device) pairs already hold an envelope: lets a key-holding
     // collaborator re-wrap only for the devices still missing one. Existence
-    // only; no key material is ever exposed.
+    // only; no key material is ever exposed. A legacy account-level row
+    // (device_id NULL) is read by any device of that account, so it covers the
+    // 'default' device the client stores under.
     const { rows: envelopeRows } = await query(
       'SELECT user_id, device_id FROM note_keys WHERE note_id = $1',
       [noteId]
     );
-    const wrapped = new Set(envelopeRows.map((r) => `${r.user_id}:${r.device_id}`));
+    const wrapped = new Set();
+    const legacyHolders = new Set();
+    const heldDevices = new Map();
+    for (const r of envelopeRows) {
+      if (r.device_id == null) {
+        legacyHolders.add(r.user_id);
+        continue;
+      }
+      wrapped.add(`${r.user_id}:${r.device_id}`);
+      const set = heldDevices.get(r.user_id) || new Set();
+      set.add(r.device_id);
+      heldDevices.set(r.user_id, set);
+    }
 
+    // Flat, one entry per device: the client's key fan-out
+    // (`src/utils/crypto/note-key.js`) reads `kemPublicKey`/`deviceId` off each
+    // entry, so nesting them per user would silently disable note-key
+    // provisioning. `username`/`role` ride along so the collaborator list can
+    // name people and honour the role they were actually invited with.
     const collaborators = [];
-    for (const a of accounts.filter((x) => x.kemPublicKey)) {
-      const devices = (a.deviceKeys && a.deviceKeys.length)
-        ? a.deviceKeys
-        : [{ deviceId: 'default', publicKey: a.kemPublicKey }];
-      for (const d of devices) {
+    for (const a of accounts) {
+      const username = a.username || null;
+      const role = roleByUser.get(a.id) || 'viewer';
+      const declared = Array.isArray(a.deviceKeys) ? a.deviceKeys.filter((d) => d && d.deviceId) : [];
+      // deviceId -> public key. An account with no declared device keys has a
+      // single implicit 'default' device, which is where a device-less client
+      // stores (and reads back) its envelope.
+      const devices = new Map();
+      for (const d of declared) devices.set(d.deviceId, d.publicKey ?? null);
+      if (devices.size === 0 && a.kemPublicKey) devices.set('default', a.kemPublicKey);
+      // A device holding an envelope but absent from `device_keys` (its keypair
+      // row was replaced, or the envelope predates device registration) is
+      // still a member device: list it so the holder stays discoverable.
+      for (const deviceId of heldDevices.get(a.id) || []) {
+        if (!devices.has(deviceId)) devices.set(deviceId, null);
+      }
+      if (devices.size === 0) continue;
+      for (const [deviceId, publicKey] of devices) {
         collaborators.push({
           userId: a.id,
-          deviceId: d.deviceId,
-          kemPublicKey: d.publicKey,
-          hasEnvelope: wrapped.has(`${a.id}:${d.deviceId}`),
+          username,
+          role,
+          deviceId,
+          kemPublicKey: publicKey,
+          hasEnvelope: wrapped.has(`${a.id}:${deviceId}`)
+            || (deviceId === 'default' && legacyHolders.has(a.id)),
         });
       }
     }
@@ -669,7 +749,14 @@ async function collaborationRoutes(app) {
     }
 
     const role = req.body.role === 'viewer' ? 'viewer' : 'editor';
-    await NoteInvitation.create({ noteId, userId: target.id, invitedBy: req.userId, role, createdAt: new Date() });
+    await NoteInvitation.create({
+      noteId,
+      userId: target.id,
+      invitedBy: req.userId,
+      role,
+      workspaceId: typeof workspaceId === 'string' && workspaceId ? workspaceId : null,
+      createdAt: new Date(),
+    });
 
     const rawToken = crypto.randomBytes(32).toString('base64url');
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
@@ -793,7 +880,8 @@ async function collaborationRoutes(app) {
       }
     }
 
-    const rawToken = generateToken();
+    const linkId = crypto.randomUUID();
+    const rawToken = derivedLinkToken(linkId) ?? generateToken();
     const tokenHash = hashToken(rawToken);
 
     let expiresAt = null;
@@ -805,6 +893,7 @@ async function collaborationRoutes(app) {
     }
 
     const link = await NoteInviteLink.create({
+      id: linkId,
       noteId,
       createdBy: req.userId,
       tokenHash,
@@ -833,7 +922,17 @@ async function collaborationRoutes(app) {
       revoked: 0,
     }).sort({ createdAt: -1 }).lean();
 
-    return reply.send({ links });
+    // Re-shoot derived tokens for the caller: verified against the stored hash
+    // so legacy random links (and email invites) simply come back tokenless.
+    return reply.send({
+      links: links.map((l) => {
+        const derived = derivedLinkToken(l.id);
+        if (derived && hashToken(derived) === l.tokenHash) {
+          return { ...l, token: derived };
+        }
+        return l;
+      }),
+    });
   });
 
   app.delete('/links/:noteId/:linkId', { preHandler: [app.authenticate] }, async (req, reply) => {
@@ -867,11 +966,6 @@ async function collaborationRoutes(app) {
       return reply.send({ success: true, message: 'Already a member.', noteId: link.noteId, role: existing.role });
     }
 
-    const joiner = await Account.findById(req.userId, { kemPublicKey: 1 }).lean();
-    if (!joiner || !joiner.kemPublicKey) {
-      return reply.status(403).send({ error: 'keypair_required', message: 'Set up end-to-end encryption before joining.' });
-    }
-
     // `requireApproval` links are request-access links: joining silently would
     // make the setting a lie. Record a durable per-account request (mirroring
     // org_join_requests) so one editor approval can grant this account and no
@@ -890,11 +984,13 @@ async function collaborationRoutes(app) {
       });
     }
 
+    const joinWorkspaceId = await resolveNoteWorkspaceId(link.noteId, link.createdBy);
     await NoteInvitation.create({
       noteId: link.noteId,
       userId: req.userId,
       invitedBy: link.createdBy,
       role: link.role,
+      workspaceId: typeof joinWorkspaceId === 'string' && joinWorkspaceId ? joinWorkspaceId : null,
     });
 
     return reply.status(201).send({
@@ -994,10 +1090,11 @@ async function collaborationRoutes(app) {
 
     // Idempotent insert, then consume the request. A concurrent double-approve
     // cannot create two invitations (PK) and one delete is a no-op.
+    const approveWorkspaceId = await resolveNoteWorkspaceId(request.note_id, req.userId);
     await query(
-      `INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at)
-       VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
-      [request.note_id, request.account_id, req.userId, role, new Date().toISOString()]
+      `INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at, workspace_id)
+       VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
+      [request.note_id, request.account_id, req.userId, role, new Date().toISOString(), approveWorkspaceId ?? null]
     );
     // Consume every pending request from this account for this note, so a
     // second invite link cannot leave a stale "pending" row for a collaborator.
@@ -1044,7 +1141,14 @@ async function collaborationRoutes(app) {
     ...baseRateLimit,
     ...protect,
   }, async (req, reply) => {
-    const invitations = await NoteInvitation.find({ userId: req.userId }).lean();
+    // The note owner is represented by an invitation row whose invitedBy is
+    // the owner themself (requireCollaborator mints it). That is the owner's
+    // access record, not a share, so it must not reach the client: listing it
+    // makes the client mark its own notes as foreign and pull them into
+    // whichever workspace is active when it reconciles.
+    const invitations = await NoteInvitation.find(
+      { userId: req.userId, invitedBy: { $ne: req.userId } }
+    ).lean();
 
     // A note may not have been pushed to the server yet, so its owning workspace
     // can be unknown; return null and let the client fall back.

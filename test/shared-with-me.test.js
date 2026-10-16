@@ -118,6 +118,25 @@ test('shared-with-me lists exactly the caller\'s note invitations with the ownin
   assert.equal(strangerRes.json().shared.length, 0);
 });
 
+test('the owner\'s own editor row does not surface as shared-with-me', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+
+  // The owner of a collaborative note is represented by an invitation row
+  // whose invitedBy is the owner (requireCollaborator's claim insert). That
+  // row is the owner's access record, not a share: listing it made the client
+  // pull account-owned notes into whatever workspace was active.
+  const { owner, wsId } = await seedWorkspace('swm-self');
+  const noteId = `note-${crypto.randomUUID()}`;
+  await seedNoteInWorkspace(wsId, noteId);
+  // The exact shape requireCollaborator mints: user_id = invited_by = owner.
+  await seedInvitation(noteId, owner.id, owner.id, 'editor');
+
+  const res = await req(app, 'GET', '/collaboration/shared-with-me', await authHeaders(owner.id), undefined);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().shared.length, 0);
+});
+
 test('an invited non-member can pull and push the invited note', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
