@@ -193,10 +193,11 @@ test('public-keys returns only collaborators with keypairs and 403s for outsider
   await seedAccount('pk-user1', PUBKEY_2);
   await seedAccount('pk-user2', null);
   await seedAccount('pk-outsider', PUBKEY);
+  const nowRoles = { 'pk-owner': 'editor', 'pk-user1': 'viewer', 'pk-user2': 'editor' };
   for (const uid of ['pk-owner', 'pk-user1', 'pk-user2']) {
     await query(
       'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',
-      ['note-pubkey-test', uid, 'pk-owner', 'editor', now]
+      ['note-pubkey-test', uid, 'pk-owner', nowRoles[uid], now]
     );
   }
 
@@ -205,9 +206,11 @@ test('public-keys returns only collaborators with keypairs and 403s for outsider
 
   const response = await inject(app, ownerSession, 'GET', '/collaboration/public-keys/note-pubkey-test');
   assert.equal(response.statusCode, 200);
+  // Flat per-device entries carrying the invited role verbatim: a `viewer`
+  // must never be reported as `editor`, which would widen their access.
   const expected = [
-    { userId: 'pk-owner', deviceId: 'default', kemPublicKey: PUBKEY, hasEnvelope: false },
-    { userId: 'pk-user1', deviceId: 'default', kemPublicKey: PUBKEY_2, hasEnvelope: false },
+    { userId: 'pk-owner', username: 'pk-owner', role: 'editor', deviceId: 'default', kemPublicKey: PUBKEY, hasEnvelope: false },
+    { userId: 'pk-user1', username: 'pk-user1', role: 'viewer', deviceId: 'default', kemPublicKey: PUBKEY_2, hasEnvelope: false },
   ];
   assert.deepEqual(
     response.json().collaborators.sort((a, b) => a.userId.localeCompare(b.userId)),
@@ -216,7 +219,9 @@ test('public-keys returns only collaborators with keypairs and 403s for outsider
 
   const forbidden = await inject(app, outsiderSession, 'GET', '/collaboration/public-keys/note-pubkey-test');
   assert.equal(forbidden.statusCode, 403);
-  assert.equal(forbidden.json().error, 'forbidden');
+  // The endpoint now bootstraps ownership on first touch; a non-owner's
+  // claim is refused with note_ownership_required (still 403).
+  assert.equal(forbidden.json().error, 'note_ownership_required');
 });
 
 test('a free account cannot join a team org through an invite link', async (t) => {

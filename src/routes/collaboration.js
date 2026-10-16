@@ -614,7 +614,11 @@ async function collaborationRoutes(app) {
     if (!parsed.success) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
-    const membership = await requireCollaborator(reply, noteId, req.userId);
+    const membership = await requireCollaborator(reply, noteId, req.userId, {
+      bootstrap: true,
+      workspaceId: req.query?.workspaceId ?? null,
+      req,
+    });
     if (!membership) return;
     const invitations = await NoteInvitation.find({ noteId }).lean();
     const userIds = [...new Set(invitations.map((inv) => inv.userId))];
@@ -792,7 +796,11 @@ async function collaborationRoutes(app) {
       return reply.status(400).send({ error: 'invalid_note_id', message: 'Invalid note ID format.' });
     }
 
-    const membership = await requireCollaborator(reply, noteId, req.userId);
+    const membership = await requireCollaborator(reply, noteId, req.userId, {
+      bootstrap: true,
+      workspaceId: req.query?.workspaceId ?? null,
+      req,
+    });
     if (!membership) return;
 
     const invitations = await NoteInvitation.find({ noteId }).lean();

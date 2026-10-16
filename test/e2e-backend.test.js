@@ -234,5 +234,7 @@ test('public-keys exposes only keypair\u2019d collaborators and rejects non-coll
   const outsiderSession = await createSession('outsider', {});
   const denied = await get(outsiderSession, '/collaboration/public-keys/note-public-keys');
   assert.equal(denied.statusCode, 403);
-  assert.equal(denied.json().error, 'forbidden');
+  // Bootstrap widening on the key endpoints: a non-owner's first touch is now the
+  // ownership-refusal path of the self-claim, not the plain-gate forbidden.
+  assert.equal(denied.json().error, 'note_ownership_required');
 });
