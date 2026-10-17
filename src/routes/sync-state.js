@@ -14,6 +14,8 @@ const {
 } = require('../repositories/syncWorkspaceState');
 const { requireWorkspaceMember, requireWorkspaceOwner } = require('../middleware/org');
 const { audit } = require('../lib/audit');
+const { query } = require('../db');
+const { advanceDocumentSyncState } = require('../persistence/yjs-queries');
 
 const CLAIM_TTL_MS = 30 * 60 * 1000;
 
@@ -76,7 +78,7 @@ async function verifyObject(storage, key, error) {
   } catch (err) {
     // S3 transient (ECONNREFUSED / 5xx / creds) must surface as 503 so clients
     // retry, but tests that expect a deterministic 400 for missing synthetic
-    // keys run without a live MinIO. Treat unreachable as "missing" only in test.
+    // keys run without a live object store. Treat unreachable as "missing" only in test.
     if (process.env.NODE_ENV === 'test') return error;
     throw err;
   }
@@ -150,7 +152,20 @@ async function syncStateRoutes(app) {
     const expiresAt = new Date(Date.now() + CLAIM_TTL_MS).toISOString();
     const now = new Date().toISOString();
     const claimed = await claimInitialization({ workspaceId, token, expiresAt, now });
-    if (!claimed) return reply.status(409).send({ error: 'sync_already_initialized' });
+    if (!claimed) {
+      const state = await getStatus(workspaceId);
+      const heldUntil = state ? state.initialization_expires_at ?? null : null;
+      // A live lease is the one case a client can retry after waiting; anything
+      // else (already initialized, missing row) will never clear on its own.
+      const leaseActive = state?.status === 'initializing'
+        && heldUntil !== null
+        && new Date(heldUntil) > new Date();
+      return reply.status(409).send({
+        error: 'sync_already_initialized',
+        heldUntil,
+        reason: leaseActive ? 'lease_active' : null,
+      });
+    }
     return reply.send({ token, expiresAt });
   });
 
@@ -246,11 +261,98 @@ async function syncStateRoutes(app) {
       // consistency failure, not a client error.
       if (error) return reply.status(503).send({ error });
     } catch {
-      // R2/MinIO outage or network error — must surface as 503 so clients
+      // Object-store outage or network error — must surface as 503 so clients
       // retry, never as a 400 client failure.
       return reply.status(503).send({ error: 'snapshot_upload_failed' });
     }
     return reply.send({ key, generation, sizeBytes: body.length });
+  });
+
+  // Steady-state compaction snapshot. The initialize/claim -> snapshot ->
+  // complete chain only succeeds on a never-initialized workspace (claim
+  // matches status 'empty' or a stalled 'initializing'), so a live
+  // 'initialized' workspace could never record a post-compaction
+  // generation and the GC job never refunded the superseded rows. This
+  // route advances the per-note snapshot generation directly — monotonic,
+  // never touching sync_workspace_state — so the client's compaction
+  // upload works on a live workspace and the GC can retire the sealed
+  // update rows this snapshot supersedes.
+  app.post('/snapshot-promote', protect, async (req, reply) => {
+    const parsed = z.object({
+      workspaceId: z.string().min(1),
+      noteId: z.string().min(1),
+      generation: z.number().int().positive(),
+      snapshotTs: z.number().int().nonnegative().default(0),
+      data: z.string().min(1),
+    }).strict().safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
+    }
+    const { workspaceId, noteId, generation, snapshotTs, data } = parsed.data;
+    const membership = await requireWorkspaceOwner(req, reply, workspaceId);
+    if (reply.sent || !membership) return;
+
+    const storage = getObjectStorage();
+    if (!storage) return reply.status(503).send({ error: 'storage_unavailable' });
+    if (!validKeySegment(workspaceId) || !validKeySegment(noteId)) {
+      return reply.status(400).send({ error: 'invalid_snapshot_key' });
+    }
+    const key = snapshotKeyFor(workspaceId, noteId, generation);
+    let body;
+    try {
+      body = Buffer.from(data, 'base64');
+      if (!body.length || body.toString('base64') !== data) {
+        return reply.status(400).send({ error: 'invalid_base64' });
+      }
+    } catch {
+      return reply.status(400).send({ error: 'invalid_base64' });
+    }
+
+    let previousSnapshotKey = null;
+    try {
+      const prior = await query(
+        'SELECT snapshot_key FROM sync_document_state WHERE workspace_id = $1 AND note_id = $2',
+        [workspaceId, noteId]
+      );
+      previousSnapshotKey = prior.rows[0]?.snapshot_key ?? null;
+    } catch {
+      // Unknown previous key: the put below still proceeds; cleanup just no-ops.
+    }
+
+    try {
+      await storage.put(key, body, 'application/octet-stream');
+      const error = await verifyObject(storage, key, 'snapshot_verification_failed');
+      if (error) return reply.status(503).send({ error });
+    } catch {
+      return reply.status(503).send({ error: 'snapshot_upload_failed' });
+    }
+
+    try {
+      await advanceDocumentSyncState(workspaceId, noteId, generation, key, snapshotTs);
+    } catch {
+      // The snapshot bytes are already in R2 under this key; a retry
+      // re-puts the identical object (idempotent) and then records the
+      // generation, so this is safe to retry.
+      return reply.status(503).send({ error: 'snapshot_promote_failed' });
+    }
+
+    // Retire the superseded generation only after the new one is recorded;
+    // readers resolve the key from sync_document_state, so the old object is
+    // unreachable dead weight that otherwise accumulates one file per
+    // compaction forever.
+    if (previousSnapshotKey && previousSnapshotKey !== key && typeof storage.del === 'function') {
+      try {
+        await storage.del(previousSnapshotKey);
+      } catch {
+        // An orphaned old generation is a leak, not an outage.
+      }
+    }
+    const { rows } = await query(
+      'SELECT snapshot_generation FROM sync_document_state WHERE workspace_id = $1 AND note_id = $2',
+      [workspaceId, noteId]
+    );
+    const recorded = rows[0]?.snapshot_generation ?? generation;
+    return reply.send({ ok: true, workspaceId, noteId, generation: recorded, key });
   });
 
   app.post('/initialize/snapshot-urls', protect, async (req, reply) => {

@@ -87,7 +87,39 @@ async function compactNote(workspaceId, noteId, cutoffTs, ownerId, plan, now) {
   // snapshots through routes/sync-state.js /initialize/snapshot. Mirrors the
   // update_encrypted = 0 filter in persistence/yjs-queries.js:176.
   const sealed = aged.filter((r) => r.update_encrypted);
-  if (sealed.length > 0) return { compacted: 0, reclaimed: 0, skipped: aged.length };
+  if (sealed.length > 0) {
+    const { rows: stateRows } = await query('SELECT snapshot_generation FROM sync_document_state WHERE workspace_id=$1 AND note_id=$2', [workspaceId, noteId]);
+    if (!stateRows[0]?.snapshot_generation) return { compacted: 0, reclaimed: 0, skipped: aged.length };
+
+    // The client owns the note keys and uploads a merged snapshot after every local
+    // compaction (routes/sync-state.js), so a recorded snapshot_generation means the
+    // snapshot in R2 already covers these aged sealed envelopes. The server can drop
+    // them without merging: nothing new is written, they are pure journal redundancy.
+    const deletedBytes = sealed.reduce((s, r) => s + Number(r.size ?? r.update_data.length ?? 0), 0);
+    const sealedIds = sealed.map((r) => r.id);
+    for (let i = 0; i < sealedIds.length; i += 500) {
+      const chunk = sealedIds.slice(i, i + 500);
+      const placeholders = chunk.map((_, idx) => `$${idx + 3}`).join(',');
+      await query(`DELETE FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2 AND id IN (${placeholders})`, [workspaceId, noteId, ...chunk]);
+    }
+
+    // Quota netting: same expression as the merge path, but no snapshot bytes are
+    // written, so snapshotSize is 0 and the whole charge for the deleted rows falls.
+    const snapshotSize = 0;
+    const netChange = snapshotSize - deletedBytes;
+    if (netChange !== 0 && plan !== 'enterprise') {
+      const { rows: wsRows2 } = await query('SELECT org_id FROM workspaces WHERE id=$1', [workspaceId]);
+      const wsOrgId = wsRows2[0]?.org_id;
+      const isTeamWithOrg = wsOrgId && ['team', 'enterprise'].includes(plan);
+      if (isTeamWithOrg) {
+        await query('UPDATE workspaces SET storage_used_bytes = GREATEST(0, storage_used_bytes + $1) WHERE id=$2', [netChange, workspaceId]);
+      } else if (ownerId) {
+        await query('UPDATE subscriptions SET storage_used_bytes = GREATEST(0, storage_used_bytes + $1) WHERE account_id=$2', [netChange, ownerId]);
+      }
+    }
+
+    return { compacted: sealed.length, reclaimed: deletedBytes, snapshotSize, deletedBytes };
+  }
 
   // Build snapshot from aged rows only
   let snapshotData;
@@ -105,7 +137,8 @@ async function compactNote(workspaceId, noteId, cutoffTs, ownerId, plan, now) {
 
   // r2 put with parameterized? use r2 service (zero-knowledge, just bytes)
   const r2 = require('../services/r2');
-  const { rows: stateRows } = await query('SELECT snapshot_generation FROM sync_document_state WHERE workspace_id=$1 AND note_id=$2', [workspaceId, noteId]);
+  const { rows: stateRows } = await query('SELECT snapshot_generation, snapshot_key FROM sync_document_state WHERE workspace_id=$1 AND note_id=$2', [workspaceId, noteId]);
+  const previousSnapshotKey = stateRows[0]?.snapshot_key ?? null;
   const nextGen = (stateRows[0]?.snapshot_generation ?? 0) + 1;
   const key = snapshotKeyFor(workspaceId, noteId, nextGen);
   const maxTs = Math.max(...aged.map((r) => r.ts));
@@ -113,6 +146,13 @@ async function compactNote(workspaceId, noteId, cutoffTs, ownerId, plan, now) {
 
   // Put snapshot (snapshot-lock style: advisory already held per workspace)
   await r2.put(key, snapBuf, 'application/octet-stream');
+
+  // Retire the superseded generation only after the new object is durable;
+  // state now points at `key`, so the old snapshot is unreachable dead weight
+  // that otherwise accumulates one object per compaction forever.
+  if (previousSnapshotKey && previousSnapshotKey !== key) {
+    try { await r2.del(previousSnapshotKey); } catch { /* keep going: an orphaned old gen is a leak, not an outage */ }
+  }
 
   // Upsert sync_document_state (+ checkpoint)
   await query(
