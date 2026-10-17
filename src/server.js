@@ -179,13 +179,17 @@ async function buildApp() {
             .split(',')
             .map((origin) => origin.trim())
             .filter(Boolean)
-            // `tauri.localhost` is the WebView origin on Tauri Android (and the
-            // bundled-asset origin generally); `tauri://localhost` is the desktop
-            // custom scheme. Both must be allowed or a mobile client gets CORS
-            // failures on `/auth/token` while desktop works. Appended here
-            // rather than left to ALLOWED_ORIGINS, which operators fill with
-            // web origins and which cannot be relied on to carry a scheme.
-            .concat(['tauri://localhost', 'tauri.localhost'])
+            // `http(s)://tauri.localhost` is the WebView origin on Tauri Android
+            // and Windows; `tauri://localhost` is the desktop custom scheme.
+            // All schemes are appended because @fastify/cors compares entries
+            // by strict equality against the Origin header, and operators fill
+            // ALLOWED_ORIGINS with web origins that cannot be relied on to
+            // carry every scheme.
+            .concat([
+              'tauri://localhost',
+              'http://tauri.localhost',
+              'https://tauri.localhost',
+            ])
         : /^(https?:\/\/(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?|tauri:\/\/localhost)$/,
     credentials: true,
   });
