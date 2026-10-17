@@ -96,7 +96,6 @@ test('relay bindState reconstructs from S3 snapshot + journal tail', async () =>
   const pool = getPool();
   const relayPersistence = createPostgresPersistence(pool);
 
-  // This test verifies the bindState reconstruction logic works
   // Note: Full S3 integration requires storage service, so we test the journal path
 
   const relayDoc = new Y.Doc();

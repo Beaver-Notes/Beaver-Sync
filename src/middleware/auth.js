@@ -170,7 +170,6 @@ async function authPlugin(app) {
   });
 }
 
-// --- refresh tokens -------------------------------------------------------
 // Opaque, single-use, rotating. The raw value is never stored — only its hash —
 // and every exchange replaces it. Presenting an already-rotated token proves
 // the value leaked, so the whole family is dropped instead of being re-issued.
