@@ -20,7 +20,7 @@ process.on('unhandledRejection', (reason) => {
 function validateRequiredEnv() {
   const missing = [];
   const isProduction = process.env.NODE_ENV === 'production';
-  const legacyAuth = process.env.LEGACY_AUTH_ENABLED === 'true';
+  const legacyAuth = process.env.LEGACY_AUTH_ENABLED !== 'false';
 
   function requireVar(name, condition = true, minLength = 0) {
     const value = process.env[name];

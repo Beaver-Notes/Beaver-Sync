@@ -21,16 +21,19 @@ function loadKeys() {
     privateKey = fs.readFileSync(process.env.JWT_PRIVATE_KEY_PATH, 'utf8');
     publicKey  = fs.readFileSync(process.env.JWT_PUBLIC_KEY_PATH,  'utf8');
   } catch {
-    console.error(
-      'JWT keys not found. Run: npm run generate-keys\n' +
+    // Legacy JWT keys are optional: without them only the legacy JWT fallback
+    // breaks (sessions still authenticate), so a missing file must not kill
+    // the boot — legacy is now on by default and fresh installs/tests have no
+    // key files yet.
+    console.warn(
+      'JWT keys not found — legacy JWT fallback disabled. Run: npm run generate-keys to enable it.\n' +
       `   Private: ${process.env.JWT_PRIVATE_KEY_PATH}\n` +
       `   Public:  ${process.env.JWT_PUBLIC_KEY_PATH}`
     );
-    process.exit(1);
   }
 }
 
-if (process.env.LEGACY_AUTH_ENABLED === 'true') {
+if (process.env.LEGACY_AUTH_ENABLED !== 'false') {
   loadKeys();
 }
 
@@ -136,7 +139,7 @@ async function authPlugin(app) {
       return;
     }
 
-    if (process.env.LEGACY_AUTH_ENABLED === 'true') {
+    if (process.env.LEGACY_AUTH_ENABLED !== 'false') {
       try {
         const payload = verifyToken(rawId);
         // Stateless JWTs are revocable via accounts.jwt_revoked_at (set by /auth/revoke-legacy)

@@ -45,7 +45,7 @@ const LoginSchema = z.object({
 
 async function registerLegacyPasswordRoutes(app, authRateLimit) {
   app.post('/register', authRateLimit, async (req, reply) => {
-    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+    if (process.env.LEGACY_AUTH_ENABLED === 'false') {
       return reply.status(410).send({
         error: 'legacy_auth_disabled',
         message: 'Password authentication has been replaced by passkeys.',
@@ -149,7 +149,7 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
   });
 
   app.post('/token', authRateLimit, async (req, reply) => {
-    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+    if (process.env.LEGACY_AUTH_ENABLED === 'false') {
       return reply.status(410).send({
         error: 'legacy_auth_disabled',
         message: 'Password authentication has been replaced by passkeys.',
@@ -273,7 +273,7 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
       rateLimit: { max: parseInt(process.env.MFA_RATE_LIMIT_PER_MINUTE ?? '10', 10), timeWindow: '1 minute' },
     },
   }, async (req, reply) => {
-    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+    if (process.env.LEGACY_AUTH_ENABLED === 'false') {
       return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Password authentication has been replaced by passkeys.' });
     }
     const { challenge, mfaChallenge, code, recoveryCode } = req.body ?? {};
@@ -377,7 +377,7 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
       rateLimit: { max: parseInt(process.env.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_MINUTE ?? '5', 10), timeWindow: '1 minute' },
     },
   }, async (req, reply) => {
-    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+    if (process.env.LEGACY_AUTH_ENABLED === 'false') {
       return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Password authentication has been replaced by passkeys.' });
     }
     const { email } = req.body ?? {};
@@ -411,7 +411,7 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
       rateLimit: { max: parseInt(process.env.PASSWORD_RESET_COMPLETE_RATE_LIMIT_PER_MINUTE ?? '5', 10), timeWindow: '1 minute' },
     },
   }, async (req, reply) => {
-    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+    if (process.env.LEGACY_AUTH_ENABLED === 'false') {
       return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Password authentication has been replaced by passkeys.' });
     }
     const { token, password, newPassword } = req.body ?? {};

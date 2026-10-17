@@ -43,7 +43,7 @@ async function registerSessionRoutes(app) {
     preHandler: [app.authenticate],
     config: { rateLimit: { max: 5, timeWindow: '1 minute' } },
   }, async (req, reply) => {
-    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+    if (process.env.LEGACY_AUTH_ENABLED === 'false') {
       return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Legacy auth is disabled.' });
     }
     await Account.updateOne({ _id: req.userId }, { $set: { jwtRevokedAt: new Date() } });

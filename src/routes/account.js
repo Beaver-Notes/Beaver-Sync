@@ -39,7 +39,7 @@ async function accountRoutes(app) {
     },
   }, async (req, reply) => {
     const [account, sub, devices, memberships] = await Promise.all([
-      Account.findById(req.userId, { username: 1, emailHmac: 1, emailEncrypted: 1, emailVerified: 1, createdAt: 1, kemPublicKey: 1, deviceKeys: 1 }).lean(),
+      Account.findById(req.userId, { id: 1, username: 1, emailHmac: 1, emailSealed: 1, emailVerified: 1, createdAt: 1, kemPublicKey: 1, deviceKeys: 1 }).lean(),
       Subscription.findOne({ accountId: req.userId }).lean(),
       Device.find({ accountId: req.userId }).sort({ lastSeen: -1 }).lean(),
       OrgMember.find({ account_id: req.userId }).lean(),
@@ -100,10 +100,12 @@ async function accountRoutes(app) {
       : 0;
 
     let email = null;
-    if (account.emailEncrypted) {
+    if (account.emailSealed) {
       try {
-        email = await mlkem.decryptMetadata(account.emailEncrypted);
-      } catch { }
+        email = await mlkem.decryptMetadata(account.emailSealed);
+      } catch (err) {
+        app.log.warn({ err, userId: req.userId }, 'Failed to decrypt account email');
+      }
     }
 
     return reply.send({
@@ -318,7 +320,7 @@ async function accountRoutes(app) {
       },
     },
   }, async (req, reply) => {
-    const account = await Account.findById(req.userId, { emailVerified: 1, emailEncrypted: 1 }).lean();
+    const account = await Account.findById(req.userId, { emailVerified: 1, emailSealed: 1 }).lean();
     if (!account) return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
     if (account.emailVerified) return reply.send({ sent: false, alreadyVerified: true });
     const rawToken = crypto.randomBytes(32).toString('hex');
@@ -326,8 +328,8 @@ async function accountRoutes(app) {
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     await Account.updateOne({ _id: req.userId }, { verificationTokenHash: tokenHash, verificationExpiresAt: expiresAt });
     let email = null;
-    if (account.emailEncrypted) {
-      try { email = await mlkem.decryptMetadata(account.emailEncrypted); } catch {}
+    if (account.emailSealed) {
+      try { email = await mlkem.decryptMetadata(account.emailSealed); } catch {}
     }
     const baseUrl = process.env.VERIFY_EMAIL_URL_BASE || process.env.FRONTEND_URL || 'beaver-notes://verify-email';
     const verifyUrl = baseUrl.includes('?') ? `${baseUrl}&token=${rawToken}` : `${baseUrl}?token=${rawToken}`;
@@ -375,7 +377,7 @@ async function accountRoutes(app) {
       rateLimit: { max: parseInt(process.env.PASSWORD_CHANGE_RATE_LIMIT_PER_MINUTE ?? '5', 10), timeWindow: '1 minute' },
     },
   }, async (req, reply) => {
-    if (process.env.LEGACY_AUTH_ENABLED !== 'true') {
+    if (process.env.LEGACY_AUTH_ENABLED === 'false') {
       return reply.status(410).send({ error: 'legacy_auth_disabled', message: 'Password authentication has been replaced by passkeys.' });
     }
     const { currentPassword, newPassword, current_password, new_password } = req.body ?? {};
@@ -415,17 +417,17 @@ async function accountRoutes(app) {
     ...protect,
     config: { rateLimit: { max: parseInt(process.env.TOTP_RATE_LIMIT_PER_MINUTE ?? '10', 10), timeWindow: '1 minute' } },
   }, async (req, reply) => {
-    const account = await Account.findById(req.userId, { passwordHash: 1, totpSecretEncrypted: 1, emailEncrypted: 1 }).lean();
+    const account = await Account.findById(req.userId, { passwordHash: 1, totpSecretSealed: 1, emailSealed: 1 }).lean();
     if (!account) return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
     if (!account.passwordHash) return reply.status(400).send({ error: 'totp_not_available', message: 'TOTP is only available for password accounts.' });
-    if (account.totpSecretEncrypted) return reply.status(409).send({ error: 'totp_already_enabled', message: 'TOTP is already enabled. Disable it first.' });
+    if (account.totpSecretSealed) return reply.status(409).send({ error: 'totp_already_enabled', message: 'TOTP is already enabled. Disable it first.' });
     const { generateSecret, buildOtpauthUrl } = require('../lib/totp');
     const secret = generateSecret(20);
     const encryptedPending = await mlkem.encryptMetadata(secret);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    await Account.updateOne({ _id: req.userId }, { totpPendingSecretEncrypted: encryptedPending, totpPendingExpiresAt: expiresAt });
+    await Account.updateOne({ _id: req.userId }, { totpPendingSecretSealed: encryptedPending, totpPendingExpiresAt: expiresAt });
     let email = '';
-    if (account.emailEncrypted) { try { email = await mlkem.decryptMetadata(account.emailEncrypted); } catch {} }
+    if (account.emailSealed) { try { email = await mlkem.decryptMetadata(account.emailSealed); } catch {} }
     const label = email || req.userId;
     const otpauthUrl = buildOtpauthUrl(secret, label, 'Beaver Notes');
     audit(req, 'totp_setup_initiated', {});
@@ -440,22 +442,22 @@ async function accountRoutes(app) {
     if (!code || typeof code !== 'string' || !/^\d{6}$/.test(code.trim())) {
       return reply.status(400).send({ error: 'validation_error', message: 'A 6-digit code is required.' });
     }
-    const account = await Account.findById(req.userId, { totpSecretEncrypted: 1, totpPendingSecretEncrypted: 1, totpPendingExpiresAt: 1 }).lean();
+    const account = await Account.findById(req.userId, { totpSecretSealed: 1, totpPendingSecretSealed: 1, totpPendingExpiresAt: 1 }).lean();
     if (!account) return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
-    if (account.totpSecretEncrypted) return reply.status(409).send({ error: 'totp_already_enabled', message: 'TOTP already enabled.' });
-    if (!account.totpPendingSecretEncrypted) return reply.status(400).send({ error: 'no_pending_setup', message: 'No pending TOTP setup. Call /account/totp/setup first.' });
+    if (account.totpSecretSealed) return reply.status(409).send({ error: 'totp_already_enabled', message: 'TOTP already enabled.' });
+    if (!account.totpPendingSecretSealed) return reply.status(400).send({ error: 'no_pending_setup', message: 'No pending TOTP setup. Call /account/totp/setup first.' });
     const exp = account.totpPendingExpiresAt ? new Date(account.totpPendingExpiresAt) : null;
     if (!exp || exp < new Date()) {
-      await Account.updateOne({ _id: req.userId }, { totpPendingSecretEncrypted: null, totpPendingExpiresAt: null });
+      await Account.updateOne({ _id: req.userId }, { totpPendingSecretSealed: null, totpPendingExpiresAt: null });
       return reply.status(410).send({ error: 'totp_setup_expired', message: 'TOTP setup has expired. Start again.' });
     }
     let secret;
-    try { secret = await mlkem.decryptMetadata(account.totpPendingSecretEncrypted); } catch { return reply.status(500).send({ error: 'decrypt_failed', message: 'Failed to decrypt pending secret.' }); }
+    try { secret = await mlkem.decryptMetadata(account.totpPendingSecretSealed); } catch { return reply.status(500).send({ error: 'decrypt_failed', message: 'Failed to decrypt pending secret.' }); }
     const { totpVerify } = require('../lib/totp');
     const timestep = totpVerify(secret, code.trim(), 1);
     if (timestep === null) return reply.status(401).send({ error: 'invalid_code', message: 'Invalid TOTP code.' });
     // verify-before-persist: move pending → active
-    await Account.updateOne({ _id: req.userId }, { totpSecretEncrypted: account.totpPendingSecretEncrypted, totpLastTimestep: timestep, totpPendingSecretEncrypted: null, totpPendingExpiresAt: null });
+    await Account.updateOne({ _id: req.userId }, { totpSecretSealed: account.totpPendingSecretSealed, totpLastTimestep: timestep, totpPendingSecretSealed: null, totpPendingExpiresAt: null });
     audit(req, 'totp_enabled', {});
     return reply.send({ verified: true, enabled: true });
   });
@@ -467,11 +469,11 @@ async function accountRoutes(app) {
     const { code, recoveryCode, password } = req.body ?? {};
     const account = await Account.findById(req.userId);
     if (!account) return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
-    if (!account.totpSecretEncrypted) return reply.status(400).send({ error: 'totp_not_enabled', message: 'TOTP is not enabled.' });
+    if (!account.totpSecretSealed) return reply.status(400).send({ error: 'totp_not_enabled', message: 'TOTP is not enabled.' });
     let ok = false;
     if (typeof code === 'string' && /^\d{6}$/.test(code.trim())) {
       try {
-        const secret = await mlkem.decryptMetadata(account.totpSecretEncrypted);
+        const secret = await mlkem.decryptMetadata(account.totpSecretSealed);
         const { totpVerify } = require('../lib/totp');
         const ts = totpVerify(secret, code.trim(), 1);
         if (ts !== null && Number(ts) !== Number(account.totpLastTimestep)) ok = true;
@@ -496,7 +498,7 @@ async function accountRoutes(app) {
       }
     }
     if (!ok) return reply.status(401).send({ error: 'invalid_credentials', message: 'Valid code, recovery code, or password required to disable TOTP.' });
-    await Account.updateOne({ _id: req.userId }, { totpSecretEncrypted: null, totpLastTimestep: null, totpPendingSecretEncrypted: null, totpPendingExpiresAt: null });
+    await Account.updateOne({ _id: req.userId }, { totpSecretSealed: null, totpLastTimestep: null, totpPendingSecretSealed: null, totpPendingExpiresAt: null });
     audit(req, 'totp_disabled', {});
     return reply.send({ disabled: true });
   });
@@ -505,11 +507,11 @@ async function accountRoutes(app) {
     ...protect,
     config: { rateLimit: { max: parseInt(process.env.TOTP_RATE_LIMIT_PER_MINUTE ?? '30', 10), timeWindow: '1 minute' } },
   }, async (req, reply) => {
-    const account = await Account.findById(req.userId, { totpSecretEncrypted: 1, totpPendingSecretEncrypted: 1, totpPendingExpiresAt: 1 }).lean();
+    const account = await Account.findById(req.userId, { totpSecretSealed: 1, totpPendingSecretSealed: 1, totpPendingExpiresAt: 1 }).lean();
     if (!account) return reply.status(404).send({ error: 'not_found', message: 'Beaver Account not found.' });
-    const enabled = Boolean(account.totpSecretEncrypted);
+    const enabled = Boolean(account.totpSecretSealed);
     let pending = false;
-    if (account.totpPendingSecretEncrypted) {
+    if (account.totpPendingSecretSealed) {
       const exp = account.totpPendingExpiresAt ? new Date(account.totpPendingExpiresAt) : null;
       pending = exp ? exp > new Date() : true;
     }
