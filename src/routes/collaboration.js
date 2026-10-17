@@ -608,6 +608,9 @@ async function collaborationRoutes(app) {
   app.get('/public-keys/:noteId', {
     ...baseRateLimit,
     ...protect,
+    // Bootstrap widening on this route lets an owner self-claim an unpushed
+    // note, so blind unregistered-note probes get the same budget as invites.
+    preHandler: [app.authenticate, enforcePreclaimLimit],
   }, async (req, reply) => {
     const noteId = req.params.noteId;
     const parsed = NoteIdSchema.safeParse(noteId);
@@ -789,6 +792,9 @@ async function collaborationRoutes(app) {
   app.get('/invitations/:noteId', {
     ...baseRateLimit,
     ...protect,
+    // Same bootstrap widening as /public-keys: bound the unregistered-note
+    // claim attempts per account.
+    preHandler: [app.authenticate, enforcePreclaimLimit],
   }, async (req, reply) => {
     const noteId = req.params.noteId;
     const parsed = NoteIdSchema.safeParse(noteId);
