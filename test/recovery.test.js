@@ -16,7 +16,6 @@ process.env.LEGACY_AUTH_ENABLED = 'true';
 const { close, query } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
-const { createEmailHash } = require('../src/lib/crypto');
 
 let app;
 

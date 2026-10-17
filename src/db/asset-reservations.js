@@ -125,7 +125,6 @@ async function reserveForPresign({ accountId, workspaceId, items }) {
     await advisoryLock(client, accountId);
 
     const { quota, used } = await resolveQuotaAndUsed(accountId, workspaceId, client);
-    // console.log('[reserve] quota', quota, 'used', used, 'pending calc next', 'account', accountId);
     // Unlimited enterprise
     if (quota === Number.MAX_SAFE_INTEGER) {
       // Insert reservations without quota check

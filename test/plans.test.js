@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  getPlan, getQuotaBytes, getHistoryDays, getDeviceLimit,
+  getQuotaBytes, getHistoryDays, getDeviceLimit,
   getFlags, isPaidPlan, isFreePlan, VALID_PLANS, resolvePlanForAccount,
 } = require('../src/lib/plans');
 

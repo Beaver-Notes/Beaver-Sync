@@ -19,7 +19,7 @@ process.env.WS_RELAY_PORT = '18080';
 
 const { close, query } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
-const { seedAccount, seedWorkspace, authHeaders } = require('./helpers/factory');
+const { seedAccount, seedWorkspace } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
 const { createSession } = require('../src/middleware/auth');
 
@@ -38,7 +38,6 @@ let wsRelayServer;
 let stopRelay;
 let apiPort;
 let startWsRelay;
-let verifyTicket;
 
 async function post(app, url, payload, headers = {}) {
   return app.inject({
@@ -117,8 +116,6 @@ test.before(async () => {
   const wsRelay = require('../src/ws-relay');
   startWsRelay = wsRelay.startWsRelay;
   stopRelay = wsRelay.stopWsRelay;
-  const wsRelayAuth = require('../src/ws-relay-auth');
-  verifyTicket = wsRelayAuth.verifyTicket;
 
   // Start WebSocket relay on test port
   wsRelayServer = await startWsRelay();
