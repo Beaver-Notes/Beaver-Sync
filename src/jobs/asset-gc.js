@@ -68,7 +68,20 @@ async function unlockGlobal() {
 
 // `${userId}/assets/<assetKey>` -> { userId, assetKey }. userId is a UUID with
 // no slash; anything else (commits, snapshots) is not an asset object.
+// Workspace-shared objects (`ws-assets/<wsId>/<assetKey>`, new-scheme flat keys
+// only) are asset objects too: their flat key carries workspace+note inline, so
+// the GC existence check works without the uploader's account id.
+const WS_ASSETS_PREFIX = 'ws-assets/';
 function splitAssetObject(key) {
+  if (key.startsWith(WS_ASSETS_PREFIX)) {
+    const rest = key.slice(WS_ASSETS_PREFIX.length);
+    const slash = rest.indexOf('/');
+    if (slash <= 0) return null;
+    const workspaceId = rest.slice(0, slash);
+    const assetKey = rest.slice(slash + 1);
+    if (!assetKey || workspaceId.includes('/')) return null;
+    return { workspaceId, assetKey };
+  }
   const idx = key.indexOf(ASSET_OBJECT_MARKER);
   if (idx <= 0) return null;
   const userId = key.slice(0, idx);

@@ -5,11 +5,11 @@
  *
  * S3-compatible object storage client. In production it defaults
  * to Cloudflare R2; in local or self-hosted non-production environments
- * it defaults to MinIO.
+ * it defaults to SeaweedFS.
  *
  * Supported storage backends:
  *   - cloudflare-r2
- *   - minio
+ *   - seaweedfs
  *   - custom (any S3-compatible endpoint)
  *
  * Object key structure:
@@ -49,45 +49,45 @@ function parseBoolean(value, fallback = false) {
 function resolveStorageConfig() {
   const provider = String(
     process.env.STORAGE_BACKEND ??
-      (process.env.NODE_ENV === "production" ? "cloudflare-r2" : "minio"),
+      (process.env.NODE_ENV === "production" ? "cloudflare-r2" : "seaweedfs"),
   ).toLowerCase();
 
-  const usingMinio = provider === "minio";
+  const usingSeaweedfs = provider === "seaweedfs";
   const endpoint = firstDefined(
     process.env.STORAGE_ENDPOINT,
     process.env.R2_ENDPOINT,
-    usingMinio ? process.env.MINIO_ENDPOINT : undefined,
-    usingMinio ? "http://minio:9000" : undefined,
+    usingSeaweedfs ? process.env.SEAWEEDFS_ENDPOINT : undefined,
+    usingSeaweedfs ? "http://seaweedfs:9000" : undefined,
   );
   const region = firstDefined(
     process.env.STORAGE_REGION,
     process.env.R2_REGION,
-    usingMinio ? "us-east-1" : "auto",
+    usingSeaweedfs ? "us-east-1" : "auto",
   );
   const bucket = firstDefined(
     process.env.STORAGE_BUCKET_NAME,
     process.env.R2_BUCKET_NAME,
-    usingMinio ? process.env.MINIO_BUCKET_NAME : undefined,
-    usingMinio ? "beaver-sync" : undefined,
+    usingSeaweedfs ? process.env.SEAWEEDFS_BUCKET_NAME : undefined,
+    usingSeaweedfs ? "beaver-sync" : undefined,
   );
   const accessKeyId = firstDefined(
     process.env.STORAGE_ACCESS_KEY_ID,
     process.env.R2_ACCESS_KEY_ID,
-    usingMinio ? process.env.MINIO_ROOT_USER : undefined,
-    usingMinio ? "minioadmin" : undefined,
+    usingSeaweedfs ? process.env.SEAWEEDFS_ACCESS_KEY_ID : undefined,
+    usingSeaweedfs ? "beaver" : undefined,
   );
   const secretAccessKey = firstDefined(
     process.env.STORAGE_SECRET_ACCESS_KEY,
     process.env.R2_SECRET_ACCESS_KEY,
-    usingMinio ? process.env.MINIO_ROOT_PASSWORD : undefined,
-    usingMinio ? "minioadmin" : undefined,
+    usingSeaweedfs ? process.env.SEAWEEDFS_SECRET_ACCESS_KEY : undefined,
+    usingSeaweedfs ? "beaver-dev-secret" : undefined,
   );
   const forcePathStyle = parseBoolean(
     firstDefined(
       process.env.STORAGE_FORCE_PATH_STYLE,
-      usingMinio ? "true" : "false",
+      usingSeaweedfs ? "true" : "false",
     ),
-    usingMinio,
+    usingSeaweedfs,
   );
 
   if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
@@ -114,6 +114,13 @@ const r2 = new S3Client({
   region: storageConfig.region,
   endpoint: storageConfig.endpoint,
   forcePathStyle: storageConfig.forcePathStyle,
+  // The SDK's default CRC32 request checksum gets signed into presigned URLs
+  // as `x-amz-sdk-checksum-crc32` over an EMPTY body, and CRC32 lands in
+  // SignedHeaders. A client PUTting real bytes then fails the signature check
+  // and object storage answers 403 — which is a presigned-URL failure wearing
+  // an auth-failure's clothes. "WHEN_REQUIRED" only checksums when the bucket
+  // demands it, so the signature covers the body the client actually sends.
+  requestChecksumCalculation: "WHEN_REQUIRED",
   credentials: {
     accessKeyId: storageConfig.accessKeyId,
     secretAccessKey: storageConfig.secretAccessKey,
@@ -121,7 +128,7 @@ const r2 = new S3Client({
 });
 
 // Public-facing S3 client for presigned URLs (used by the browser).
-// In Docker, STORAGE_ENDPOINT is "http://minio:9000" (internal) but
+// In Docker, STORAGE_ENDPOINT is "http://seaweedfs:9000" (internal) but
 // clients need "http://localhost:9000" (external). STORAGE_PUBLIC_ENDPOINT
 // overrides the endpoint used only in presigned URL generation.
 const publicEndpoint = process.env.STORAGE_PUBLIC_ENDPOINT || storageConfig.endpoint;
@@ -130,6 +137,9 @@ const r2Public = publicEndpoint !== storageConfig.endpoint
       region: storageConfig.region,
       endpoint: publicEndpoint,
       forcePathStyle: storageConfig.forcePathStyle,
+      // See the note on the internal client above: the default CRC32 checksum
+      // is what made every presigned URL fail with a 403 on upload.
+      requestChecksumCalculation: "WHEN_REQUIRED",
       credentials: {
         accessKeyId: storageConfig.accessKeyId,
         secretAccessKey: storageConfig.secretAccessKey,
@@ -375,6 +385,10 @@ async function presignPut(key, contentType, expiresInSeconds = 300) {
 // High-level helpers (keyed by userId)
 const commitKey = (userId, commitId) => `${userId}/commits/${commitId}.json`;
 const assetKey = (userId, assetKey) => `${userId}/assets/${assetKey}`;
+// Workspace-shared asset prefix: one object per asset for all members instead
+// of one copy per uploading account (`<userId>/assets/...`). The flat asset
+// key embeds the workspace id, so every member derives the same location.
+const sharedAssetKey = (workspaceId, assetKey) => `ws-assets/${workspaceId}/${assetKey}`;
 const snapshotKey = (userId) => `${userId}/snapshot.json`;
 const exportKey = (userId, id) => `${userId}/export-${id}.zip`;
 
@@ -391,6 +405,7 @@ module.exports = {
   presignPut,
   commitKey,
   assetKey,
+  sharedAssetKey,
   snapshotKey,
   exportKey,
   storageConfig,

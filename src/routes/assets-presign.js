@@ -4,7 +4,7 @@ const r2 = require('../services/r2');
 const { storageConfig } = require('../services/r2');
 const { Subscription, Workspace } = require('../models');
 const { mapWithConcurrency } = require('../lib/concurrency');
-const { isValidAssetKey, ASSET_UPLOAD_CONCURRENCY, MAX_ASSET_SIZE_BYTES } = require('./assets-shared');
+const { isValidAssetKey, ASSET_UPLOAD_CONCURRENCY, MAX_ASSET_SIZE_BYTES, assetStoreKey, resolveAssetLocation } = require('./assets-shared');
 const { reserveForPresign, confirmReservations } = require('../db/asset-reservations');
 const { requireWorkspaceWriter } = require('../middleware/org');
 
@@ -90,12 +90,12 @@ async function registerAssetPresignRoutes(app, protect) {
       }
     }
 
-    const useProxy = storageConfig.provider === 'minio';
+    const useProxy = storageConfig.provider === 'seaweedfs';
     const PRESIGN_TTL = 3600;
     const urls = [];
 
     if (useProxy) {
-      // MinIO: generate server-proxied HMAC-signed upload URLs
+      // SeaweedFS: generate server-proxied HMAC-signed upload URLs
       const { signAssetUpload } = require('../lib/asset-sign');
       for (const assetKey of keys) {
         if (!assetKey || !isValidAssetKey(assetKey)) continue;
@@ -103,10 +103,12 @@ async function registerAssetPresignRoutes(app, protect) {
         urls.push({ assetKey, url });
       }
     } else {
-      // R2/S3: generate native presigned PUT URLs concurrently
+      // R2/S3: generate native presigned PUT URLs concurrently.
+      // Workspace-verified batches presign the shared object location, not a
+      // per-account copy — the same flat key must resolve for every member.
       const presignPromises = keys.map((assetKey) => {
         if (!assetKey || !isValidAssetKey(assetKey)) return Promise.resolve(null);
-        const key = r2.assetKey(req.userId, assetKey);
+        const key = assetStoreKey(req.userId, assetKey, workspaceId);
         return r2.presignPut(key, 'application/octet-stream', PRESIGN_TTL)
           .then((url) => ({ assetKey, url }))
           .catch((err) => {
@@ -140,17 +142,18 @@ async function registerAssetPresignRoutes(app, protect) {
       return reply.status(400).send({ error: 'too_many_keys', message: 'Max 200 keys per request.' });
     }
 
-    const useProxy = storageConfig.provider === 'minio';
+    const useProxy = storageConfig.provider === 'seaweedfs';
     const PRESIGN_TTL = 3600;
 
     const entries = await mapWithConcurrency(keys, ASSET_UPLOAD_CONCURRENCY, async (assetKey) => {
       if (!assetKey || !isValidAssetKey(assetKey)) return null;
-      const key = r2.assetKey(req.userId, assetKey);
       try {
-        const stat = await r2.stat(key);
-        if (!stat) return null;
+        const located = await resolveAssetLocation(req.userId, assetKey);
+        if (!located) return null;
+        const stat = { sizeBytes: located.sizeBytes };
+        const key = located.key;
         if (useProxy) {
-          // MinIO: generate server-proxied HMAC-signed URLs
+          // SeaweedFS: generate server-proxied HMAC-signed URLs
           const { signAssetDownload } = require('../lib/asset-sign');
           const { url } = signAssetDownload(assetKey, req.userId, PRESIGN_TTL);
           return { assetKey, url, sizeBytes: stat.sizeBytes };
@@ -195,12 +198,11 @@ async function registerAssetPresignRoutes(app, protect) {
 
     const stats = await mapWithConcurrency(keys, ASSET_UPLOAD_CONCURRENCY, async (assetKey) => {
       if (!assetKey || !isValidAssetKey(assetKey)) return null;
-      const key = r2.assetKey(req.userId, assetKey);
       try {
-        const stat = await r2.stat(key);
-        if (!stat) return null;
-        if (stat.sizeBytes > MAX_ASSET_SIZE_BYTES) return { assetKey, sizeBytes: stat.sizeBytes, tooLarge: true };
-        return { assetKey, sizeBytes: stat.sizeBytes };
+        const located = await resolveAssetLocation(req.userId, assetKey);
+        if (!located) return null;
+        if (located.sizeBytes > MAX_ASSET_SIZE_BYTES) return { assetKey, sizeBytes: located.sizeBytes, tooLarge: true };
+        return { assetKey, sizeBytes: located.sizeBytes };
       } catch (err) {
         console.warn('[assets] confirm-seed stat failed:', assetKey, err.message);
         return null;

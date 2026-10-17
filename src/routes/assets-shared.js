@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const r2 = require('../services/r2');
 const { query } = require('../db');
-const { Subscription, Workspace } = require('../models');
+const { Subscription, Workspace, WorkspaceMember } = require('../models');
 
 const MAX_ASSET_SIZE_BYTES = parseInt(
   process.env.ASSET_MAX_SIZE_BYTES ?? String(100 * 1024 * 1024),
@@ -81,7 +81,7 @@ async function storeAssetBatch(req, assets) {
       return;
     }
 
-    const r2Key = r2.assetKey(req.userId, assetKey);
+    const r2Key = assetStoreKey(req.userId, assetKey, req.workspaceId);
     try {
       await r2.put(r2Key, body, 'application/octet-stream', { ifNoneMatch: true });
     } catch (err) {
@@ -256,6 +256,49 @@ async function creditAssetStorage(accountId, workspaceId, sizeBytes) {
   }
 }
 
+// Where an upload lands. New-scheme flat keys embed the workspace id, so when
+// that workspace matches the caller's (verified) workspace context the object
+// goes into the shared prefix and every member converges on the identical
+// location — one R2 object and one meter increment instead of one per member.
+// Legacy/opaque keys stay account-scoped: their location must not change.
+function assetStoreKey(userId, assetKey, workspaceId) {
+  const decoded = decodeAssetKey(assetKey);
+  if (
+    workspaceId && decoded?.hashed &&
+    decoded.workspaceId === workspaceId
+  ) {
+    return r2.sharedAssetKey(workspaceId, assetKey);
+  }
+  return r2.assetKey(userId, assetKey);
+}
+
+// Where an asset actually lives. The account prefix is checked first (legacy
+// copies, or an upload from before the shared store); a miss on a new-scheme
+// key falls back to the shared prefix, which any workspace member may read.
+// Returns null when the object exists nowhere readable.
+async function resolveAssetLocation(userId, assetKey) {
+  const accountKey = r2.assetKey(userId, assetKey);
+  try {
+    const existing = await r2.stat(accountKey);
+    if (existing) return { key: accountKey, shared: false, sizeBytes: existing.sizeBytes };
+  } catch (err) {
+    if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+      const e = new Error('storage_unavailable');
+      e.statusCode = 503;
+      throw e;
+    }
+    throw err;
+  }
+  const decoded = decodeAssetKey(assetKey);
+  if (!decoded?.workspaceId) return null;
+  const member = await WorkspaceMember.findOne({ workspaceId: decoded.workspaceId, accountId: userId }).lean();
+  if (!member) return null;
+  const sharedKey = r2.sharedAssetKey(decoded.workspaceId, assetKey);
+  const existing = await r2.stat(sharedKey);
+  if (!existing) return null;
+  return { key: sharedKey, shared: true, sizeBytes: existing.sizeBytes };
+}
+
 module.exports = {
   MAX_ASSET_SIZE_BYTES,
   ASSET_URL_TTL_SECONDS,
@@ -268,4 +311,6 @@ module.exports = {
   debitAssetStorage,
   decodeAssetKey,
   isFilenameHash,
+  assetStoreKey,
+  resolveAssetLocation,
 };

@@ -1,16 +1,18 @@
 'use strict';
 
 const crypto = require('crypto');
-const { Account, Workspace, WorkspaceMember, WorkspaceInvite, OrgMember, Subscription } = require('../models');
+const r2 = require('../services/r2');
+const { Account, Workspace, WorkspaceMember, WorkspaceInvite, OrgMember, OrgSubscription, Subscription } = require('../models');
 const { createEmptyState } = require('../repositories/syncWorkspaceState');
 const { audit } = require('../lib/audit');
 const { sendWorkspaceInviteEmail } = require('../email');
-const { isFreePlan, resolvePlanForAccount } = require('../lib/plans');
+const { isFreePlan, resolvePlanForAccount, getFlags } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
 const { resolveOrgSubscription } = require('../lib/plan-resolution');
 const { hashSessionId } = require('../lib/crypto');
 const { findAccountByUsername } = require('../repositories/account');
 const { addRecipientsIfAbsent, listEnvelopes, orderEnvelopes, selectScalarEnvelope } = require('../repositories/workspaceKeys');
+const { wrapForRecipient, validatePublicKey } = require('../lib/recipient-wrap');
 const { emailVerificationFields } = require('../lib/email-verification');
 const { query } = require('../db/postgres');
 
@@ -76,6 +78,24 @@ async function requireMember(app, userId, workspaceId, allowedRoles) {
     throw Object.assign(new Error('Insufficient permissions.'), { statusCode: 403, code: 'forbidden' });
   }
   return membership;
+}
+
+// Shared workspaces are a team+ capability (plans.js flags.teamWorkspaces:
+// starter/pro get a personal workspace only). The workspace's org tier
+// governs org workspaces; the workspace owner's tier governs personal
+// (org-less) ones. Reads OrgSubscription directly like admin.js
+// requirePlanAndOwner — the join caller is not a member yet, so the
+// participant-checked resolveOrgSubscription would always miss there.
+async function teamWorkspaceAllowed(userId, workspaceId) {
+  if (isEnterpriseMode()) return true;
+  const ws = await Workspace.findById(workspaceId, { orgId: 1, ownerId: 1 }).lean();
+  const orgSub = ws?.orgId ? await OrgSubscription.findOne({ orgId: ws.orgId }).lean() : null;
+  // Personal (org-less) workspaces belong to the owner: a joiner on a lower
+  // tier must not be blocked from a team owner's workspace, and a joiner on a
+  // higher tier must not sneak a starter owner past the gate.
+  const tierOwnerId = orgSub ? userId : (ws?.ownerId || userId);
+  const sub = await Subscription.findOne({ accountId: tierOwnerId }).lean();
+  return getFlags(resolvePlanForAccount({ orgSub, sub })).teamWorkspaces;
 }
 
 const rateLimit = {
@@ -217,7 +237,79 @@ async function workspaceRoutes(app) {
     } catch (err) {
       app.log.warn({ err, workspaceId: workspace.id }, 'default workspace state init failed');
     }
+    // Key provisioning is NOT done here: on every paid signup the workspace was
+    // already created during signup, so the guards above short-circuit and this
+    // path never runs. provisionSessionWorkspaceKeys covers both cases and keys
+    // the envelope to the calling device so selectScalarEnvelope can return it.
     return workspace;
+  }
+
+  // The client writes and reads note-key envelopes as {kemCt, iv, ct} with
+  // lowercase hex fields, ct holding ciphertext||tag in the WebCrypto
+  // convention, so the GCM tag has to be concatenated into ct rather than kept
+  // as its own field. wrapForRecipient hands back base64 plus a separate tag;
+  // only the encoding changes here, never the key material or ciphertext.
+  function toClientEnvelope(envelope) {
+    return {
+      kemCt: Buffer.from(envelope.kemCt, 'base64').toString('hex'),
+      iv: Buffer.from(envelope.iv, 'base64').toString('hex'),
+      ct: Buffer.concat([
+        Buffer.from(envelope.ct, 'base64'),
+        Buffer.from(envelope.tag, 'base64'),
+      ]).toString('hex'),
+    };
+  }
+
+  // The raw workspace key only ever lives in the client's memory, so a workspace
+  // is useless until an envelope exists for the device that can unwrap it. For
+  // accounts that never had a device identity at signup this repairs every
+  // membership on the next GET /workspaces: one query finds the gaps, one wrap
+  // per gap writes them, and the helper's ON CONFLICT DO NOTHING keeps repeat
+  // calls free. Best effort: key material is optional and must never fail the
+  // caller, so failures are logged at error level and swallowed here.
+  async function provisionSessionWorkspaceKeys(accountId, sessionDeviceId, workspaceIds) {
+    if (!sessionDeviceId || workspaceIds.length === 0) return 0;
+
+    const account = await Account.findById(accountId, { kemPublicKey: 1, deviceKeys: 1 }).lean();
+    if (!account) return 0;
+
+    const deviceKeys = Array.isArray(account.deviceKeys) ? account.deviceKeys : [];
+    const own = deviceKeys.find(d => d?.deviceId === sessionDeviceId && validatePublicKey(d.publicKey));
+    // Fall back to the account-level key only when the account declared no
+    // device keys at all; otherwise this device simply is not linked yet and
+    // the client will get its envelope via POST /auth/keypair.
+    const publicKey = own
+      ? own.publicKey
+      : (deviceKeys.length === 0 && validatePublicKey(account.kemPublicKey) ? account.kemPublicKey : null);
+    if (!publicKey) return 0;
+
+    const { rows: existing } = await query(
+      'SELECT workspace_id FROM workspace_keys WHERE user_id = $1 AND device_id = $2',
+      [accountId, sessionDeviceId]
+    );
+    const held = new Set(existing.map(r => r.workspace_id));
+    const missing = workspaceIds.filter(id => !held.has(id));
+    if (missing.length === 0) return 0;
+
+    let inserted = 0;
+    for (const workspaceId of missing) {
+      // Mint only for a workspace with no envelopes at all: a second mint would
+      // pick a different key than the one already held by other members and
+      // split the workspace between them.
+      const envelopes = await listEnvelopes(workspaceId);
+      if (envelopes.length > 0) {
+        app.log.info({ workspaceId }, 'workspace key mint skipped: envelope already exists');
+        continue;
+      }
+      // A fresh key per workspace: never reuse one workspace key across two.
+      const workspaceKeyHex = crypto.randomBytes(32).toString('hex');
+      inserted += await addRecipientsIfAbsent(workspaceId, [{
+        userId: accountId,
+        deviceId: sessionDeviceId,
+        wrappedKey: JSON.stringify(toClientEnvelope(await wrapForRecipient(publicKey, workspaceKeyHex))),
+      }]);
+    }
+    return inserted;
   }
 
   app.get('/', {
@@ -231,6 +323,12 @@ async function workspaceRoutes(app) {
     const workspaceIds = memberships.map(m => m.workspaceId);
     const roleMap = {};
     for (const m of memberships) roleMap[m.workspaceId] = m.role;
+
+    try {
+      await provisionSessionWorkspaceKeys(req.userId, req.sessionDeviceId, workspaceIds);
+    } catch (err) {
+      app.log.error({ err: err.message || String(err), workspaceIds }, 'workspace key provisioning failed');
+    }
 
     const wsDocs = await Workspace
       .find({ _id: { $in: workspaceIds } }, { _id: 1, nameEncrypted: 1, ownerId: 1, orgId: 1, emoji: 1, color: 1, storageUsedBytes: 1, vaultWrappedKeys: 1, createdAt: 1 })
@@ -342,6 +440,20 @@ async function workspaceRoutes(app) {
     await WorkspaceInvite.deleteMany({ workspace_id: workspaceId });
     await Workspace.deleteOne({ _id: workspaceId });
 
+    // Workspace-shared assets (`ws-assets/<wsId>/...`) have no member list or
+    // note rows left now, so nothing server-side can serve or prune them from
+    // memory; delete the prefix outright (same fire-and-forget as accounts).
+    setImmediate(() => {
+      r2.listKeys(`ws-assets/${workspaceId}/`)
+        .then((keys) =>
+          Promise.allSettled(keys.map((key) => r2.del(key)))
+        )
+        .then((res) =>
+          app.log.info({ workspaceId, deletedKeys: res.filter(r => r.status === 'fulfilled').length }, 'Shared asset cleanup complete')
+        )
+        .catch((err) => app.log.error({ err, workspaceId }, 'Shared asset cleanup failed'));
+    });
+
     app.log.info({ workspaceId, userId: req.userId }, 'Workspace deleted');
     audit(req, 'workspace_deleted', { workspaceId });
 
@@ -374,6 +486,15 @@ async function workspaceRoutes(app) {
 
     if (inviteRole === 'guest') {
       return reply.status(400).send({ error: 'invalid_role', message: 'The guest role is no longer supported. Use per-note collaboration instead.' });
+    }
+
+    // Plan gate runs after request validation so malformed requests keep
+    // their 400 contract regardless of tier.
+    if (!await teamWorkspaceAllowed(req.userId, workspaceId)) {
+      return reply.status(403).send({
+        error: 'plan_upgrade_required',
+        message: 'Shared workspaces require a team plan or higher.',
+      });
     }
 
     const requireApproval = body.requireApproval ? 1 : 0;
@@ -536,6 +657,13 @@ async function workspaceRoutes(app) {
       }
     }
 
+    if (!await teamWorkspaceAllowed(req.userId, invite.workspaceId)) {
+      return reply.status(403).send({
+        error: 'plan_upgrade_required',
+        message: 'Shared workspaces require a team plan or higher.',
+      });
+    }
+
     // requireApproval invites are request-access links; the owner must approve
     // explicitly. Record a durable per-account request (mirrors org join
     // requests) so one approval grants only this account; the row's existence
@@ -686,6 +814,13 @@ async function workspaceRoutes(app) {
     if (!role) {
       await query('DELETE FROM workspace_join_requests WHERE id = $1', [request.id]);
       return reply.status(404).send({ error: 'not_found', message: 'The invite no longer exists.' });
+    }
+
+    if (!await teamWorkspaceAllowed(req.userId, request.workspace_id)) {
+      return reply.status(403).send({
+        error: 'plan_upgrade_required',
+        message: 'Shared workspaces require a team plan or higher.',
+      });
     }
 
     await query(
@@ -930,24 +1065,48 @@ async function workspaceRoutes(app) {
 
     // Which (user, device) pairs already hold an envelope, so a key-holding
     // member re-wraps only the devices still missing one. Existence only; no
-    // key material is exposed. Legacy rows (device_id NULL) are account-level
-    // and never satisfy a specific device.
+    // key material is exposed. A legacy account-level row (device_id NULL) is
+    // read by any device of that account, so it covers the 'default' device.
     const rows = await listEnvelopes(workspaceId);
-    const wrapped = new Set(
-      rows.filter((r) => r.device_id != null).map((r) => `${r.user_id}:${r.device_id}`)
-    );
+    const wrapped = new Set();
+    const legacyHolders = new Set();
+    const heldDevices = new Map();
+    for (const r of rows) {
+      if (r.device_id == null) {
+        legacyHolders.add(r.user_id);
+        continue;
+      }
+      wrapped.add(`${r.user_id}:${r.device_id}`);
+      const set = heldDevices.get(r.user_id) || new Set();
+      set.add(r.device_id);
+      heldDevices.set(r.user_id, set);
+    }
 
     const collaborators = [];
-    for (const a of accounts.filter((x) => x.kemPublicKey)) {
-      const devices = (a.deviceKeys && a.deviceKeys.length)
-        ? a.deviceKeys
-        : [{ deviceId: 'default', publicKey: a.kemPublicKey }];
-      for (const d of devices) {
+    for (const a of accounts) {
+      const declared = Array.isArray(a.deviceKeys) ? a.deviceKeys.filter((d) => d && d.deviceId) : [];
+      // deviceId -> public key. An account with no declared device keys has a
+      // single implicit 'default' device, which is where a device-less client
+      // stores (and reads back) its envelope.
+      const devices = new Map();
+      for (const d of declared) devices.set(d.deviceId, d.publicKey ?? null);
+      if (devices.size === 0 && a.kemPublicKey) devices.set('default', a.kemPublicKey);
+      // A device that holds an envelope but is absent from `device_keys` (its
+      // keypair row was replaced, or the envelope was seeded before the device
+      // registered) is still a member device: list it so every holder stays
+      // discoverable. POST /:id/keys validates membership by userId only, so
+      // such a row can legitimately exist.
+      for (const deviceId of heldDevices.get(a._id) || []) {
+        if (!devices.has(deviceId)) devices.set(deviceId, null);
+      }
+      if (devices.size === 0) continue;
+      for (const [deviceId, publicKey] of devices) {
         collaborators.push({
           userId: a._id,
-          deviceId: d.deviceId,
-          kemPublicKey: d.publicKey,
-          hasEnvelope: wrapped.has(`${a._id}:${d.deviceId}`),
+          deviceId,
+          kemPublicKey: publicKey,
+          hasEnvelope: wrapped.has(`${a._id}:${deviceId}`)
+            || (deviceId === 'default' && legacyHolders.has(a._id)),
         });
       }
     }

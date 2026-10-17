@@ -6,13 +6,14 @@ const { resolveQuotaAndUsed } = require('../db/asset-reservations');
 const {
   MAX_ASSET_SIZE_BYTES,
   isValidAssetKey,
+  decodeAssetKey,
   ledgerWorkspaceForAsset,
   creditAssetStorage,
   debitAssetStorage,
 } = require('./assets-shared');
 
 // These bypass session auth — the HMAC token IS the authorization.
-// Used when STORAGE_BACKEND=minio (internal Docker hostnames are unresolvable
+// Used when STORAGE_BACKEND=seaweedfs (internal Docker hostnames are unresolvable
 // from clients, so presigned URLs must route through the API server).
 
 async function registerAssetProxyRoutes(app) {
@@ -38,7 +39,15 @@ async function registerAssetProxyRoutes(app) {
       return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
     }
 
-    const r2Key = r2.assetKey(userId, key);
+    // The HMAC token (issued only after membership checks) IS the gate; here we
+    // just translate the flat key to where the shared object lives. New-scheme
+    // keys name their workspace inline — workspace-shared assets serve from the
+    // shared prefix, account copies fall back to the account key.
+    const decodedDownload = decodeAssetKey(key);
+    const r2Key =
+      decodedDownload?.hashed && decodedDownload.workspaceId
+        ? r2.sharedAssetKey(decodedDownload.workspaceId, key)
+        : r2.assetKey(userId, key);
 
     let stat;
     try {
@@ -98,15 +107,26 @@ async function registerAssetProxyRoutes(app) {
       return reply.status(400).send({ error: 'empty_body', message: 'Asset body cannot be empty.' });
     }
 
+    // Shared-namespace keys (new scheme) stat and write through the workspace
+    // prefix: a member re-upload is a delta-0 overwrite, not a second metered
+    // copy. Quota + credit debit the same workspace the object lives in.
+    const decodedUpload = decodeAssetKey(key);
+    const sharedWorkspace =
+      decodedUpload?.hashed && decodedUpload.workspaceId ? decodedUpload.workspaceId : null;
+    const r2Key = sharedWorkspace
+      ? r2.sharedAssetKey(sharedWorkspace, key)
+      : r2.assetKey(userId, key);
+    const meterWorkspace = sharedWorkspace ?? null;
+
     // Enforce quota even on the signed-proxy path (otherwise presign + proxy bypasses accounting).
     // Resolve the SAME ledger the credit below uses (workspace when the asset
     // has a reservation, else the account) and fail closed if it cannot be
     // resolved — a falsy quota must never skip the gate.
-    const statBefore = await r2.stat(r2.assetKey(userId, key)).catch(() => null);
+    const statBefore = await r2.stat(r2Key).catch(() => null);
     const existingSize = statBefore?.sizeBytes ?? 0;
     const incomingDelta = body.length - existingSize;
     if (incomingDelta > 0) {
-      const ledgerWorkspaceId = await ledgerWorkspaceForAsset(userId, key);
+      const ledgerWorkspaceId = meterWorkspace ?? await ledgerWorkspaceForAsset(userId, key);
       let quota;
       let used;
       try {
@@ -128,7 +148,6 @@ async function registerAssetProxyRoutes(app) {
       }
     }
 
-    const r2Key = r2.assetKey(userId, key);
     let existingBefore;
     try { existingBefore = await r2.stat(r2Key).catch(() => null); } catch { existingBefore = null; }
 
@@ -142,11 +161,10 @@ async function registerAssetProxyRoutes(app) {
     }
 
     const delta = body.length - (existingBefore?.sizeBytes ?? 0);
-    const ledgerWorkspaceId = await ledgerWorkspaceForAsset(userId, key);
     if (delta > 0) {
-      await creditAssetStorage(userId, ledgerWorkspaceId, delta);
+      await creditAssetStorage(userId, meterWorkspace ?? await ledgerWorkspaceForAsset(userId, key), delta);
     } else if (delta < 0) {
-      await debitAssetStorage(userId, ledgerWorkspaceId, -delta);
+      await debitAssetStorage(userId, meterWorkspace ?? await ledgerWorkspaceForAsset(userId, key), -delta);
     }
 
     return reply.status(201).send({ assetKey: key, sizeBytes: body.length });

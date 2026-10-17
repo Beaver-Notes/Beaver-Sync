@@ -1,7 +1,9 @@
 'use strict';
 
 const r2 = require('../services/r2');
-const { Subscription, Workspace } = require('../models');
+const crypto = require('crypto');
+const { query } = require('../db');
+const { Subscription, Workspace, WorkspaceMember } = require('../models');
 const {
   MAX_ASSET_SIZE_BYTES,
   ASSET_URL_TTL_SECONDS,
@@ -9,6 +11,9 @@ const {
   storeAssetBatch,
   ledgerWorkspaceForAsset,
   debitAssetStorage,
+  assetStoreKey,
+  resolveAssetLocation,
+  decodeAssetKey,
 } = require('./assets-shared');
 const { registerAssetProxyRoutes } = require('./assets-proxy');
 const { registerAssetPresignRoutes } = require('./assets-presign');
@@ -103,9 +108,20 @@ async function assetRoutes(app) {
       },
     },
   }, async (req, reply) => {
+    const prefix = `${req.userId}/assets/`;
+    const prefixes = [prefix];
+    // Shared (workspace-namespaced) keys live outside the account prefix.
+    // Every member workspace's `ws-assets/<wsId>/assets/` prefix is listed and
+    // stripped the same way so the client sees flat assetKeys uniformly.
+    const memberShips = await WorkspaceMember.find({ accountId: req.userId }, { workspaceId: 1 }).lean();
+    for (const m of memberShips) {
+      prefixes.push(r2.sharedAssetKey(m.workspaceId, ''));
+    }
+
     let allKeys;
     try {
-      allKeys = await r2.listKeys(`${req.userId}/assets/`);
+      const lists = await Promise.all(prefixes.map((p) => r2.listKeys(p)));
+      allKeys = lists.flat();
     } catch (err) {
       if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
         return reply.status(503).send({
@@ -115,10 +131,13 @@ async function assetRoutes(app) {
       }
       throw err;
     }
-    const prefix = `${req.userId}/assets/`;
-    const assetKeys = allKeys
-      .filter((k) => k.startsWith(prefix))
-      .map((k) => k.slice(prefix.length));
+    const assetSet = new Set();
+    for (const p of prefixes) {
+      for (const k of allKeys) {
+        if (k.startsWith(p)) assetSet.add(k.slice(p.length));
+      }
+    }
+    const assetKeys = [...assetSet];
 
     // Workspace scoping can no longer be done server-side: asset keys are now
     // opaque (`assets--<encrypted token>`) and the server must not be able to
@@ -164,7 +183,26 @@ async function assetRoutes(app) {
       });
     }
 
-    const key = r2.assetKey(req.userId, assetKey);
+    // Workspace context resolves BEFORE any write: a shared-namespace key must
+    // only be creatable by a verified owner/editor of that workspace, so the
+    // 404/403 checks below have to precede the stat/put, not follow it.
+    // (A binary PUT carries no JSON body, so checkStorageQuota never set
+    // req.workspaceId — read the client's x-workspace-id header instead.)
+    const headerWorkspaceId = req.workspaceId ?? req.headers['x-workspace-id'];
+    let validWorkspace = null;
+    if (headerWorkspaceId) {
+      const ws = await Workspace.findById(headerWorkspaceId);
+      if (!ws) {
+        return reply.status(404).send({ error: 'workspace_not_found', message: 'Workspace not found.' });
+      }
+      const member = await WorkspaceMember.findOne({ workspaceId: headerWorkspaceId, accountId: req.userId }).lean();
+      if (!member || !['owner', 'editor'].includes(member.role)) {
+        return reply.status(403).send({ error: 'forbidden', message: 'Not allowed to write to this workspace.' });
+      }
+      validWorkspace = headerWorkspaceId;
+    }
+
+    const key = assetStoreKey(req.userId, assetKey, validWorkspace);
 
     let existing;
     try {
@@ -201,7 +239,20 @@ async function assetRoutes(app) {
 
     const sizeBytes = body.length;
 
-    if (req.workspaceId) {
+    if (validWorkspace) {
+      await Workspace.updateOne(
+        { _id: validWorkspace },
+        { $inc: { storageUsedBytes: sizeBytes } }
+      );
+      // Ledger row with a workspace id: a later delete debits the workspace
+      // bucket (same insert the /assets/batch path writes).
+      const now = new Date().toISOString();
+      await query(
+        `INSERT INTO asset_reservations (id, account_id, workspace_id, asset_key, size_bytes, status, expires_at, created_at)
+         VALUES ($1,$2,$3,$4,$5,'confirmed',$6,$7)`,
+        [crypto.randomUUID(), req.userId, validWorkspace, assetKey, sizeBytes, now, now]
+      );
+    } else if (req.workspaceId) {
       await Workspace.updateOne(
         { _id: req.workspaceId },
         { $inc: { storageUsedBytes: sizeBytes } }
@@ -231,13 +282,11 @@ async function assetRoutes(app) {
       return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
     }
 
-    const key = r2.assetKey(req.userId, assetKey);
-
-    let stat;
+    let located;
     try {
-      stat = await r2.stat(key);
+      located = await resolveAssetLocation(req.userId, assetKey);
     } catch (err) {
-      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+      if (err.statusCode === 503) {
         return reply.status(503).send({
           error: 'storage_unavailable',
           message: 'Asset storage is not available. Please try again later.',
@@ -245,10 +294,11 @@ async function assetRoutes(app) {
       }
       throw err;
     }
-    if (!stat) {
+    if (!located) {
       app.recordSecurityEvent(req, 'asset_access_denied', { assetKey });
       return reply.status(404).send({ error: 'not_found', message: 'Asset not found.' });
     }
+    const key = located.key;
 
     const url = await r2.presignGet(key, ASSET_URL_TTL_SECONDS);
 
@@ -274,13 +324,11 @@ async function assetRoutes(app) {
       return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
     }
 
-    const key = r2.assetKey(req.userId, assetKey);
-
-    let stat;
+    let located;
     try {
-      stat = await r2.stat(key);
+      located = await resolveAssetLocation(req.userId, assetKey);
     } catch (err) {
-      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+      if (err.statusCode === 503) {
         return reply.status(503).send({
           error: 'storage_unavailable',
           message: 'Asset storage is not available. Please try again later.',
@@ -288,10 +336,11 @@ async function assetRoutes(app) {
       }
       throw err;
     }
-    if (!stat) {
+    if (!located) {
       app.recordSecurityEvent(req, 'asset_access_denied', { assetKey });
       return reply.status(404).send({ error: 'not_found', message: 'Asset not found.' });
     }
+    const key = located.key;
 
     const stream = await r2.getStream(key);
     if (!stream) {
@@ -316,13 +365,11 @@ async function assetRoutes(app) {
       return reply.status(400).send({ error: 'invalid_key', message: 'Invalid asset key.' });
     }
 
-    const key = r2.assetKey(req.userId, assetKey);
-
-    let stat;
+    let located;
     try {
-      stat = await r2.stat(key);
+      located = await resolveAssetLocation(req.userId, assetKey);
     } catch (err) {
-      if (err.name === 'ECONNREFUSED' || err.name === 'NetworkingError' || err.$metadata?.httpStatusCode === 502) {
+      if (err.statusCode === 503) {
         return reply.status(503).send({
           error: 'storage_unavailable',
           message: 'Asset storage is not available. Please try again later.',
@@ -330,15 +377,23 @@ async function assetRoutes(app) {
       }
       throw err;
     }
-    if (!stat) {
+    if (!located) {
       app.recordSecurityEvent(req, 'asset_delete_denied', { assetKey });
       return reply.status(404).send({ error: 'not_found', message: 'Asset not found.' });
     }
 
-    await r2.del(key);
+    await r2.del(located.key);
 
-    const workspaceId = await ledgerWorkspaceForAsset(req.userId, assetKey);
-    await debitAssetStorage(req.userId, workspaceId, stat.sizeBytes);
+    // Shared objects carry their workspace in the key itself; debit the
+    // workspace directly. The per-account ledger lookup would otherwise read
+    // the first uploader's account row, not the workspace that owns the copy.
+    let workspaceId;
+    if (located.shared) {
+      workspaceId = decodeAssetKey(assetKey)?.workspaceId ?? null;
+    } else {
+      workspaceId = await ledgerWorkspaceForAsset(req.userId, assetKey);
+    }
+    await debitAssetStorage(req.userId, workspaceId, located.sizeBytes);
 
     return reply.send({ deleted: true, assetKey });
   });
