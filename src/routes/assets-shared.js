@@ -290,9 +290,28 @@ async function resolveAssetLocation(userId, assetKey) {
     throw err;
   }
   const decoded = decodeAssetKey(assetKey);
-  if (!decoded?.workspaceId) return null;
+  if (!decoded?.workspaceId && !decoded?.noteId) return null;
   const member = await WorkspaceMember.findOne({ workspaceId: decoded.workspaceId, accountId: userId }).lean();
-  if (!member) return null;
+  if (!member) {
+    // Note-only shares: an invited collaborator is not a workspace member, but
+    // the note's assets must resolve — the shared object is the only copy.
+    const { NoteInvitation } = require('../models');
+    const invite = await NoteInvitation.findOne({ noteId: decoded.noteId, userId }).lean();
+    if (!invite) return null;
+    const sharedWorkspaceId = decoded.workspaceId || invite.workspace_id;
+    if (sharedWorkspaceId) {
+      const sharedKey = r2.sharedAssetKey(sharedWorkspaceId, assetKey);
+      const existing = await r2.stat(sharedKey);
+      if (existing) return { key: sharedKey, shared: true, sizeBytes: existing.sizeBytes };
+    }
+    // Pre-shared-store copy: the uploader's account prefix.
+    if (invite.invited_by) {
+      const uploaderKey = r2.assetKey(invite.invited_by, assetKey);
+      const existing = await r2.stat(uploaderKey);
+      if (existing) return { key: uploaderKey, shared: false, sizeBytes: existing.sizeBytes };
+    }
+    return null;
+  }
   const sharedKey = r2.sharedAssetKey(decoded.workspaceId, assetKey);
   const existing = await r2.stat(sharedKey);
   if (!existing) return null;

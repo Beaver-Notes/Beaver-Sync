@@ -117,6 +117,17 @@ async function assetRoutes(app) {
     for (const m of memberShips) {
       prefixes.push(r2.sharedAssetKey(m.workspaceId, ''));
     }
+    // Note-only shares: an invited collaborator is not a workspace member, but
+    // the shared note's assets live under the host workspace's shared prefix.
+    // Include one prefix per invited workspace so the client can list (the
+    // per-key resolveAssetLocation invitation check gates actual reads).
+    const invited = await query(
+      'SELECT DISTINCT workspace_id FROM note_invitations WHERE user_id = $1 AND workspace_id IS NOT NULL',
+      [req.userId]
+    );
+    for (const row of invited.rows) {
+      if (row.workspace_id) prefixes.push(r2.sharedAssetKey(row.workspace_id, ''));
+    }
 
     let allKeys;
     try {

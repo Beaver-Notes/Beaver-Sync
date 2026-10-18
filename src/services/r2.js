@@ -198,6 +198,8 @@ async function put(
   if (options.ifNoneMatch) {
     command.input.IfNoneMatch = "*";
   }
+  const len = body?.length ?? 0;
+  console.log(`[r2] PUT ${key} ${len}B`);
   await r2.send(command);
 }
 
