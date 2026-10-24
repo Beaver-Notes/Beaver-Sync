@@ -1,6 +1,7 @@
 'use strict';
 
 const { getQuotaBytes, getHistoryDays, getDeviceLimit, getFlags } = require('../lib/plans');
+const { getPlanPrices } = require('../lib/pricing');
 const { isEnterpriseMode } = require('../lib/license');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
 
@@ -29,6 +30,7 @@ async function plansRoutes(app) {
       historyDays: getHistoryDays(plan),
       deviceLimit: getDeviceLimit(plan),
       seats: orgSub?.seats ?? null,
+      prices: await getPlanPrices(),
     });
   });
 }
