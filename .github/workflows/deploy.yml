@@ -191,13 +191,17 @@ jobs:
           envs: REGISTRY,IMAGE_TAG,GHCR_USER,GHCR_TOKEN
           script: |
             set -e
+            COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
             if [ -n "$GHCR_TOKEN" ]; then
               echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             fi
             cd /opt/beaver-sync
             export API_IMAGE="$REGISTRY/api:$IMAGE_TAG"
             export WS_IMAGE="$REGISTRY/ws-relay:$IMAGE_TAG"
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull api ws-relay
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build api ws-relay postgres pg-backup caddy
+            $COMPOSE pull api ws-relay
+            if ! $COMPOSE up -d --no-build api ws-relay postgres pg-backup caddy; then
+              $COMPOSE logs --tail=80 api ws-relay postgres || true
+              exit 1
+            fi
             docker image prune -f
             echo "deployed $IMAGE_TAG"
