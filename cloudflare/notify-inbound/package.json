@@ -1,0 +1,14 @@
+{
+  "name": "notify-inbound",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "postal-mime": "^2.4.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  },
+  "scripts": {
+    "deploy": "wrangler deploy"
+  }
+}

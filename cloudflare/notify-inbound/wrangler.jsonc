@@ -1,0 +1,10 @@
+{
+  // Deploy: npx wrangler deploy (first time: npx wrangler login)
+  // Secrets are set after deploy:
+  //   npx wrangler secret put NOTIFY_WEBHOOK_SECRET   # = API's INBOUND_WEBHOOK_SECRET from /opt/beaver-sync/.env
+  //   npx wrangler secret put NOTIFY_API_URL          # = https://api.beavernotes.com
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "notify-inbound",
+  "main": "worker.js",
+  "compatibility_date": "2026-01-15"
+}
