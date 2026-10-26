@@ -40,10 +40,13 @@ jobs:
       # env vars from 3.96, and this job is pinned to 3.71.
       - name: Start SeaweedFS and create the bucket
         run: |
+          # Flags match docker-compose.test.yml (see its volume.max comment):
+          # the entrypoint default -volume.max=0 collapse makes PUTs fail
+          # with S3 500 InternalError once the auto-sized cap goes negative.
           docker run -d --name seaweedfs-ci -p 9000:9000 \
             -v "$GITHUB_WORKSPACE/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro" \
             chrislusf/seaweedfs:3.71 \
-            server -dir=/data -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json
+            server -dir=/data -volume.max=16 -master.volumePreallocate=false -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json
           for i in $(seq 1 30); do
             # The master API (9333) is not published, so probing it from the
             # runner always fails. A bare GET on the S3 gateway answers 403
