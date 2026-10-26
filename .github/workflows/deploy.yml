@@ -75,6 +75,13 @@ jobs:
         run: yarn test
         env:
           TEST_DATABASE_URL: postgresql://beaver:beaver@localhost:5432/beaver_test
+          # Suites that read secret config at import time (before
+          # setupTestDb pins them) need these; CI has no .env to load.
+          SESSION_HMAC_KEY: ci-throwaway-session-key-change-me-0000000001
+          EMAIL_HMAC_KEY: ci-throwaway-email-key-change-me-000000000001
+          COOKIE_SECRET: ci-throwaway-cookie-secret-change-me-00000001
+          NOTE_HMAC_KEY: ci-throwaway-note-hmac-key-change-me-00000001
+          INTERNAL_API_SECRET: ci-throwaway-internal-api-secret-change-me-01
           STORAGE_ENDPOINT: http://localhost:9000
           STORAGE_BUCKET_NAME: beaver-sync
           STORAGE_ACCESS_KEY_ID: beaver
