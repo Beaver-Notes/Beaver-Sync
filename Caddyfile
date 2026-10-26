@@ -3,17 +3,11 @@
         header Connection *Upgrade*
         header Upgrade websocket
     }
-    reverse_proxy @websockets ws-relay:8080 {
-        lb_policy cookie beaver_ws {
-            ttl 1h
-        }
-    }
-
-    reverse_proxy /ws/* ws-relay:8080 {
-        lb_policy cookie beaver_ws {
-            ttl 1h
-        }
-    }
-
+    # Sticky-cookie lb_policy (lb_policy cookie …) needs a custom Caddy build;
+    # stock caddy:2-alpine dies on it. ws-relay runs at one replica, so plain
+    # routing works; if relay scales, add Redis (docker-compose.scale.yml) or
+    # build Caddy with the cookie lb_policy module.
+    reverse_proxy @websockets ws-relay:8080
+    reverse_proxy /ws/* ws-relay:8080
     reverse_proxy api:3000
 }
