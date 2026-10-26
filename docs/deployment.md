@@ -133,6 +133,11 @@ INBOUND_WEBHOOK_SECRET=$(openssl rand -hex 32)
 
 # ── Auth ──────────────────────────────────────────────
 LEGACY_AUTH_ENABLED=true
+# validateRequiredEnv requires these to be SET when legacy auth is enabled;
+# docker-entrypoint.sh generates the PEMs into the beaver_data volume on
+# first boot and these paths point at the mount inside the container.
+JWT_PRIVATE_KEY_PATH=./keys/private.pem
+JWT_PUBLIC_KEY_PATH=./keys/public.pem
 WEBAUTHN_RPID=example.com
 WEBAUTHN_ORIGIN=https://app.example.com
 WEBAUTHN_RP_NAME=Beaver Notes
