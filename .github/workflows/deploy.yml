@@ -148,7 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     # The target is a DigitalOcean droplet. Set repo variable DEPLOY_TARGET=digitalocean
     # to enable. Requires secrets: DIGITALOCEAN_HOST, DIGITALOCEAN_SSH_USER, DIGITALOCEAN_SSH_KEY,
-    # and GHCR_TOKEN (a PAT with read:packages) unless the GHCR packages are public.
+    # DIGITALOCEAN_SSH_PASSPHRASE (empty string allowed only via a filled secret), and GHCR_TOKEN (a PAT with read:packages) unless the GHCR packages are public.
     if: ${{ vars.DEPLOY_TARGET == 'digitalocean' }}
     steps:
       - name: Lowercase image namespace
@@ -164,6 +164,7 @@ jobs:
           host: ${{ secrets.DIGITALOCEAN_HOST }}
           username: ${{ secrets.DIGITALOCEAN_SSH_USER }}
           key: ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+          passphrase: ${{ secrets.DIGITALOCEAN_SSH_PASSPHRASE }}
           envs: REGISTRY,IMAGE_TAG,GHCR_USER,GHCR_TOKEN
           script: |
             set -e
