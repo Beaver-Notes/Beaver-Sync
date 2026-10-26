@@ -151,6 +151,7 @@ jobs:
     # DIGITALOCEAN_SSH_PASSPHRASE (empty string allowed only via a filled secret), and GHCR_TOKEN (a PAT with read:packages) unless the GHCR packages are public.
     if: ${{ vars.DEPLOY_TARGET == 'digitalocean' }}
     steps:
+      - uses: actions/checkout@v4 # scp-action needs the compose files in its workspace
       - name: Lowercase image namespace
         run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       # The droplet keeps no repo clone; the deploy ships the three files compose
