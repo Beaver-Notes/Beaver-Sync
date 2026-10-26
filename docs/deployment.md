@@ -80,12 +80,11 @@ Production runs on a DigitalOcean droplet with the stack deployed over SSH from 
 
 ### Droplet setup
 
-One-time, as a user that can write to `/opt`:
-
-```bash
-git clone <repo-url> /opt/beaver-sync
-# Docker Engine with the compose plugin: https://docs.docker.com/compose/install/
-```
+One-time: install Docker Engine with the compose plugin
+(https://docs.docker.com/compose/install/) on a droplet writable at `/opt`
+(that's all — no repo clone; CI ships `docker-compose.yml`,
+`docker-compose.prod.yml` and the `Caddyfile` into `/opt/beaver-sync` on every
+deploy).
 
 Then create `/opt/beaver-sync/.env` (gitignored, loaded by `docker-compose.prod.yml` via `env_file`). At minimum it needs:
 
@@ -214,7 +213,7 @@ The `deploy` job in `.github/workflows/deploy.yml` is gated on the repository va
 | `DIGITALOCEAN_SSH_KEY` | Private key for that user |
 | `GHCR_TOKEN` | PAT with `read:packages` — only if the GHCR packages are private |
 
-On a push to `main` the `build` job builds both images on the runner and pushes `ghcr.io/<owner>/<repo>/api` and `.../ws-relay`, tagged with the commit SHA and `latest`. The `deploy` job then SSHes in, runs `git pull --ff-only` in `/opt/beaver-sync`, pulls just those two images, and runs `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build api ws-relay postgres pg-backup caddy` before pruning images. Nothing compiles on the droplet, which is what keeps a 1 vCPU / 2 GB box from running out of memory mid-deploy. SeaweedFS is left out of every service list, so the droplet runs no local object store; `docker-compose.prod.yml` also clears the `seaweedfs` dependency the base file gives `api`, so R2 is the only store.
+On a push to `main` the `build` job builds both images on the runner and pushes `ghcr.io/<owner>/<repo>/api` and `.../ws-relay`, tagged with the commit SHA and `latest`. The `deploy` job then SSHes in, scp-copies the compose files + `Caddyfile` into `/opt/beaver-sync`, pulls just the two images, and runs `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build api ws-relay postgres pg-backup caddy` before pruning images. Nothing compiles and no repo clone lives on the droplet, which is what keeps a 1 vCPU / 2 GB box from running out of memory mid-deploy. SeaweedFS is left out of every service list, so the droplet runs no local object store; `docker-compose.prod.yml` also clears the `seaweedfs` dependency the base file gives `api`, so R2 is the only store.
 
 Rolling back means redeploying an earlier SHA, so `API_IMAGE` / `WS_IMAGE` can be pinned by hand when CI is not the fastest route:
 
@@ -240,16 +239,7 @@ docker ps                                  # what is actually running right now
 
 The last workflow run log ends with a `deployed <sha> <timestamp>` line — read it in the Actions UI (Deploy → Deploy to DigitalOcean) to know which commit shipped and when.
 
-To go back to the previous good commit, work inside the clone on the droplet:
-
-```bash
-cd /opt/beaver-sync
-git checkout <previous-good-sha>
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build api ws-relay postgres pg-backup caddy
-git checkout main
-```
-
-Return to the branch as shown before the next deploy — a `git pull --ff-only` fails while the clone is on a detached HEAD.
+The compose files + `Caddyfile` are re-uploaded on every deploy, so there is no clone to roll back on the droplet. To go back to a previous build, redeploy pinned images for the known-good SHA (the same method as the manual override above):
 
 If the previous build's images were already pruned, that does not block the rollback: check out the previous sha and let `--build` rebuild the images from it. Never try to restore an image id from `/opt/beaver-sync/.beaver-previous-api-image`; rebuilding from a known-good sha is the recovery path.
 
