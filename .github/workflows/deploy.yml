@@ -95,7 +95,9 @@ jobs:
           STORAGE_SECRET_ACCESS_KEY: beaver-dev-secret
           STORAGE_FORCE_PATH_STYLE: "true"
       - name: Audit dependencies (fail on critical)
-        run: yarn audit --audit-level=critical
+        # yarn audit exits with a severity bitmask even at 0 criticals;
+        # npm audit honors --audit-level and reads package-lock.json.
+        run: npm audit --audit-level=critical
 
   build:
     name: Build images
