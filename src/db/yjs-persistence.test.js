@@ -1,4 +1,4 @@
-require('../../test/helpers/db')
+const { setupTestDb } = require('../../test/helpers/db')
 const { describe, it, before, after } = require('node:test')
 const assert = require('node:assert')
 const Y = require('yjs')
@@ -13,6 +13,7 @@ describe('yjs-persistence (ephemeral relay)', () => {
   const TEST_NOTE = 'note-test-persist'
 
   before(async () => {
+    await setupTestDb() // creates schema on a fresh DB (CI) and only assumes tables locally
     pool = getPool()
     persistence = createPostgresPersistence(pool)
 
