@@ -45,7 +45,11 @@ jobs:
             chrislusf/seaweedfs:3.71 \
             server -dir=/data -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:9333/cluster/status >/dev/null 2>&1; then
+            # The master API (9333) is not published, so probing it from the
+            # runner always fails. A bare GET on the S3 gateway answers 403
+            # (up, anon denied), which is exactly the state we want — hence
+            # no curl -f, which would turn that into a retry.
+            if curl -sS -o /dev/null --max-time 2 http://localhost:9000/ 2>/dev/null; then
               echo "SeaweedFS ready on attempt $i"
               break
             fi
@@ -61,6 +65,12 @@ jobs:
             ensureBucket().then(() => console.log('bucket ready')).catch(e => { console.error(e.message); process.exit(1); });
           "
       - run: yarn lint
+
+      # Legacy-JWT tests default to the gitignored keys/*.pem; generate a
+      # throwaway CI-only keypair so the files exist.
+      - name: Generate throwaway JWT test keys
+        run: bash scripts/generate-keys.sh
+
       - name: Test
         run: yarn test
         env:

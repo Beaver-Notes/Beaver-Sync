@@ -76,6 +76,11 @@ jobs:
       - name: Lint
         run: yarn lint
 
+      # Legacy-JWT tests default to the gitignored keys/*.pem; generate a
+      # throwaway CI-only keypair so the files exist.
+      - name: Generate throwaway JWT test keys
+        run: bash scripts/generate-keys.sh
+
       - name: Test
         run: yarn test
         env:
