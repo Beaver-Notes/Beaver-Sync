@@ -438,11 +438,11 @@ test('the initialization-path pre-claim purge is audited like the push path', as
 
   await new Promise((resolve) => setTimeout(resolve, 200));
   const rows = (await query(
-    "SELECT workspace_id, metadata_encrypted FROM audit_logs WHERE action = 'note_preclaim_purged'"
+    "SELECT workspace_id, metadata_sealed FROM audit_logs WHERE action = 'note_preclaim_purged'"
   )).rows;
   assert.equal(rows.length, 1, 'the initialization purge must write an audit record');
   assert.equal(rows[0].workspace_id, 'sync-workspace');
-  const meta = JSON.parse(await mlkem.decryptMetadata(rows[0].metadata_encrypted));
+  const meta = JSON.parse(await mlkem.decryptMetadata(rows[0].metadata_sealed));
   assert.equal(meta.workspaceId, 'sync-workspace');
   assert.ok(Array.isArray(meta.purged) && meta.purged.length === 1, 'the purged counts are recorded');
   assert.equal(meta.purged[0].noteId, noteId);

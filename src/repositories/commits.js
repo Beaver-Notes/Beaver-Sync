@@ -2,6 +2,10 @@
 
 const { query } = require('../db');
 
+// Client clocks drift. A commit stamped slightly ahead of the server must stay
+// visible to its own author, so the future bound is a tolerance, not `now`.
+const FUTURE_TS_TOLERANCE_MS = 5 * 60 * 1000;
+
 // A note is "owned" by the workspace(s) holding its journal/snapshot rows,
 // mirroring the collaboration bootstrap check. Any role counts: a viewer can
 // read the note's content, so it can read its version history too.
@@ -13,8 +17,11 @@ async function userIsMemberOfNoteWorkspace(userId, noteId) {
     UNION ALL
     SELECT 1 FROM sync_document_state s
       JOIN workspace_members m ON m.workspace_id = s.workspace_id
-    WHERE s.note_id = $1 AND m.account_id = $2
-    LIMIT 1
+     WHERE s.note_id = $1 AND m.account_id = $2
+     UNION ALL
+     SELECT 1 FROM note_invitations i
+     WHERE i.note_id = $1 AND i.user_id = $2
+     LIMIT 1
   `, [noteId, userId]);
   return rows.length > 0;
 }
@@ -47,10 +54,16 @@ async function listHistory({ userId, noteIdHash, before, cutoffTs, limit, allAcc
     params.push(before.toISOString());
     sql += ` AND commits.created_at < $${params.length}`;
   }
+  const nowMs = Date.now();
   if (cutoffTs > 0) {
-    params.push(new Date(cutoffTs).toISOString());
-    sql += ` AND commits.created_at >= $${params.length}`;
+    params.push(cutoffTs);
+    sql += ` AND commits.ts >= $${params.length}`;
   }
+  // `ts` is client-supplied, so a wildly future-dated commit would otherwise
+  // park itself outside the window forever. Allow real clock skew: a device
+  // a few seconds ahead must still see its own history.
+  params.push(nowMs + FUTURE_TS_TOLERANCE_MS);
+  sql += ` AND commits.ts <= $${params.length}`;
   params.push(limit);
   sql += ` ORDER BY commits.created_at DESC LIMIT $${params.length}`;
 

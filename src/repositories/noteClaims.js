@@ -44,6 +44,14 @@ async function reconcileNoteOwnership(executor, workspaceId, noteIds) {
       RETURNING nk.user_id
     `, [noteId, workspaceId]);
 
+    // Backfill the owning workspace on invitations created before the note's
+    // first push: no evidence of the owning workspace existed at insert time,
+    // so shared-with-me could not resolve the note until the note registered.
+    await executor.query(`
+      UPDATE note_invitations SET workspace_id = $2
+       WHERE note_id = $1 AND workspace_id IS NULL
+    `, [noteId, workspaceId]);
+
     // An invite link minted by a non-member is the same pre-claim by another
     // door: it must not grant membership on a note it never owned.
     const links = await executor.query(`

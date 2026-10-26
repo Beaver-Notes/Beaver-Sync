@@ -445,7 +445,8 @@ CREATE TABLE IF NOT EXISTS sync_document_state (
 );
 
 CREATE INDEX IF NOT EXISTS idx_yjs_updates_pull
-  ON yjs_doc_updates(workspace_id, note_id, ts, clock);
+  ON yjs_doc_updates(workspace_id, note_id, ts, clock)
+  INCLUDE (device_id, update_encrypted);
 
 CREATE TABLE IF NOT EXISTS vault_key_params (
   id                 TEXT PRIMARY KEY,
@@ -554,3 +555,4 @@ CREATE TABLE IF NOT EXISTS asset_reservations (
 
 CREATE INDEX IF NOT EXISTS idx_asset_reservations_account ON asset_reservations(account_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_asset_reservations_expires ON asset_reservations(expires_at) WHERE status = 'pending';
+

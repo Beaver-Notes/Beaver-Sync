@@ -16,7 +16,7 @@ function audit(req, action, meta = {}) {
   // request response (audit runs on every push/commit/login).
   const write = async () => {
     try {
-      const metadataEncrypted = Object.keys(meta).length > 0
+      const metadataSealed = Object.keys(meta).length > 0
         ? await mlkem.encryptMetadata(JSON.stringify(meta))
         : null;
 
@@ -24,7 +24,7 @@ function audit(req, action, meta = {}) {
         accountIdHash: hashSessionId(req.userId),
         workspaceId: meta.workspaceId ?? null,
         action,
-        metadataEncrypted,
+        metadataSealed,
         ipSubnet: getIpSubnet(req),
         createdAt: new Date(),
       });

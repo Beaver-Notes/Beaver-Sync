@@ -9,34 +9,29 @@ const assert = require('node:assert/strict');
 
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { buildApp } = require('../src/server');
+const { buildCorsOrigin } = require('../src/lib/cors-origins');
 
 before(setupTestDb);
 after(cleanTestDb);
 
-// NODE_ENV is 'test' here, so @fastify/cors takes the regex branch. The
-// production branch is exercised indirectly: build the origin function the
-// same way server.js does and assert the scheme variants it must include,
-// because @fastify/cors compares entries by strict equality against the
-// Origin header and a schemeless entry can never match a schemeful one.
-function productionOriginList() {
-  return (process.env.ALLOWED_ORIGINS || '')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean)
-    .concat([
-      'tauri://localhost',
-      'http://tauri.localhost',
-      'https://tauri.localhost',
-    ]);
-}
-
 test('the production CORS list contains every Tauri WebView origin including schemes', () => {
-  const list = productionOriginList();
-  assert.ok(list.includes('tauri://localhost'));
-  // Android and Windows Tauri send schemeful WebView origins; a schemeless
-  // `tauri.localhost` entry can never match either.
-  assert.ok(list.includes('http://tauri.localhost'));
-  assert.ok(list.includes('https://tauri.localhost'));
+  const list = buildCorsOrigin({ nodeEnv: 'production', allowedOrigins: 'https://app.example.com' });
+  assert.deepEqual(list, [
+    'https://app.example.com',
+    'tauri://localhost',
+    // Android and Windows Tauri send schemeful WebView origins; a schemeless
+    // `tauri.localhost` entry can never match either.
+    'http://tauri.localhost',
+    'https://tauri.localhost',
+  ]);
+});
+
+test('the dev origin pattern accepts local Tauri and web origins but no remote host', () => {
+  const pattern = buildCorsOrigin({ nodeEnv: 'development', allowedOrigins: '' });
+  assert.ok(pattern.test('http://localhost:5173'));
+  assert.ok(pattern.test('tauri://localhost'));
+  assert.ok(pattern.test('https://tauri.localhost'));
+  assert.ok(!pattern.test('https://app.example.com'));
 });
 
 test('CORS preflight accepts a localhost web origin on the test app', async () => {

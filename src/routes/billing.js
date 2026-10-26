@@ -28,7 +28,7 @@ async function billingRoutes(app) {
       return reply.status(503).send({ error: 'billing_not_configured', message: 'Stripe is not configured.' });
     }
 
-    const account = await Account.findById(req.userId, { emailVerified: 1, emailEncrypted: 1 }).lean();
+    const account = await Account.findById(req.userId, { emailVerified: 1, emailSealed: 1 }).lean();
     if (!account) {
       return reply.status(404).send({ error: 'not_found', message: 'Account not found.' });
     }
@@ -37,10 +37,10 @@ async function billingRoutes(app) {
     const verification = emailVerificationFields(Boolean(account.emailVerified));
 
     let email = null;
-    if (account.emailEncrypted) {
+    if (account.emailSealed) {
       try {
         const mlkem = require('../lib/mlkem');
-        const decrypted = await mlkem.decryptMetadata(account.emailEncrypted);
+        const decrypted = await mlkem.decryptMetadata(account.emailSealed);
         if (decrypted && typeof decrypted === 'string' && decrypted.includes('@')) {
           email = decrypted;
         }

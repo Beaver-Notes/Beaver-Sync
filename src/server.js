@@ -171,26 +171,18 @@ async function buildApp() {
     crossOriginOpenerPolicy: false,
     crossOriginResourcePolicy: { policy: 'same-origin' },
   });
+  try {
+    await app.register(require('@fastify/compress'), {
+      global: true,
+      threshold: 1024,
+      encodings: ['br', 'gzip', 'deflate'],
+    });
+  } catch (err) {
+    app.log.warn({ err: err?.message }, 'fastify-compress unavailable, continuing without gzip/br');
+  }
 
   await app.register(require('@fastify/cors'), {
-    origin:
-      process.env.NODE_ENV === 'production'
-        ? (process.env.ALLOWED_ORIGINS || '')
-            .split(',')
-            .map((origin) => origin.trim())
-            .filter(Boolean)
-            // `http(s)://tauri.localhost` is the WebView origin on Tauri Android
-            // and Windows; `tauri://localhost` is the desktop custom scheme.
-            // All schemes are appended because @fastify/cors compares entries
-            // by strict equality against the Origin header, and operators fill
-            // ALLOWED_ORIGINS with web origins that cannot be relied on to
-            // carry every scheme.
-            .concat([
-              'tauri://localhost',
-              'http://tauri.localhost',
-              'https://tauri.localhost',
-            ])
-        : /^(https?:\/\/(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?|tauri:\/\/localhost)$/,
+    origin: require('./lib/cors-origins').buildCorsOrigin(),
     credentials: true,
   });
 

@@ -99,6 +99,23 @@ test('decodeAssetKey parses workspace-scoped and legacy keys', () => {
   assert.equal(decodeAssetKey('assets/ws/note'), null);
 });
 
+test('a dash at the note or hash edge does not demote a hashed key to legacy', () => {
+  const hash = Buffer.alloc(32).toString('base64url');
+  // A note id may end with '-' (and a hash may begin with one), so `split('--')`
+  // ate the dash, the key read as legacy, and its object was stored in the
+  // uploader's private prefix where no other workspace member could see it.
+  assert.deepEqual(
+    decodeAssetKey(`assets--ws-1--note-1---${hash}`),
+    { type: 'assets', workspaceId: 'ws-1', noteId: 'note-1-', filename: null, hashed: true }
+  );
+  const dashHash = `-${'A'.repeat(42)}`;
+  assert.equal(isFilenameHash(dashHash), true);
+  assert.deepEqual(
+    decodeAssetKey(`assets--ws-1--note-1----${'A'.repeat(42)}`),
+    { type: 'assets', workspaceId: 'ws-1', noteId: 'note-1-', filename: null, hashed: true }
+  );
+});
+
 test('new-scheme hashed keys are recognised and decode to a real workspace+note', () => {
   // A canonical 32-byte base64url hash: exactly the new-scheme final segment.
   const hash = Buffer.alloc(32).toString('base64url');

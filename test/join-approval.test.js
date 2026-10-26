@@ -62,7 +62,8 @@ test.before(async () => {
     await seedPaid(id);
   }
   // seedWorkspace creates the owner membership and a pro subscription.
-  await seedWorkspace('ws-approval-1', 'ja-owner');
+  // Shared-workspace invites require the team flag, so seed at team tier.
+  await seedWorkspace('ws-approval-1', 'ja-owner', { plan: 'team' });
   // The note already has one editor (the approver); joiners are not members.
   await query(
     'INSERT INTO note_invitations (note_id, user_id, invited_by, role, created_at) VALUES ($1, $2, $3, $4, $5)',

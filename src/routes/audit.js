@@ -49,20 +49,20 @@ async function auditRoutes(app) {
     const limit = Math.min(parseInt(req.query.limit ?? '100', 10), 500);
 
     const logs = await AuditLog
-      .find(filter, { accountIdHash: 1, action: 1, metadataEncrypted: 1, ipSubnet: 1, createdAt: 1 })
+      .find(filter, { accountIdHash: 1, action: 1, metadataSealed: 1, ipSubnet: 1, createdAt: 1 })
       .sort({ createdAt: -1 })
       .limit(limit)
       .lean();
 
     const result = await Promise.all(logs.map(async (log) => {
       let meta = null;
-      if (log.metadataEncrypted) {
+      if (log.metadataSealed) {
         try {
-          const raw = await mlkem.decryptMetadata(log.metadataEncrypted);
+          const raw = await mlkem.decryptMetadata(log.metadataSealed);
           meta = JSON.parse(raw);
         } catch { }
       }
-      return { ...log, metadataEncrypted: undefined, metadata: meta };
+      return { ...log, metadataSealed: undefined, metadata: meta };
     }));
 
     return reply.send({ logs: result });

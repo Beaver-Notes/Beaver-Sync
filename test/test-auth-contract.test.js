@@ -20,7 +20,7 @@ process.env.ENTERPRISE_MODE = 'false';
 process.env.VERIFY_SESSION_RATE_LIMIT_PER_MINUTE = '1000';
 process.env.WS_TICKET_RATE_LIMIT_PER_MINUTE = '1000';
 
-const { close } = require('../src/db');
+const { close, getDb } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
 const { register, seedAccount, seedWorkspace } = require('./helpers/factory');
 const { buildApp } = require('../src/server');
@@ -219,7 +219,33 @@ test('POST /sso/exchange rejects an invalid code with 400', async () => {
   assert.equal(res.json().error, 'invalid_code');
 });
 
+// A note synced only through the Yjs path has rows in `yjs_doc_updates` and none
+// in `sync_document_state`. Checking one table alone refused the ws-ticket, which
+// silently cost every invited collaborator realtime and presence.
+test('note room in a Yjs-only workspace still authorizes the invited collaborator', async () => {
+  const outsider = await registerOutsider();
+  await models.NoteInvitation.create({
+    noteId: 'contract-yjs-note', userId: outsider.accountId, invitedBy: 'contract-user',
+    role: 'editor', createdAt: new Date(),
+  });
+  // No model object for the journal table; insert the one row the check reads.
+  await getDb().query(
+    `INSERT INTO yjs_doc_updates (id, workspace_id, note_id, update_data, device_id, clock, ts, created_at)
+     VALUES ($1, $2, $3, $4, $5, 0, $6, NOW())`,
+    [crypto.randomUUID(), 'contract-ws', 'contract-yjs-note', Buffer.from('x'), 'contract-device', Date.now()]
+  );
+
+  const res = await app.inject({
+    method: 'POST',
+    url: '/auth/ws-ticket',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${outsider.token}` },
+    payload: { workspaceId: 'contract-ws', noteId: 'contract-yjs-note' },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.ok(res.json().ticket);
+});
+
 async function registerOutsider() {
   const account = await register('pro');
-  return { token: await createSession(account.id, {}) };
+  return { accountId: account.id, token: await createSession(account.id, {}) };
 }

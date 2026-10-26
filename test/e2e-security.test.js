@@ -60,7 +60,7 @@ function post(session, url, payload) {
   });
 }
 
-test('note join-link gate: keyless joiner is rejected with keypair_required', async () => {
+test('note join-link: keyless joiner records membership for later fan-out', async () => {
   const token = crypto.randomBytes(32).toString('hex');
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
   await query(
@@ -68,9 +68,15 @@ test('note join-link gate: keyless joiner is rejected with keypair_required', as
     [crypto.randomUUID(), 'join-note', 'alice', tokenHash, 'editor', now]
   );
 
+  // Membership is recorded even without a keypair so the owner can wrap the
+  // note key once the joiner publishes one; no envelope exists yet.
   const res = await post(nokeySession, `/collaboration/join/${token}`, {});
-  assert.equal(res.statusCode, 403);
-  assert.equal(res.json().error, 'keypair_required');
+  assert.equal(res.statusCode, 201);
+  const { rows } = await query(
+    'SELECT user_id FROM note_invitations WHERE note_id = $1 AND user_id = $2',
+    ['join-note', 'nokey']
+  );
+  assert.equal(rows.length, 1, 'keyless join must record membership');
 });
 
 test('workspace join gate: keyless joiner is rejected with keypair_required', async () => {

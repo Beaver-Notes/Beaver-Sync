@@ -50,25 +50,25 @@ test('setup → provision URI/QR, verify-before-persist, secret encrypted at res
   assert.ok(body.otpauthUrl.includes(body.secret));
   assert.ok(body.expiresAt);
   // encrypted at rest
-  const row = await query('SELECT totp_secret_encrypted, totp_pending_secret_encrypted FROM accounts WHERE id=$1', [acc.id]);
-  assert.equal(row.rows[0].totp_secret_encrypted, null);
-  assert.ok(row.rows[0].totp_pending_secret_encrypted);
-  assert.notEqual(row.rows[0].totp_pending_secret_encrypted, body.secret);
+  const row = await query('SELECT totp_secret_sealed, totp_pending_secret_sealed FROM accounts WHERE id=$1', [acc.id]);
+  assert.equal(row.rows[0].totp_secret_sealed, null);
+  assert.ok(row.rows[0].totp_pending_secret_sealed);
+  assert.notEqual(row.rows[0].totp_pending_secret_sealed, body.secret);
 
   // wrong code fails, not persisted
   const bad = await app.inject({ method: 'POST', url: '/account/totp/verify', headers: auth(acc.token), payload: { code: '000000' } });
   assert.equal(bad.statusCode, 401);
-  const row2 = await query('SELECT totp_secret_encrypted FROM accounts WHERE id=$1', [acc.id]);
-  assert.equal(row2.rows[0].totp_secret_encrypted, null);
+  const row2 = await query('SELECT totp_secret_sealed FROM accounts WHERE id=$1', [acc.id]);
+  assert.equal(row2.rows[0].totp_secret_sealed, null);
 
   // correct code activates
   const code = totpCode(body.secret);
   const ok = await app.inject({ method: 'POST', url: '/account/totp/verify', headers: auth(acc.token), payload: { code } });
   assert.equal(ok.statusCode, 200, ok.body);
   assert.equal(ok.json().verified, true);
-  const row3 = await query('SELECT totp_secret_encrypted, totp_pending_secret_encrypted, totp_last_timestep FROM accounts WHERE id=$1', [acc.id]);
-  assert.ok(row3.rows[0].totp_secret_encrypted);
-  assert.equal(row3.rows[0].totp_pending_secret_encrypted, null);
+  const row3 = await query('SELECT totp_secret_sealed, totp_pending_secret_sealed, totp_last_timestep FROM accounts WHERE id=$1', [acc.id]);
+  assert.ok(row3.rows[0].totp_secret_sealed);
+  assert.equal(row3.rows[0].totp_pending_secret_sealed, null);
   assert.ok(row3.rows[0].totp_last_timestep != null);
 
   // status enabled
@@ -84,7 +84,7 @@ test('setup → provision URI/QR, verify-before-persist, secret encrypted at res
   assert.ok(!lb.token);
 
   // verify via MFA
-  const secretStored = row3.rows[0].totp_secret_encrypted;
+  const secretStored = row3.rows[0].totp_secret_sealed;
   // we have secret in memory; compute fresh code (timestep may have moved, use verify path will accept window)
   const freshCode = totpCode(body.secret);
   const mfa = await app.inject({ method: 'POST', url: '/auth/token/mfa', headers: { 'content-type': 'application/json' }, payload: { challenge: lb.mfaChallenge, code: freshCode } });
@@ -199,7 +199,7 @@ test('password accounts only, passkey-only blocked', async () => {
   const { createEmailHash } = require('../src/lib/crypto');
   const emailHmac = createEmailHash(email);
   const { query: q } = require('../src/db');
-  await q('INSERT INTO accounts (id, email_hmac, email_encrypted, password_hash, created_at) VALUES ($1,$2,$3,$4,$5)', [id, emailHmac, null, null, new Date().toISOString()]);
+  await q('INSERT INTO accounts (id, email_hmac, email_sealed, password_hash, created_at) VALUES ($1,$2,$3,$4,$5)', [id, emailHmac, null, null, new Date().toISOString()]);
   // create session via createSession helper
   const { createSession } = require('../src/middleware/auth');
   const tok = await createSession(id, { headers: {} });

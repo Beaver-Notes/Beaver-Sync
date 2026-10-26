@@ -93,7 +93,7 @@ async function makeAccountWithFreePlan() {
   const id = `wh-${crypto.randomBytes(6).toString('hex')}`;
   const account = await models.Account.create({
     emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY).update(`${id}@test.example`).digest('hex'),
-    emailEncrypted: 'e', passwordHash: '$2b$12$test', kdfSalt: crypto.randomBytes(32).toString('hex'),
+    emailSealed: 'e', passwordHash: '$2b$12$test', kdfSalt: crypto.randomBytes(32).toString('hex'),
   });
   await models.Subscription.create({ accountId: account.id, plan: 'free', status: 'active', storageQuotaBytes: 0, storageUsedBytes: 0, createdAt: new Date() });
   return account;

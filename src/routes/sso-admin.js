@@ -84,15 +84,15 @@ async function requirePlanAndOwner(app, req, reply, workspaceId) {
 async function encryptConfigFields(data) {
   const out = { ...data };
   if (out.idpCert && typeof out.idpCert === 'string') {
-    out.idpCertEncrypted = await mlkem.encryptMetadata(out.idpCert);
+    out.idpCertSealed = await mlkem.encryptMetadata(out.idpCert);
     delete out.idpCert;
   }
   if (out.spPrivateKey && typeof out.spPrivateKey === 'string') {
-    out.spPrivateKeyEncrypted = await mlkem.encryptMetadata(out.spPrivateKey);
+    out.spPrivateKeySealed = await mlkem.encryptMetadata(out.spPrivateKey);
     delete out.spPrivateKey;
   }
   if (out.oidcClientSecret && typeof out.oidcClientSecret === 'string') {
-    out.oidcClientSecretEncrypted = await mlkem.encryptMetadata(out.oidcClientSecret);
+    out.oidcClientSecretSealed = await mlkem.encryptMetadata(out.oidcClientSecret);
     delete out.oidcClientSecret;
   }
   return out;
@@ -100,9 +100,9 @@ async function encryptConfigFields(data) {
 
 function sanitizeConfig(raw) {
   const config = { ...raw };
-  delete config.idpCertEncrypted;
-  delete config.spPrivateKeyEncrypted;
-  delete config.oidcClientSecretEncrypted;
+  delete config.idpCertSealed;
+  delete config.spPrivateKeySealed;
+  delete config.oidcClientSecretSealed;
   if (config.idpCert) config.idpCert = true;
   if (config.spPrivateKey) config.spPrivateKey = true;
   if (config.oidcClientSecret) config.oidcClientSecret = true;
@@ -162,12 +162,12 @@ async function ssoAdminRoutes(app) {
       slug,
       idpEntityId: idpEntityId || null,
       idpSsoUrl: idpSsoUrl || null,
-      idpCertEncrypted: encrypted.idpCertEncrypted || null,
+      idpCertSealed: encrypted.idpCertSealed || null,
       oidcIssuer: oidcIssuer || null,
       oidcClientId: oidcClientId || null,
-      oidcClientSecretEncrypted: encrypted.oidcClientSecretEncrypted || null,
+      oidcClientSecretSealed: encrypted.oidcClientSecretSealed || null,
       spCert: spCert || null,
-      spPrivateKeyEncrypted: encrypted.spPrivateKeyEncrypted || null,
+      spPrivateKeySealed: encrypted.spPrivateKeySealed || null,
       allowedEmailDomains: allowedEmailDomains || null,
     });
 
@@ -229,9 +229,9 @@ async function ssoAdminRoutes(app) {
 
     if (idpCert || spPrivateKey || oidcClientSecret) {
       const encrypted = await encryptConfigFields({ idpCert, spPrivateKey, oidcClientSecret });
-      if (encrypted.idpCertEncrypted) update.idpCertEncrypted = encrypted.idpCertEncrypted;
-      if (encrypted.spPrivateKeyEncrypted) update.spPrivateKeyEncrypted = encrypted.spPrivateKeyEncrypted;
-      if (encrypted.oidcClientSecretEncrypted) update.oidcClientSecretEncrypted = encrypted.oidcClientSecretEncrypted;
+      if (encrypted.idpCertSealed) update.idpCertSealed = encrypted.idpCertSealed;
+      if (encrypted.spPrivateKeySealed) update.spPrivateKeySealed = encrypted.spPrivateKeySealed;
+      if (encrypted.oidcClientSecretSealed) update.oidcClientSecretSealed = encrypted.oidcClientSecretSealed;
     }
 
     const updated = await SsoConfig.findOneAndUpdate(

@@ -53,10 +53,25 @@ function isValidAssetKey(key) {
 }
 const ASSET_UPLOAD_CONCURRENCY = 8;
 
+// A new-scheme key embeds its workspace. The seeding path uploads without that
+// context, and without it the object lands in the uploader's private prefix,
+// where no other member's resolver looks — the attachment then reads as
+// missing on every peer. Only a member may claim the key's workspace.
+async function workspaceFromKeys(userId, assets) {
+  for (const item of assets) {
+    const decoded = decodeAssetKey(item?.key);
+    if (!decoded?.hashed || !decoded.workspaceId) continue;
+    const member = await WorkspaceMember.findOne({ workspaceId: decoded.workspaceId, accountId: userId }).lean();
+    if (member) return decoded.workspaceId;
+  }
+  return null;
+}
+
 // Shared per-asset upload pipeline used by /batch and /seed-batch.
 // Runs the R2 puts with bounded concurrency and applies a single aggregated
 // storage-usage increment at the end.
 async function storeAssetBatch(req, assets) {
+  const workspaceId = req.workspaceId || (await workspaceFromKeys(req.userId, assets));
   const results = new Array(assets.length);
   let uploadedBytesAccount = 0;
   let uploadedBytesWorkspace = 0;
@@ -81,7 +96,7 @@ async function storeAssetBatch(req, assets) {
       return;
     }
 
-    const r2Key = assetStoreKey(req.userId, assetKey, req.workspaceId);
+    const r2Key = assetStoreKey(req.userId, assetKey, workspaceId);
     try {
       await r2.put(r2Key, body, 'application/octet-stream', { ifNoneMatch: true });
     } catch (err) {
@@ -93,7 +108,7 @@ async function storeAssetBatch(req, assets) {
       return;
     }
 
-    if (req.workspaceId) {
+    if (workspaceId) {
       uploadedBytesWorkspace += body.length;
     } else {
       uploadedBytesAccount += body.length;
@@ -121,7 +136,7 @@ async function storeAssetBatch(req, assets) {
   }
   if (uploadedBytesWorkspace > 0) {
     await Workspace.updateOne(
-      { _id: req.workspaceId },
+      { _id: workspaceId },
       { $inc: { storageUsedBytes: uploadedBytesWorkspace } }
     );
     // Record which ledger credited each asset, so a later delete debits the
@@ -133,7 +148,7 @@ async function storeAssetBatch(req, assets) {
       await query(
         `INSERT INTO asset_reservations (id, account_id, workspace_id, asset_key, size_bytes, status, expires_at, created_at)
          VALUES ($1,$2,$3,$4,$5,'confirmed',$6,$7)`,
-        [crypto.randomUUID(), req.userId, req.workspaceId, r.key, r.sizeBytes, now, now]
+        [crypto.randomUUID(), req.userId, workspaceId, r.key, r.sizeBytes, now, now]
       );
     }
   }
@@ -197,6 +212,22 @@ function decodeAssetKey(key) {
       return null;
     }
   };
+  // Pin the fixed-width hash from the right: a note id may end with '-' (and a
+  // hash may begin with one), so `split('--')` eats that dash, reads the key as
+  // legacy and strands the object in the uploader's private prefix — invisible
+  // to every other workspace member.
+  if (key.length > 45) {
+    const hash = key.slice(-43);
+    if (isFilenameHash(hash)) {
+      const head = key.slice(0, -45).split('--');
+      if (head.length === 3 && head[0] === 'assets') {
+        const workspaceId = decode(head[1]);
+        const noteId = decode(head[2]);
+        if (workspaceId === null || noteId === null) return null;
+        return { type: 'assets', workspaceId, noteId, filename: null, hashed: true };
+      }
+    }
+  }
   const parts = key.split('--');
   if (parts.length === 3) {
     // An opaque token that contains '--' also lands here, so reject it before
@@ -314,8 +345,17 @@ async function resolveAssetLocation(userId, assetKey) {
   }
   const sharedKey = r2.sharedAssetKey(decoded.workspaceId, assetKey);
   const existing = await r2.stat(sharedKey);
-  if (!existing) return null;
-  return { key: sharedKey, shared: true, sizeBytes: existing.sizeBytes };
+  if (existing) return { key: sharedKey, shared: true, sizeBytes: existing.sizeBytes };
+  // Seeded before the workspace context reached the upload path: the only copy
+  // sits in the workspace owner's private prefix, so members would read the
+  // attachment as missing until it is uploaded again.
+  const ws = await Workspace.findById(decoded.workspaceId, { ownerId: 1 }).lean();
+  if (ws?.ownerId) {
+    const ownerKey = r2.assetKey(ws.ownerId, assetKey);
+    const ownerCopy = await r2.stat(ownerKey);
+    if (ownerCopy) return { key: ownerKey, shared: false, sizeBytes: ownerCopy.sizeBytes };
+  }
+  return null;
 }
 
 module.exports = {

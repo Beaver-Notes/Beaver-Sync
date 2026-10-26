@@ -9,7 +9,7 @@ const { audit } = require('../lib/audit');
 const { historyCutoffTs } = require('../lib/plan-lifecycle');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
 const { listHistory, userIsMemberOfNoteWorkspace } = require('../repositories/commits');
-const { DEVICE_ID_PATTERN } = require('../lib/patterns');
+const { DEVICE_ID_PATTERN, isPlaceholderDeviceLabel } = require('../lib/patterns');
 
 const COMMIT_BODY_LIMIT_BYTES = parseInt(process.env.COMMIT_BODY_LIMIT_BYTES ?? '1048576', 10);
 const MAX_CURSOR_BYTES = parseInt(process.env.COMMIT_CURSOR_QUERY_MAX_BYTES ?? '4096', 10);
@@ -140,7 +140,10 @@ async function commitRoutes(app) {
         maxContentLength: COMMIT_BODY_LIMIT_BYTES,
       },
       rateLimit: {
-        max: parseInt(process.env.COMMIT_WRITE_RATE_LIMIT_PER_MINUTE ?? '60', 10),
+        // ponytail: 240, not 60 — one keystroke burst is a push-batch plus a
+        // commit, and the client coalesces only 1.5s, so fast typing in two
+        // windows hit 2.7x a 60/min bucket and lost edits to 429s.
+        max: parseInt(process.env.COMMIT_WRITE_RATE_LIMIT_PER_MINUTE ?? '240', 10),
         timeWindow: '1 minute',
       },
     },
@@ -250,9 +253,12 @@ async function commitRoutes(app) {
     }
 
     const deviceLabel = String(req.headers['x-device-label'] ?? 'Unknown Device').slice(0, 128);
+    // Legacy hardcoded labels must not clobber a real model stored earlier.
     await Device.findOneAndUpdate(
       { accountId: req.userId, deviceId },
-      { label: deviceLabel, lastSeen: new Date() },
+      isPlaceholderDeviceLabel(deviceLabel)
+        ? { lastSeen: new Date() }
+        : { label: deviceLabel, lastSeen: new Date() },
       { upsert: true, new: true }
     );
 

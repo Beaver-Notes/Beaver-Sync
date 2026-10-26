@@ -270,15 +270,15 @@ async function adminRoutes(app) {
 
     const result = await Promise.all(logs.map(async (log) => {
       let meta = null;
-      if (log.metadataEncrypted) {
+      if (log.metadataSealed) {
         try {
-          const raw = await mlkem.decryptMetadata(log.metadataEncrypted);
+          const raw = await mlkem.decryptMetadata(log.metadataSealed);
           meta = JSON.parse(raw);
         } catch (err) {
           console.warn('[admin] failed to decrypt audit metadata:', err?.message);
         }
       }
-      return { ...log, metadataEncrypted: undefined, metadata: meta };
+      return { ...log, metadataSealed: undefined, metadata: meta };
     }));
 
     return reply.send({ workspaceId, logs: result });

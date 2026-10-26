@@ -48,7 +48,7 @@ async function seedAuditLog(wsId) {
     accountIdHash: 'hash-of-someone',
     workspaceId: wsId,
     action: 'member_removed',
-    metadataEncrypted: await mlkem.encryptMetadata(JSON.stringify({ targetId: 'acct-victim' })),
+    metadataSealed: await mlkem.encryptMetadata(JSON.stringify({ targetId: 'acct-victim' })),
     ipSubnet: '203.0.113.0/24',
     createdAt: NOW(),
   });
@@ -106,7 +106,7 @@ test('the workspace owner reads the audit log and its decrypted metadata', async
   assert.equal(log.action, 'member_removed');
   assert.equal(log.ipSubnet, '203.0.113.0/24');
   assert.deepEqual(log.metadata, { targetId: 'acct-victim' });
-  assert.equal(log.metadataEncrypted, undefined);
+  assert.equal(log.metadataSealed, undefined);
 });
 
 test('the plan is resolved org-first: an org Enterprise plan satisfies the gate', async (t) => {

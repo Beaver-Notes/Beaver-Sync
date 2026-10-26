@@ -28,14 +28,14 @@ function sanitizeHeader(value) {
   return String(value ?? "").replace(/[\r\n]/g, "").trim();
 }
 
-async function createEmailAlias(accountId, emailEncrypted, ttlMs) {
+async function createEmailAlias(accountId, emailSealed, ttlMs) {
   const token = generateAliasToken();
   const alias = `${token}@${NOTIFY_DOMAIN}`;
 
   const data = {
     alias,
     accountId,
-    emailEncrypted,
+    emailSealed,
     createdAt: new Date(),
   };
 
@@ -58,7 +58,7 @@ async function resolveAlias(alias) {
     return null;
   }
 
-  const email = await mlkem.decryptMetadata(record.emailEncrypted);
+  const email = await mlkem.decryptMetadata(record.emailSealed);
   return { accountId: record.accountId, email };
 }
 
@@ -87,10 +87,10 @@ async function sendWithAlias(app, accountId, subject, html) {
   try {
     const { Account } = require("../models");
     const account = await Account.findById(accountId, {
-      emailEncrypted: 1,
+      emailSealed: 1,
     }).lean();
-    if (!account?.emailEncrypted) {
-      app.log.warn({ accountId }, "Cannot send email - no emailEncrypted");
+    if (!account?.emailSealed) {
+      app.log.warn({ accountId }, "Cannot send email - no emailSealed");
       return;
     }
 
@@ -105,7 +105,7 @@ async function sendWithAlias(app, accountId, subject, html) {
       alias = aliasRecord.alias;
     } else {
       if (aliasRecord) await EmailAlias.deleteOne({ alias: aliasRecord.alias });
-      alias = await createEmailAlias(accountId, account.emailEncrypted);
+      alias = await createEmailAlias(accountId, account.emailSealed);
     }
 
     app.log.info({ accountId, alias }, "Sending email via alias");

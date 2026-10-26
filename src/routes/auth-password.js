@@ -13,10 +13,16 @@ const { audit } = require('../lib/audit');
 const { isEnterpriseMode } = require('../lib/license');
 const { getQuotaBytes } = require('../lib/plans');
 
-const BCRYPT_ROUNDS = 12;
+// Cost 10 (OWASP's floor) instead of 12: at 12 a single login burned ~1.3 s of
+// CPU on the 1-vCPU prod box, so a handful of concurrent sign-ins stalled every
+// sync tick. Existing hashes keep their stored cost until the next login, where
+// they are upgraded (see the rehash below).
+const BCRYPT_ROUNDS = 10;
 const MAX_FAILED_ATTEMPTS = 10;
 const LOCKOUT_MINUTES = 15;
-const DUMMY_BCRYPT_HASH = '$2b$12$' + 'a'.repeat(53);
+// Must match BCRYPT_ROUNDS: a cost-12 dummy would make an unknown account 4x
+// slower than a wrong password and leak which emails exist.
+const DUMMY_BCRYPT_HASH = '$2b$10$' + 'a'.repeat(53);
 
 function sanitizeUsername(raw) {
   if (raw == null) return null;
@@ -209,6 +215,13 @@ async function registerLegacyPasswordRoutes(app, authRateLimit) {
         reason: 'invalid_password',
       });
       return reply.status(401).send(genericError);
+    }
+
+    // Upgrade a hash minted at the old, slower cost so the CPU saving reaches
+    // existing accounts instead of only new ones.
+    if (bcrypt.getRounds(account.passwordHash) < BCRYPT_ROUNDS) {
+      const upgraded = await bcrypt.hash(password, BCRYPT_ROUNDS).catch(() => null);
+      if (upgraded) await Account.updateOne({ _id: account.id }, { passwordHash: upgraded });
     }
 
     await Account.updateOne(

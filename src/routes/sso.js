@@ -97,16 +97,16 @@ async function getConfig(slug) {
 
 async function decryptConfig(raw) {
   const config = { ...raw };
-  if (config.idpCertEncrypted) {
-    const pem = await mlkem.decryptMetadata(config.idpCertEncrypted);
+  if (config.idpCertSealed) {
+    const pem = await mlkem.decryptMetadata(config.idpCertSealed);
     config.idpCert = pem;
   }
-  if (config.spPrivateKeyEncrypted) {
-    const key = await mlkem.decryptMetadata(config.spPrivateKeyEncrypted);
+  if (config.spPrivateKeySealed) {
+    const key = await mlkem.decryptMetadata(config.spPrivateKeySealed);
     config.spPrivateKey = key;
   }
-  if (config.oidcClientSecretEncrypted) {
-    config.oidcClientSecret = await mlkem.decryptMetadata(config.oidcClientSecretEncrypted);
+  if (config.oidcClientSecretSealed) {
+    config.oidcClientSecret = await mlkem.decryptMetadata(config.oidcClientSecretSealed);
   }
   return config;
 }
@@ -146,7 +146,7 @@ async function jitProvision(email, config, opts = {}) {
   if (!account) {
     account = await Account.create({
       emailHmac: emailHash,
-      emailEncrypted: await mlkem.encryptMetadata(normalized),
+      emailSealed: await mlkem.encryptMetadata(normalized),
       createdAt: new Date(),
     });
     const { Subscription } = require('../models');

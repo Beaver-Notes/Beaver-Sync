@@ -143,8 +143,8 @@ test('free-plan user cannot join a workspace via invite', async (t) => {
 test('paid user can join a workspace via invite', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
-  const owner = await register('pro');
-  await seedOrg('org-paid-join', owner.id, 'pro');
+  const owner = await register('team');
+  await seedOrg('org-paid-join', owner.id, 'team');
   const ws = await models.Workspace.create({ nameEncrypted: 'e', ownerId: owner.id, orgId: 'org-paid-join', createdAt: new Date() });
   await models.WorkspaceMember.create({ workspaceId: ws.id, accountId: owner.id, role: 'owner', createdAt: new Date() });
 

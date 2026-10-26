@@ -24,7 +24,7 @@
 process.env.DATABASE_URL =
   process.env.DATABASE_URL ||
   "postgresql://beaver:beaver@localhost:5432/beaver";
-// Host-run default; inside Docker the r2.js default (http://minio:9000) applies.
+// Host-run default; inside Docker the r2.js default (http://seaweedfs:9000) applies.
 process.env.STORAGE_ENDPOINT =
   process.env.STORAGE_ENDPOINT || "http://localhost:9000";
 

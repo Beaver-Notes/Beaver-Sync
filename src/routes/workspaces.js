@@ -324,6 +324,15 @@ async function workspaceRoutes(app) {
     const roleMap = {};
     for (const m of memberships) roleMap[m.workspaceId] = m.role;
 
+    // Members per workspace: the client needs to know a workspace is shared
+    // (>1 member) before it decides how to seal note payloads, so a shared
+    // device never mints a key its peers cannot obtain.
+    const memberRows = await WorkspaceMember.find({ workspaceId: { $in: workspaceIds } }).lean();
+    const memberCounts = new Map();
+    for (const m of memberRows) {
+      memberCounts.set(m.workspaceId, (memberCounts.get(m.workspaceId) || 0) + 1);
+    }
+
     try {
       await provisionSessionWorkspaceKeys(req.userId, req.sessionDeviceId, workspaceIds);
     } catch (err) {
@@ -358,6 +367,7 @@ async function workspaceRoutes(app) {
         color: ws.color,
         role: roleMap[ws.id],
         ownerId: ws.ownerId,
+        memberCount: memberCounts.get(ws.id) ?? 1,
         storageUsedBytes: ws.storageUsedBytes,
         vaultWrappedKeys: ws.vaultWrappedKeys ?? null,
         createdAt: ws.createdAt,

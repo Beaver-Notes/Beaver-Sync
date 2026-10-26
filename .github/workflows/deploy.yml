@@ -3,6 +3,8 @@ name: Deploy
 on:
   push:
     branches: [main]
+  # Manual trigger so a deploy can be retried without an empty commit.
+  workflow_dispatch:
 
 jobs:
   test:
@@ -24,19 +26,6 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      minio:
-        image: minio/minio:RELEASE.2025-02-28T09-55-16Z
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,10 +33,33 @@ jobs:
           node-version: '22'
           cache: yarn
       - run: yarn install --frozen-lockfile
-      - name: Create MinIO bucket
+
+      # Service containers cannot take a command, and seaweedfs needs its
+      # `server -dir=... -s3 ...` invocation, so it runs as a plain container.
+      # Credentials come from seaweedfs/s3.json: seaweedfs only reads AWS_*
+      # env vars from 3.96, and this job is pinned to 3.71.
+      - name: Start SeaweedFS and create the bucket
         run: |
-          for i in $(seq 1 15); do curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1 && break; sleep 1; done
-          STORAGE_ENDPOINT=http://localhost:9000 STORAGE_BUCKET_NAME=beaver-sync STORAGE_ACCESS_KEY_ID=minioadmin STORAGE_SECRET_ACCESS_KEY=minioadmin STORAGE_FORCE_PATH_STYLE=true node -e "const { ensureBucket } = require('./src/services/r2'); ensureBucket().then(()=>console.log('bucket ready')).catch(e=>{console.error(e.message);process.exit(1);});"
+          docker run -d --name seaweedfs-ci -p 9000:9000 \
+            -v "$GITHUB_WORKSPACE/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro" \
+            chrislusf/seaweedfs:3.71 \
+            server -dir=/data -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:9333/cluster/status >/dev/null 2>&1; then
+              echo "SeaweedFS ready on attempt $i"
+              break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "SeaweedFS never became ready"
+              docker logs seaweedfs-ci || true
+              exit 1
+            fi
+            sleep 1
+          done
+          STORAGE_ENDPOINT=http://localhost:9000 STORAGE_BUCKET_NAME=beaver-sync STORAGE_ACCESS_KEY_ID=beaver STORAGE_SECRET_ACCESS_KEY=beaver-dev-secret STORAGE_FORCE_PATH_STYLE=true node -e "
+            const { ensureBucket } = require('./src/services/r2');
+            ensureBucket().then(() => console.log('bucket ready')).catch(e => { console.error(e.message); process.exit(1); });
+          "
       - run: yarn lint
       - name: Test
         run: yarn test
@@ -55,30 +67,88 @@ jobs:
           TEST_DATABASE_URL: postgresql://beaver:beaver@localhost:5432/beaver_test
           STORAGE_ENDPOINT: http://localhost:9000
           STORAGE_BUCKET_NAME: beaver-sync
-          STORAGE_ACCESS_KEY_ID: minioadmin
-          STORAGE_SECRET_ACCESS_KEY: minioadmin
+          STORAGE_ACCESS_KEY_ID: beaver
+          STORAGE_SECRET_ACCESS_KEY: beaver-dev-secret
           STORAGE_FORCE_PATH_STYLE: "true"
       - name: Audit dependencies (fail on critical)
         run: yarn audit --audit-level=critical
 
-  deploy:
-    name: Deploy to VPS
+  build:
+    name: Build images
     needs: test
     runs-on: ubuntu-latest
-    # Set repo variable DEPLOY_TARGET=vps to enable. Requires secrets:
-    # VPS_HOST, VPS_USERNAME, VPS_SSH_KEY
-    if: ${{ vars.DEPLOY_TARGET == 'vps' }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
+      # GHCR rejects uppercase repository names; github.repository preserves them.
+      - name: Lowercase image namespace
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Building here keeps 1 vCPU / 2 GB droplets from compiling bcrypt and
+      # running out of memory mid-deploy.
+      - name: Build and push api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/api:${{ github.sha }}
+            ${{ env.REGISTRY }}/api:latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+      - name: Build and push ws-relay
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ws-relay
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/ws-relay:${{ github.sha }}
+            ${{ env.REGISTRY }}/ws-relay:latest
+          cache-from: type=gha,scope=ws
+          cache-to: type=gha,mode=max,scope=ws
+
+  deploy:
+    name: Deploy to DigitalOcean
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    # The target is a DigitalOcean droplet. Set repo variable DEPLOY_TARGET=digitalocean
+    # to enable. Requires secrets: DIGITALOCEAN_HOST, DIGITALOCEAN_SSH_USER, DIGITALOCEAN_SSH_KEY,
+    # and GHCR_TOKEN (a PAT with read:packages) unless the GHCR packages are public.
+    if: ${{ vars.DEPLOY_TARGET == 'digitalocean' }}
+    steps:
+      - name: Lowercase image namespace
+        run: echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_TAG: ${{ github.sha }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USERNAME }}
-          key: ${{ secrets.VPS_SSH_KEY }}
+          host: ${{ secrets.DIGITALOCEAN_HOST }}
+          username: ${{ secrets.DIGITALOCEAN_SSH_USER }}
+          key: ${{ secrets.DIGITALOCEAN_SSH_KEY }}
+          envs: REGISTRY,IMAGE_TAG,GHCR_USER,GHCR_TOKEN
           script: |
             set -e
+            if [ -n "$GHCR_TOKEN" ]; then
+              echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            fi
             cd /opt/beaver-sync
             git pull --ff-only
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+            export API_IMAGE="$REGISTRY/api:$IMAGE_TAG"
+            export WS_IMAGE="$REGISTRY/ws-relay:$IMAGE_TAG"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull api ws-relay
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build api ws-relay postgres pg-backup caddy
             docker image prune -f
+            echo "deployed $IMAGE_TAG"

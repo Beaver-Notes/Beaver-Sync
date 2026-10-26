@@ -67,7 +67,8 @@ function getStripePriceId(plan, interval) {
 
 // Apple/Google product ids are chosen per store listing, so there is nothing to
 // derive them from. They are configured the same way Stripe prices are, one
-// variable per sellable tier, and an unset variable resolves to nothing.
+// variable per sellable tier, and an unset variable resolves to nothing. A
+// slot may hold several comma-separated ids (one per billing interval).
 function getStoreProductId(provider, plan) {
   if (!provider || !SELF_SERVE_PLANS.has(plan)) return null;
   return process.env[`${String(provider).toUpperCase()}_PRODUCT_${String(plan).toUpperCase()}`] || null;
@@ -75,8 +76,12 @@ function getStoreProductId(provider, plan) {
 
 function planFromStoreProductId(provider, productId) {
   if (!productId) return null;
+  // Stores sell one product per tier per interval, so a slot may list several
+  // comma-separated ids that all resolve to the same tier.
   for (const plan of SELF_SERVE_PLANS) {
-    if (getStoreProductId(provider, plan) === productId) return plan;
+    if ((getStoreProductId(provider, plan) || '').split(',').map((s) => s.trim()).includes(productId)) {
+      return plan;
+    }
   }
   return null;
 }

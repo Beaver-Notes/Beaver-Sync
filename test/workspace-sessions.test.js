@@ -34,7 +34,7 @@ async function makeAccount(email, { username } = {}) {
   const kdfSalt = crypto.randomBytes(32).toString('hex');
   const data = {
     emailHmac: emailHash,
-    emailEncrypted: await mlkem.encryptMetadata(email),
+    emailSealed: await mlkem.encryptMetadata(email),
     passwordHash: null,
     kdfSalt,
   };

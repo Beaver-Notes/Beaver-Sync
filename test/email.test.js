@@ -31,16 +31,16 @@ async function registerAccount(emailAddr) {
     .createHmac('sha256', process.env.EMAIL_HMAC_KEY)
     .update(emailAddr.trim().toLowerCase())
     .digest('hex');
-  const emailEncrypted = await mlkem.encryptMetadata(emailAddr);
+  const emailSealed = await mlkem.encryptMetadata(emailAddr);
 
   const account = await models.Account.create({
     emailHmac: emailHash,
-    emailEncrypted,
+    emailSealed,
     passwordHash: '$2b$12$test',
     kdfSalt: crypto.randomBytes(32).toString('hex'),
   });
 
-  return { id: account.id, emailEncrypted };
+  return { id: account.id, emailSealed };
 }
 
 test.before(async () => {
@@ -56,8 +56,8 @@ test('createEmailAlias stores mapping and returns alias', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
 
-  const { id, emailEncrypted } = await registerAccount('alice@example.com');
-  const alias = await email.createEmailAlias(id, emailEncrypted);
+  const { id, emailSealed } = await registerAccount('alice@example.com');
+  const alias = await email.createEmailAlias(id, emailSealed);
 
   assert.ok(alias, 'should return an alias string');
   assert.ok(alias.endsWith('@notify.test.example.com'), 'should end with notify domain');
@@ -66,15 +66,15 @@ test('createEmailAlias stores mapping and returns alias', async (t) => {
   const stored = await models.EmailAlias.findOne({ alias }).lean();
   assert.ok(stored, 'should be stored in database');
   assert.equal(stored.accountId, id);
-  assert.equal(stored.emailEncrypted, emailEncrypted);
+  assert.equal(stored.emailSealed, emailSealed);
 });
 
 test('createEmailAlias with TTL sets expiresAt', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
 
-  const { id, emailEncrypted } = await registerAccount('bob@example.com');
-  const alias = await email.createEmailAlias(id, emailEncrypted, 3600_000);
+  const { id, emailSealed } = await registerAccount('bob@example.com');
+  const alias = await email.createEmailAlias(id, emailSealed, 3600_000);
 
   const stored = await models.EmailAlias.findOne({ alias }).lean();
   assert.ok(stored.expiresAt, 'should have expiresAt');
@@ -85,8 +85,8 @@ test('resolveAlias returns decrypted email for valid alias', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
 
-  const { id, emailEncrypted } = await registerAccount('carol@example.com');
-  const alias = await email.createEmailAlias(id, emailEncrypted);
+  const { id, emailSealed } = await registerAccount('carol@example.com');
+  const alias = await email.createEmailAlias(id, emailSealed);
 
   const resolved = await email.resolveAlias(alias);
   assert.ok(resolved, 'should resolve');
@@ -106,8 +106,8 @@ test('resolveAlias returns null and deletes expired alias', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
 
-  const { id, emailEncrypted } = await registerAccount('dave@example.com');
-  const alias = await email.createEmailAlias(id, emailEncrypted, -1);
+  const { id, emailSealed } = await registerAccount('dave@example.com');
+  const alias = await email.createEmailAlias(id, emailSealed, -1);
 
   const resolved = await email.resolveAlias(alias);
   assert.equal(resolved, null);
@@ -120,8 +120,8 @@ test('deleteAlias removes alias from database', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
 
-  const { id, emailEncrypted } = await registerAccount('eve@example.com');
-  const alias = await email.createEmailAlias(id, emailEncrypted);
+  const { id, emailSealed } = await registerAccount('eve@example.com');
+  const alias = await email.createEmailAlias(id, emailSealed);
 
   await email.deleteAlias(alias);
   const stored = await models.EmailAlias.findOne({ alias }).lean();
@@ -132,7 +132,7 @@ test('deleteAliasesForAccount removes all aliases for account', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
 
-  const { id, emailEncrypted: enc1 } = await registerAccount('frank@example.com');
+  const { id, emailSealed: enc1 } = await registerAccount('frank@example.com');
   const enc2 = await mlkem.encryptMetadata('frank2@example.com');
   await email.createEmailAlias(id, enc1);
   await email.createEmailAlias(id, enc2);
@@ -212,8 +212,8 @@ test('inbound webhook resolves valid alias', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
 
-  const { id, emailEncrypted } = await registerAccount('grace@example.com');
-  const alias = await email.createEmailAlias(id, emailEncrypted);
+  const { id, emailSealed } = await registerAccount('grace@example.com');
+  const alias = await email.createEmailAlias(id, emailSealed);
 
   const res = await app.inject({
     method: 'POST',
@@ -231,12 +231,63 @@ test('inbound webhook resolves valid alias', async (t) => {
   assert.ok(res.json().handled, 'should be handled');
 });
 
+test('inbound webhook requires a valid signature when INBOUND_WEBHOOK_SECRET is set', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  process.env.INBOUND_WEBHOOK_SECRET = 'inbound-test-secret';
+  t.after(() => { delete process.env.INBOUND_WEBHOOK_SECRET; });
+
+  const { id, emailSealed } = await registerAccount('iris@example.com');
+  const alias = await email.createEmailAlias(id, emailSealed);
+  // Signed over the exact bytes sent: the route verifies req.rawBody, not a
+  // re-serialization of the parsed payload.
+  const body = JSON.stringify({
+    to: alias,
+    from: 'sender@other.com',
+    subject: 'Re: Notification',
+    text: 'Thanks!',
+  });
+
+  const unsigned = await app.inject({
+    method: 'POST',
+    url: '/email/inbound',
+    headers: { 'content-type': 'application/json' },
+    payload: body,
+  });
+  assert.equal(unsigned.statusCode, 401);
+  assert.equal(unsigned.json().error, 'missing_signature');
+
+  const forged = await app.inject({
+    method: 'POST',
+    url: '/email/inbound',
+    headers: {
+      'content-type': 'application/json',
+      'x-webhook-signature': crypto.createHmac('sha256', 'wrong-secret').update(body).digest('hex'),
+    },
+    payload: body,
+  });
+  assert.equal(forged.statusCode, 401);
+  assert.equal(forged.json().error, 'invalid_signature');
+
+  const signed = await app.inject({
+    method: 'POST',
+    url: '/email/inbound',
+    headers: {
+      'content-type': 'application/json',
+      'x-webhook-signature': crypto.createHmac('sha256', process.env.INBOUND_WEBHOOK_SECRET).update(body).digest('hex'),
+    },
+    payload: body,
+  });
+  assert.equal(signed.statusCode, 200);
+  assert.equal(signed.json().handled, true);
+});
+
 test('alias cascade deletes with account', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
 
-  const { id, emailEncrypted } = await registerAccount('hank@example.com');
-  const alias = await email.createEmailAlias(id, emailEncrypted);
+  const { id, emailSealed } = await registerAccount('hank@example.com');
+  const alias = await email.createEmailAlias(id, emailSealed);
 
   await models.Account.deleteOne({ _id: id });
 

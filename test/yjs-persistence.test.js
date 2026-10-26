@@ -135,3 +135,55 @@ test('route accounting uses accepted persistence results', () => {
 
   assert.deepEqual(stats, { stored: 1, sizeBytes: 3 });
 });
+
+// The batch loader replaced one query per note with a single statement, so its
+// pages must stay byte-identical to the per-note loader a client already reads
+// (checkpoint shape, ordering, hasMore, empty-page rule).
+test('loadUpdatesBatch matches loadUpdatesAfter page for page', async () => {
+  await seedUpdates('ws-1', 'note-batch', 5);
+
+  for (const limit of [1, 2, 5, 10]) {
+    let batchCheckpoint = null;
+    let singleCheckpoint = null;
+    for (let page = 0; page < 6; page += 1) {
+      const batch = await persistence.loadUpdatesBatch('ws-1', [
+        { noteId: 'note-batch', checkpoint: batchCheckpoint, limit },
+      ]);
+      const single = await persistence.loadUpdatesAfter('ws-1', 'note-batch', singleCheckpoint, limit, 0);
+      assert.deepEqual(batch['note-batch'].updates, single.updates);
+      assert.deepEqual(batch['note-batch'].nextCheckpoint, single.nextCheckpoint);
+      assert.equal(batch['note-batch'].hasMore, single.hasMore);
+      if (!single.hasMore) break;
+      batchCheckpoint = batch['note-batch'].nextCheckpoint;
+      singleCheckpoint = single.nextCheckpoint;
+    }
+  }
+});
+
+test('loadUpdatesBatch returns an empty page for a note with no updates', async () => {
+  const pages = await persistence.loadUpdatesBatch('ws-1', [
+    { noteId: 'note-empty', checkpoint: null, limit: 10 },
+  ]);
+
+  assert.deepEqual(pages['note-empty'], {
+    updates: [],
+    nextCheckpoint: {},
+    hasMore: false,
+    stale: false,
+  });
+});
+
+test('loadUpdatesBatch reports a stale cursor without querying', async () => {
+  const pages = await persistence.loadUpdatesBatch('ws-1', [
+    { noteId: 'note-batch', checkpoint: { 'device-a': { ts: Date.now() - 25 * 60 * 60 * 1000, sequence: 99 } }, limit: 10 },
+  ]);
+
+  assert.deepEqual(pages['note-batch'], { updates: [], nextCheckpoint: {}, hasMore: false, stale: true });
+});
+
+test('loadUpdatesBatch rejects an out-of-range page size', async () => {
+  await assert.rejects(
+    () => persistence.loadUpdatesBatch('ws-1', [{ noteId: 'note-batch', checkpoint: null, limit: 501 }]),
+    RangeError,
+  );
+});

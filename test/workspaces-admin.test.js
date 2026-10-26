@@ -157,7 +157,7 @@ test('member-lookup finds a user by username', async (t) => {
   const target = await models.Account.create({
     emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY)
       .update(`lookup-${crypto.randomBytes(6).toString('hex')}@test.example`).digest('hex'),
-    emailEncrypted: 'e',
+    emailSealed: 'e',
     username: 'lookupuser',
     kemPublicKey: 'kpub',
     passwordHash: '$2b$12$test',
@@ -188,7 +188,7 @@ test('member-lookup finds a user by email', async (t) => {
   const email = `lookup-${crypto.randomBytes(6).toString('hex')}@test.example`;
   const target = await models.Account.create({
     emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY).update(email).digest('hex'),
-    emailEncrypted: 'e',
+    emailSealed: 'e',
     passwordHash: '$2b$12$test',
     kdfSalt: crypto.randomBytes(32).toString('hex'),
   });

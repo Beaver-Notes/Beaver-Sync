@@ -125,6 +125,13 @@ async function snapshotRoutes(app) {
         if (!membership) {
           return reply.status(403).send({ error: 'forbidden', message: 'Not a member of this workspace.' });
         }
+        // A viewer reads the workspace but must not add snapshots to it (F28).
+        if (!['owner', 'editor'].includes(membership.role)) {
+          return reply.status(403).send({
+            error: 'forbidden',
+            message: 'Write access requires owner or editor role in this workspace.',
+          });
+        }
         if (effectivePlan === 'team') {
           const quotaBytes = getQuotaBytes('team', seats);
           const projectedUsage = ws.storageUsedBytes - (existingSnapshot?.sizeBytes ?? 0) + body.length;

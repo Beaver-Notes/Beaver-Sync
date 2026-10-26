@@ -22,6 +22,7 @@ const CLAIM_TTL_MS = 30 * 60 * 1000;
 const VERIFY_CONCURRENCY = 8;
 
 const { mapWithConcurrency } = require('../lib/concurrency');
+const { assetStoreKey } = require('./assets-shared');
 
 const WorkspaceSchema = z.object({ workspaceId: z.string().min(1) });
 // Destructive reset must be explicit: a boolean confirmation plus the caller
@@ -171,14 +172,19 @@ async function syncStateRoutes(app) {
 
   app.post('/initialize/complete', protect, async (req, reply) => {
     const parsed = CompleteSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
+    if (!parsed.success) {
+      req.log.warn({ issue: parsed.error.errors[0], body: JSON.stringify(req.body).slice(0, 600) }, 'initialize/complete validation failed');
+      return reply.status(400).send({ error: 'validation_error', message: parsed.error.errors[0].message });
+    }
     const { workspaceId, token, generation, documents, assets } = parsed.data;
     const membership = await requireWorkspaceOwner(req, reply, workspaceId);
     if (reply.sent || !membership) return;
     if (documents.some((document) => document.snapshotGeneration !== generation)) {
+      req.log.warn({ generation, docs: documents.map((d) => d.snapshotGeneration) }, 'initialize/complete generation mismatch (doc)');
       return reply.status(400).send({ error: 'snapshot_generation_mismatch' });
     }
     if (documents.length > 0 && generation === 0) {
+      req.log.warn({ generation, documents: documents.length }, 'initialize/complete generation mismatch (zero)');
       return reply.status(400).send({ error: 'snapshot_generation_mismatch' });
     }
 
@@ -194,14 +200,28 @@ async function syncStateRoutes(app) {
         return verifyObject(storage, document.snapshotKey, 'snapshot_missing');
       });
       for (const error of snapshotErrors) {
-        if (error) return reply.status(400).send({ error });
+        if (error) {
+          req.log.warn({ error, workspaceId, documents: documents.length }, 'initialize/complete snapshot verify failed');
+          return reply.status(400).send({ error });
+        }
       }
     const assetErrors = await mapWithConcurrency(assets, VERIFY_CONCURRENCY, async (asset) => {
-      const assetKey = storage?.assetKey ? storage.assetKey(req.userId, asset) : asset;
-      return verifyObject(storage, assetKey, 'asset_missing');
+      // A workspace-hashed key lives under `ws-assets/<ws>/` (that is where the
+      // store puts it); legacy and filename keys stay under the account prefix.
+      // Check both so an object stored by either path still completes.
+      const candidates = [assetStoreKey(req.userId, asset, workspaceId)];
+      const accountKey = storage?.assetKey ? storage.assetKey(req.userId, asset) : asset;
+      if (!candidates.includes(accountKey)) candidates.push(accountKey);
+      for (const candidate of candidates) {
+        if (!(await verifyObject(storage, candidate, 'asset_missing'))) return null;
+      }
+      return 'asset_missing';
     });
     for (const error of assetErrors) {
-      if (error) return reply.status(400).send({ error });
+      if (error) {
+        req.log.warn({ error, workspaceId, assets: assets.length }, 'initialize/complete asset verify failed');
+        return reply.status(400).send({ error });
+      }
     }
 
     const now = new Date().toISOString();

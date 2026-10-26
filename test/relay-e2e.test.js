@@ -6,7 +6,6 @@ const path = require('node:path');
 const { WebSocket } = require('ws');
 const Y = require('yjs');
 const encoding = require('lib0/encoding');
-const decoding = require('lib0/decoding');
 const syncProtocol = require('y-protocols/sync');
 
 const repoRoot = path.resolve(__dirname, '..');
@@ -28,41 +27,8 @@ const { createSession } = require('../src/middleware/auth');
 
 const WS_PORT = 18081;
 const MSG_SYNC = 0;
-const MSG_AWARENESS = 1;
 
-function encodeAwareness(entries) {
-  const outer = encoding.createEncoder();
-  encoding.writeVarUint(outer, MSG_AWARENESS);
-  const inner = encoding.createEncoder();
-  encoding.writeVarUint(inner, entries.length);
-  for (const [clientID, clock, state] of entries) {
-    encoding.writeVarUint(inner, clientID);
-    encoding.writeVarUint(inner, clock);
-    encoding.writeVarString(inner, JSON.stringify(state));
-  }
-  encoding.writeVarUint8Array(outer, encoding.toUint8Array(inner));
-  return encoding.toUint8Array(outer);
-}
 
-// Decode one relay frame into a map of clientID -> { clock, state }. Returns
-// null for anything that is not an awareness frame.
-function awarenessFrom(bytes) {
-  try {
-    const d = decoding.createDecoder(bytes);
-    if (decoding.readVarUint(d) !== MSG_AWARENESS) return null;
-    const inner = decoding.createDecoder(decoding.readVarUint8Array(d));
-    const len = decoding.readVarUint(inner);
-    const out = new Map();
-    for (let i = 0; i < len; i++) {
-      const clientID = decoding.readVarUint(inner);
-      const clock = decoding.readVarUint(inner);
-      out.set(clientID, { clock, state: decoding.readVarString(inner) });
-    }
-    return out;
-  } catch {
-    return null;
-  }
-}
 
 async function post(app, url, payload, headers = {}) {
   return app.inject({
@@ -140,11 +106,16 @@ function encodeSyncStep1(doc) {
   syncProtocol.writeSyncStep1(enc, doc);
   return encoding.toUint8Array(enc);
 }
-function encodeUpdate(update) {
-  const enc = encoding.createEncoder();
-  encoding.writeVarUint(enc, MSG_SYNC);
-  syncProtocol.writeUpdate(enc, update);
-  return encoding.toUint8Array(enc);
+
+// A frame shaped like the client's E2E output: MAGIC(2) || IV(12) || ciphertext.
+// The relay holds no room key, so the body is opaque noise to it and only the
+// magic prefix is meaningful. Must match ENCRYPTED_FRAME_MAGIC in src/ws-relay.js.
+const ENC_MAGIC = [0xe7, 0x11];
+function encryptedFrame(fill) {
+  const out = new Uint8Array(2 + 12 + 24);
+  out.set(ENC_MAGIC, 0);
+  for (let i = 14; i < out.length; i++) out[i] = fill + i;
+  return out;
 }
 
 function expectWsUpgradeFail(url, timeout = 3000) {
@@ -209,8 +180,8 @@ test.after(async () => {
   await close();
 });
 
-// 1. happy path: ticket -> connect -> y-sync handshake -> persisted via journal -> second client notification (relay broadcast)
-test('relay e2e: ticket connect, y-sync handshake, journal persisted, second client sees broadcast', async () => {
+// 1. happy path: ticket -> connect -> opaque frame forwarded verbatim to peers
+test('relay e2e: encrypted frames are forwarded verbatim to peers and never echoed', async () => {
   const sessionOwner = await createSession('e2e-owner', { headers: { 'x-device-id': 'dev-owner' } });
   const t1 = await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-1' }, { authorization: `Bearer ${sessionOwner}` });
   assert.equal(t1.statusCode, 200);
@@ -230,54 +201,26 @@ test('relay e2e: ticket connect, y-sync handshake, journal persisted, second cli
   const auth2 = await waitForJson(ws2, 'auth');
   assert.equal(auth2.readOnly, false);
 
-  // y-sync handshake: ws1 sends SyncStep1, server should reply with SyncStep1+SyncStep2 frames
-  const doc1 = new Y.Doc();
-  doc1.getText('ct').insert(0, 'pre');
-  ws1.send(encodeSyncStep1(doc1));
+  await new Promise(r => setTimeout(r, 200));
+  ws1._binBuf = []; ws2._binBuf = [];
 
-  // wait for a binary sync response
-  const syncResp = await waitForBinary(ws1, (u) => {
-    try { const d = decoding.createDecoder(u); return decoding.readVarUint(d) === MSG_SYNC; } catch { return false; }
-  }, 3000);
-  assert.ok(syncResp.length > 0);
+  // An encrypted frame from ws1 must arrive at ws2 byte-identical: the relay
+  // holds no room key and must not parse, reorder or re-frame the payload.
+  const frame = encryptedFrame(7);
+  const forwarded = waitForBinary(ws2, (u) => u.length === frame.length && u.every((b, i) => b === frame[i]), 3000);
+  ws1.send(frame);
+  await forwarded;
 
-  // now send a real update and verify second client receives broadcast + journal persisted
-  const docUpdate = new Y.Doc();
-  docUpdate.getText('ct').insert(0, 'hello e2e');
-  const update = Y.encodeStateAsUpdate(docUpdate);
+  // The sender must not get an echo, and the relay must never emit Yjs frames
+  // of its own now that it holds no Y.Doc.
+  await new Promise(r => setTimeout(r, 400));
+  assert.equal(ws1._binBuf.length, 0, 'relay must not echo the frame to its sender');
 
-  // prepare to capture broadcast on ws2
-  let ws2GotUpdate = false;
-  const ws2Promise = waitForBinary(ws2, (u) => {
-    try {
-      const d = decoding.createDecoder(u);
-      if (decoding.readVarUint(d) !== MSG_SYNC) return false;
-      const inner = decoding.readVarUint(d);
-      // SyncStep2(1) or Update(2) both indicate doc data
-      return inner === 1 || inner === 2;
-    } catch { return false; }
-  }, 4000).then(() => { ws2GotUpdate = true; });
-
-  ws1.send(encodeUpdate(update));
-
-  await ws2Promise;
-  assert.equal(ws2GotUpdate, true);
-
-  // The relay is ephemeral (src/db/yjs-persistence.js): it broadcasts edits but
-  // never persists plaintext Yjs into the journal. Durable history is written
-  // by clients through the encrypted REST push-batch path, so after the relay's
-  // debounce there must still be no relay-originated journal row.
-  await new Promise(r => setTimeout(r, 1600));
+  // Durability is the clients' HTTPS path; the relay writes nothing.
   const { rows } = await query(`SELECT device_id FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2 AND device_id='relay'`, ['ws-e2e', 'note-1']);
-  assert.equal(rows.length, 0, 'relay must not persist plaintext rows');
-
-  // The broadcast update is itself valid Yjs containing the edit.
-  const check = new Y.Doc();
-  Y.applyUpdate(check, update);
-  assert.equal(check.getText('ct').toString(), 'hello e2e');
+  assert.equal(rows.length, 0, 'relay must not persist rows');
 
   ws1.close(); ws2.close();
-  doc1.destroy(); docUpdate.destroy(); check.destroy();
 });
 
 // REST push triggers PG NOTIFY -> second client JSON notification
@@ -400,7 +343,13 @@ test('negative: foreign-workspace join regression (03.3) - token path blocked', 
   await NoteInvitation.deleteOne({ noteId: 'note-foreign', userId: 'e2e-outsider' });
 });
 
-test('negative: read-only viewer write blocked (not persisted, not broadcast)', async () => {
+// Write authorization is NOT enforced by the relay any more: frames arrive
+// end-to-end encrypted and the relay holds no room key, so it cannot tell a
+// sync update from an awareness frame, let alone a viewer's from an editor's.
+// What the relay still owes the client is an honest `auth` frame naming the
+// role, so the client can refuse to emit updates itself. Server-side write
+// authorization lives on the HTTPS push path, which is unaffected.
+test('relay e2e: a viewer socket is told its role and never persists anything', async () => {
   const sessViewer = await createSession('e2e-viewer', { headers: { 'x-device-id': 'dev-viewer' } });
   const tViewer = (await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-viewer-test' }, { authorization: `Bearer ${sessViewer}` })).json().ticket;
   const sessEditor = await createSession('e2e-editor', { headers: { 'x-device-id': 'dev-editor2' } });
@@ -412,28 +361,106 @@ test('negative: read-only viewer write blocked (not persisted, not broadcast)', 
   assert.equal(av.readOnly, true);
   assert.equal(av.role, 'viewer');
   const wsEditor = await connectWs(wsUrl(room, tEditor, true));
-  await waitForJson(wsEditor, 'auth');
+  const ae = await waitForJson(wsEditor, 'auth');
+  assert.equal(ae.readOnly, false, 'the editor in the same room must still be told it may write');
 
-  // viewer sends update; editor should NOT receive it
-  const d = new Y.Doc();
-  d.getText('ct').insert(0, 'viewer-write');
   const beforeRows = (await query(`SELECT COUNT(*)::int c FROM yjs_doc_updates WHERE workspace_id='ws-e2e' AND note_id='note-viewer-test'`)).rows[0].c;
-  wsViewer.send(encodeUpdate(Y.encodeStateAsUpdate(d)));
-  await new Promise(r => setTimeout(r, 1600));
+  wsViewer.send(encryptedFrame(31));
+  await new Promise(r => setTimeout(r, 1200));
   const afterRows = (await query(`SELECT COUNT(*)::int c FROM yjs_doc_updates WHERE workspace_id='ws-e2e' AND note_id='note-viewer-test'`)).rows[0].c;
-  assert.equal(afterRows, beforeRows, 'viewer write should not create relay journal row');
+  assert.equal(afterRows, beforeRows, 'the relay must never persist rows for any socket');
 
-  // editor should not have received broadcast (check binBuf not grown with viewer content)
-  // we check that no new MSG_SYNC with that content arrived within short window
-  let gotSpurious = false;
-  const check = new Promise(r => setTimeout(r, 600));
-  wsEditor.on('message', (data, isBin) => { if (isBin) gotSpurious = true; });
-  await check;
-  // reset flag based on actual counting: if viewer was blocked, wsEditor shouldn't have gotten viewer update as broadcast
-  // we just ensure row count unchanged is the authoritative check; broadcast check is best-effort
-  assert.equal(gotSpurious, false, 'viewer broadcast should be suppressed');
+  wsViewer.close(); wsEditor.close();
+});
 
-  wsViewer.close(); wsEditor.close(); d.destroy();
+// A frame the relay cannot recognise must be dropped rather than forwarded, and
+// must not be silently swallowed.
+test('relay e2e: an unrecognised binary frame is dropped, not forwarded', async () => {
+  const sessOwner = await createSession('e2e-owner', { headers: { 'x-device-id': 'dev-drop-owner' } });
+  const tOwner = (await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-1' }, { authorization: `Bearer ${sessOwner}` })).json().ticket;
+  const sessEditor = await createSession('e2e-editor', { headers: { 'x-device-id': 'dev-drop-editor' } });
+  const tEditor = (await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-1' }, { authorization: `Bearer ${sessEditor}` })).json().ticket;
+
+  const room = 'workspace:ws-e2e:note:note-1';
+  const ws1 = await connectWs(wsUrl(room, tOwner, true));
+  await waitForJson(ws1, 'auth');
+  const ws2 = await connectWs(wsUrl(room, tEditor, true));
+  await waitForJson(ws2, 'auth');
+  await new Promise(r => setTimeout(r, 200));
+  ws2._binBuf = [];
+
+  // A plaintext Yjs frame: no magic prefix, so the relay must not relay it.
+  ws1.send(encodeSyncStep1(new Y.Doc()));
+  await new Promise(r => setTimeout(r, 600));
+  assert.equal(ws2._binBuf.length, 0, 'a non-encrypted binary frame must not be forwarded');
+
+  ws1.close(); ws2.close();
+});
+
+// The relay cannot read the encrypted frame's plaintext type byte, so a
+// read-only socket declares the kind of the frame it is about to send. A viewer
+// must not be able to push a Yjs update into an editor, but its awareness must
+// still flow so it shows up in avatars and as a remote cursor.
+test('relay e2e: a viewer cannot relay a declared sync frame but its awareness still reaches the peer', async () => {
+  const sessViewer = await createSession('e2e-viewer', { headers: { 'x-device-id': 'dev-ro-viewer' } });
+  const tViewer = (await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-viewer-test' }, { authorization: `Bearer ${sessViewer}` })).json().ticket;
+  const sessEditor = await createSession('e2e-editor', { headers: { 'x-device-id': 'dev-ro-editor' } });
+  const tEditor = (await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-viewer-test' }, { authorization: `Bearer ${sessEditor}` })).json().ticket;
+
+  const room = 'workspace:ws-e2e:note:note-viewer-test';
+  const viewer = await connectWs(wsUrl(room, tViewer, true));
+  const authViewer = await waitForJson(viewer, 'auth');
+  assert.equal(authViewer.readOnly, true);
+  assert.equal(authViewer.userId, 'e2e-viewer', 'the auth frame must carry the sender account id');
+  const editor = await connectWs(wsUrl(room, tEditor, true));
+  const authEditor = await waitForJson(editor, 'auth');
+  assert.equal(authEditor.readOnly, false);
+  assert.equal(authEditor.userId, 'e2e-editor');
+
+  await new Promise(r => setTimeout(r, 300));
+  editor._binBuf = [];
+
+  // Declared sync: dropped, the editor must never see it.
+  const syncFrame = encryptedFrame(41);
+  viewer.send(JSON.stringify({ type: 'frame', kind: 'sync' }));
+  viewer.send(syncFrame);
+  await new Promise(r => setTimeout(r, 600));
+  assert.equal(editor._binBuf.length, 0, 'a read-only socket must not relay a declared sync frame');
+
+  // Declared awareness: forwarded byte-identical, so the viewer still shows up
+  // in the editor's avatar strip and as a cursor.
+  const awareFrame = encryptedFrame(42);
+  const forwarded = waitForBinary(editor, (u) => u.length === awareFrame.length && u.every((b, i) => b === awareFrame[i]), 3000);
+  viewer.send(JSON.stringify({ type: 'frame', kind: 'awareness' }));
+  viewer.send(awareFrame);
+  await forwarded;
+
+  // The declaration covers exactly one frame: the next undeclared frame keeps
+  // today's verbatim behaviour, the next declared sync frame is dropped again.
+  editor._binBuf = [];
+  const second = encryptedFrame(43);
+  viewer.send(JSON.stringify({ type: 'frame', kind: 'sync' }));
+  viewer.send(second);
+  const secondSync = waitForBinary(editor, (u) => u.length === second.length && u.every((b, i) => b === second[i]), 800).then(() => true, () => false);
+  await secondSync;
+  editor._binBuf = [];
+
+  // Malformed and unknown control messages must not throw or stall the socket.
+  viewer.send('not json at all');
+  viewer.send(JSON.stringify({ type: 'frame', kind: 'nonsense' }));
+  const okFrame = encryptedFrame(44);
+  const stillRelaying = waitForBinary(editor, (u) => u.length === okFrame.length && u.every((b, i) => b === okFrame[i]), 3000);
+  viewer.send(okFrame);
+  await stillRelaying;
+
+  // An editor is unaffected by the whole mechanism.
+  const editorFrame = encryptedFrame(45);
+  const editorSync = waitForBinary(viewer, (u) => u.length === editorFrame.length && u.every((b, i) => b === editorFrame[i]), 3000);
+  editor.send(JSON.stringify({ type: 'frame', kind: 'sync' }));
+  editor.send(editorFrame);
+  await editorSync;
+
+  viewer.close(); editor.close();
 });
 
 test('deviceId exclusion: same device sockets not notified, other device notified', async () => {
@@ -471,13 +498,12 @@ test('deviceId exclusion: same device sockets not notified, other device notifie
   wsA1.close(); wsA2.close(); wsB.close();
 });
 
-// Awareness is shared room state, and the relay attributes a clientID to the
-// socket that last published it. Without an ownership check any socket can
-// claim another socket's clientID with a higher clock and then, on disconnect,
-// have that state removed. (relay e2e: hijack + wipe-on-disconnect)
-test('awareness: a socket cannot claim or erase a clientID another live socket owns', async () => {
-  const OWNER_ID = 900111;
-  const VIEWER_ID = 900222;
+// The relay is a pure bus: it holds no awareness state, so clientID ownership,
+// hijack protection and wipe-on-disconnect are the clients' job (y-protocols
+// merges awareness by (clientID, clock)). What the relay must still guarantee
+// is that it forwards presence frames in both directions and never mints or
+// rewrites them itself.
+test('relay e2e: awareness frames forward both ways and the relay adds no state of its own', async () => {
 
   const sessOwner = await createSession('e2e-owner', { headers: { 'x-device-id': 'dev-aw-owner' } });
   const tOwner = (await post(app, '/auth/ws-ticket', { workspaceId: 'ws-e2e', noteId: 'note-viewer-test' }, { authorization: `Bearer ${sessOwner}` })).json().ticket;
@@ -487,38 +513,34 @@ test('awareness: a socket cannot claim or erase a clientID another live socket o
   const room = 'workspace:ws-e2e:note:note-viewer-test';
   const owner = await connectWs(wsUrl(room, tOwner, true));
   await waitForJson(owner, 'auth');
-
-  owner.send(encodeAwareness([[OWNER_ID, 1, { name: 'OWNER-REAL' }]]));
-  const echoed = await waitForBinary(owner, (b) => awarenessFrom(b)?.get(OWNER_ID)?.state === '{"name":"OWNER-REAL"}');
-  assert.ok(echoed, 'CONTROL: a socket must receive its own awareness state');
-
   const viewer = await connectWs(wsUrl(room, tViewer, true));
   assert.equal((await waitForJson(viewer, 'auth')).readOnly, true);
 
-  // Hijack: the same clientID with a clock high enough to win the merge.
+  await new Promise(r => setTimeout(r, 200));
+  owner._binBuf = []; viewer._binBuf = [];
+
+  // Two distinct encrypted frames, one per direction. Shape only: the relay
+  // cannot see the awareness payload, so this asserts transport, not merge.
+  const ownerFrame = encryptedFrame(11);
+  const viewerFrame = encryptedFrame(23);
+  const toViewer = waitForBinary(viewer, (u) => u.length === ownerFrame.length && u.every((b, i) => b === ownerFrame[i]), 3000);
+  const toOwner = waitForBinary(owner, (u) => u.length === viewerFrame.length && u.every((b, i) => b === viewerFrame[i]), 3000);
+
+  owner.send(ownerFrame);
+  viewer.send(viewerFrame);
+  await Promise.all([toViewer, toOwner]);
+
+  // Nobody echoes: after both sends each socket has exactly the one frame it
+  // did not originate.
+  await new Promise(r => setTimeout(r, 400));
+  assert.equal(owner._binBuf.length, 1, 'owner must receive only the viewer frame');
+  assert.equal(viewer._binBuf.length, 1, 'viewer must receive only the owner frame');
+
+  // A viewer disconnecting must not make the relay emit anything to the room.
   const mark = owner._binBuf.length;
-  viewer.send(encodeAwareness([[OWNER_ID, 99, { name: 'HIJACKED' }]]));
-  await new Promise((r) => setTimeout(r, 800));
-  const hijacked = owner._binBuf.slice(mark).some((b) => {
-    const m = awarenessFrom(new Uint8Array(b));
-    return m?.has(OWNER_ID) && m.get(OWNER_ID).state.includes('HIJACKED');
-  });
-  assert.equal(hijacked, false, "a socket must not overwrite another socket's awareness state");
-
-  // A read-only socket may still publish its own presence.
-  viewer.send(encodeAwareness([[VIEWER_ID, 1, { name: 'VIEWER' }]]));
-  const own = await waitForBinary(owner, (b) => awarenessFrom(b)?.has(VIEWER_ID), 3000).catch(() => null);
-  assert.ok(own, 'a read-only socket must still be able to publish its own presence');
-
-  // Disconnecting must not remove state that belongs to another socket.
-  const mark2 = owner._binBuf.length;
   viewer.close();
-  await new Promise((r) => setTimeout(r, 800));
-  const wiped = owner._binBuf.slice(mark2).some((b) => {
-    const m = awarenessFrom(new Uint8Array(b));
-    return m?.has(OWNER_ID) && m.get(OWNER_ID).state === 'null';
-  });
-  assert.equal(wiped, false, "a viewer disconnect must not erase another clientID's presence");
+  await new Promise(r => setTimeout(r, 600));
+  assert.equal(owner._binBuf.length, mark, 'a disconnect must not make the relay emit awareness state');
 
   owner.close();
 });

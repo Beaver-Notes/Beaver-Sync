@@ -1,7 +1,7 @@
 'use strict';
 
 const { transaction, query } = require('../db');
-const { getQuotaBytes } = require('../lib/plans');
+const { getQuotaBytes, resolvePlanForAccount } = require('../lib/plans');
 const { reconcileNoteOwnership } = require('../repositories/noteClaims');
 const { identityOf, generateUpdateId, checkpointForRows } = require('./yjs-rooms');
 
@@ -16,6 +16,38 @@ const BATCH_INSERT_CHUNK = 500;
 const UPDATE_INSERT_COLUMNS =
   '(id, workspace_id, note_id, update_data, update_encrypted, device_id, clock, ts, created_at)';
 const UPDATE_COLUMN_COUNT = 9;
+
+// Storage belongs to the workspace, so the quota is charged to the plan of the
+// account that OWNS the workspace, not the plan of whoever pushed the update.
+// Without this a free collaborator invited onto a note in a paid workspace
+// resolves to plan 'free' (quota 0) and its pushes are rejected with 507.
+// Runs on the transaction's executor so the read is part of the same atomic
+// ledger transaction; a workspace row we cannot resolve falls back to the
+// caller's plan, which degrades to quota 0 rather than unlimited.
+async function workspaceOwnerPlan(executor, workspaceId) {
+  const { rows } = await executor.query(`
+    SELECT w.owner_id,
+           os.plan AS org_plan,
+           os.seats,
+           s.plan AS owner_plan
+      FROM workspaces w
+      LEFT JOIN org_subscriptions os ON os.org_id = w.org_id
+      LEFT JOIN subscriptions s ON s.account_id = w.owner_id
+     WHERE w.id = $1
+  `, [workspaceId]);
+  if (!rows.length) return null;
+  const row = rows[0];
+  return {
+    accountId: row.owner_id,
+    // Same org-first resolution the rest of the codebase uses (and it honors
+    // the PLAN_OVERRIDE dev/test escape hatch).
+    plan: resolvePlanForAccount({
+      orgSub: row.org_plan ? { plan: row.org_plan } : null,
+      sub: row.owner_plan ? { plan: row.owner_plan } : null,
+    }),
+    seats: Number(row.seats) || 1,
+  };
+}
 
 async function storeUpdatesBatch(workspaceId, noteId, updates) {
   if (!updates.length) return { accepted: 0, duplicate: 0, checkpoint: null };
@@ -121,24 +153,44 @@ async function storeNotesBatch(workspaceId, notes, quota = null) {
     }
 
     if (quota && acceptedBytes > 0 && quota.subscription) {
-      // quota.plan carries the org-first effective plan (team-org members are
-      // charged against the pooled org quota even with a personal plan).
-      const plan = quota.plan || quota.subscription.plan;
+      // quota.plan carries the PUSHER's org-first effective plan; the ledger is
+      // charged to the workspace owner's plan so a free collaborator on a paid
+      // owner's workspace is billed to the owner, not rejected with 507.
+      const owner = quota.workspaceId
+        ? await workspaceOwnerPlan(client, quota.workspaceId)
+        : null;
+      const plan = owner ? owner.plan : (quota.plan || quota.subscription.plan);
+      const seats = owner ? owner.seats : quota.seats;
+      const accountId = owner ? owner.accountId : quota.accountId;
       let result;
+      const quotaBytes = getQuotaBytes(plan, seats);
+      // A plan with no cloud storage (free) has a 0-byte ceiling, so the guard
+      // below can never pass. Reporting that as "quota exceeded" turns it into a
+      // 507 the pusher retries forever; it is really "this plan has no storage".
+      if (quotaBytes <= 0) {
+        const error = new Error('Plan has no cloud storage');
+        error.code = 'plan_storage_unavailable';
+        throw error;
+      }
       if (quota.workspaceId && ['team', 'enterprise'].includes(plan)) {
-        const quotaBytes = getQuotaBytes(plan, quota.seats);
         result = await client.query(`UPDATE workspaces SET storage_used_bytes = storage_used_bytes + $1
           WHERE id = $2 AND ($3 = 'enterprise' OR storage_used_bytes + $1 <= $4)`,
           [acceptedBytes, quota.workspaceId, plan, quotaBytes]);
       } else if (plan !== 'enterprise') {
-        const quotaBytes = getQuotaBytes(plan);
         result = await client.query(`UPDATE subscriptions SET storage_used_bytes = storage_used_bytes + $1
           WHERE account_id = $2 AND storage_used_bytes + $1 <= $3`,
-          [acceptedBytes, quota.accountId, quotaBytes]);
+          [acceptedBytes, accountId, quotaBytes]);
       }
       if (result && result.rowCount !== 1) {
         const error = new Error('Storage quota exceeded');
         error.code = 'storage_quota_exceeded';
+        console.error('[quota] rejected', JSON.stringify({
+          workspaceId: quota.workspaceId,
+          plan,
+          seats,
+          accountId,
+          acceptedBytes,
+        }));
         throw error;
       }
     }

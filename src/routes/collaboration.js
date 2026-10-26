@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const { z } = require('zod');
 const { transaction, query } = require('../db');
 const { Account, NoteKey, NoteInvitation, NoteInviteLink } = require('../models');
+const { publishUserNotification } = require('../lib/user-notifications');
+const { noteAudienceIds, resolveNoteAccess } = require('../lib/note-access');
 const {
   addRecipientsIfAbsent,
   rotateNoteKey,
@@ -302,7 +304,12 @@ async function collaborationRoutes(app) {
       NoteInvitation.find({ noteId, userId: { $in: userIds } }, { userId: 1 }).lean(),
       Account.find({ id: { $in: userIds } }, { id: 1, kemPublicKey: 1 }).lean(),
     ]);
-    const collaboratorIds = new Set(collabRows.map((c) => c.userId));
+    // A workspace member reads the note by membership, so they are a legitimate
+    // envelope recipient even without an invitation row of their own.
+    const collaboratorIds = new Set([
+      ...collabRows.map((c) => c.userId),
+      ...(await noteAudienceIds(noteId)),
+    ]);
     const keypairIds = new Set(accountRows.filter((a) => a.kemPublicKey).map((a) => a.id));
 
     for (const r of recipients) {
@@ -395,7 +402,12 @@ async function collaborationRoutes(app) {
       NoteInvitation.find({ noteId, userId: { $in: userIds } }, { userId: 1 }).lean(),
       Account.find({ id: { $in: userIds } }, { id: 1, kemPublicKey: 1 }).lean(),
     ]);
-    const collaboratorIds = new Set(collabRows.map((c) => c.userId));
+    // A workspace member reads the note by membership, so they are a legitimate
+    // envelope recipient even without an invitation row of their own.
+    const collaboratorIds = new Set([
+      ...collabRows.map((c) => c.userId),
+      ...(await noteAudienceIds(noteId)),
+    ]);
     const keypairIds = new Set(accountRows.filter((a) => a.kemPublicKey).map((a) => a.id));
     for (const r of recipients) {
       if (!collaboratorIds.has(r.userId)) {
@@ -579,7 +591,10 @@ async function collaborationRoutes(app) {
     if (!membership) return;
 
     const isCollab = await NoteInvitation.findOne({ noteId, userId: recipientUserId }).lean();
-    if (!isCollab) {
+    // Workspace membership is the same grant for a team note: it carries an
+    // invitation row only for its creator.
+    const inAudience = isCollab || (await noteAudienceIds(noteId)).includes(recipientUserId);
+    if (!inAudience) {
       return reply.status(403).send({ error: 'forbidden', message: 'Recipient is not a collaborator.' });
     }
 
@@ -624,7 +639,11 @@ async function collaborationRoutes(app) {
     });
     if (!membership) return;
     const invitations = await NoteInvitation.find({ noteId }).lean();
-    const userIds = [...new Set(invitations.map((inv) => inv.userId))];
+    // Team notes carry an invitation row only for their creator; the rest of the
+    // workspace reads them by membership, so they need envelopes too.
+    const userIds = [
+      ...new Set([...invitations.map((inv) => inv.userId), ...(await noteAudienceIds(noteId))]),
+    ];
     const accounts = userIds.length > 0
       ? await Account.find({ id: { $in: userIds } }, { id: 1, username: 1, kemPublicKey: 1, deviceKeys: 1 }).lean()
       : [];
@@ -634,6 +653,12 @@ async function collaborationRoutes(app) {
     const roleByUser = new Map(
       invitations.map((inv) => [inv.userId, inv.role === 'editor' ? 'editor' : 'viewer'])
     );
+    // A member without an invitation takes the workspace's role for the note.
+    for (const id of userIds) {
+      if (roleByUser.has(id)) continue;
+      const access = await resolveNoteAccess(noteId, id);
+      if (access) roleByUser.set(id, access.role);
+    }
     // Which (user, device) pairs already hold an envelope: lets a key-holding
     // collaborator re-wrap only for the devices still missing one. Existence
     // only; no key material is ever exposed. A legacy account-level row
@@ -764,6 +789,17 @@ async function collaborationRoutes(app) {
       workspaceId: typeof workspaceId === 'string' && workspaceId ? workspaceId : null,
       createdAt: new Date(),
     });
+
+    // The invited person's clients hear about it now; the inviter's other
+    // devices are skipped when the request carries a device id.
+    publishUserNotification({
+      userId: target.id,
+      kind: 'note_shared',
+      noteId,
+      workspaceId: typeof workspaceId === 'string' && workspaceId ? workspaceId : null,
+      actorId: req.userId,
+      excludeDeviceId: req.deviceId ?? null,
+    }).catch(() => {});
 
     const rawToken = crypto.randomBytes(32).toString('base64url');
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
@@ -1110,6 +1146,14 @@ async function collaborationRoutes(app) {
        VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
       [request.note_id, request.account_id, req.userId, role, new Date().toISOString(), approveWorkspaceId ?? null]
     );
+    publishUserNotification({
+      userId: request.account_id,
+      kind: 'note_shared',
+      noteId: request.note_id,
+      workspaceId: approveWorkspaceId ?? null,
+      actorId: req.userId,
+      excludeDeviceId: req.deviceId ?? null,
+    }).catch(() => {});
     // Consume every pending request from this account for this note, so a
     // second invite link cannot leave a stale "pending" row for a collaborator.
     await query(

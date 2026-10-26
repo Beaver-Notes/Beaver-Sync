@@ -8,13 +8,28 @@ const { isFreePlan } = require('../lib/plans');
 const { isEnterpriseMode } = require('../lib/license');
 const { resolveEffectivePlan } = require('../lib/plan-resolution');
 const { getPool } = require('../db/postgres');
-const { DEVICE_ID_PATTERN } = require('../lib/patterns');
+const { DEVICE_ID_PATTERN, isPlaceholderDeviceLabel } = require('../lib/patterns');
 const { requireWorkspaceMember, requireWorkspaceWriter } = require('../middleware/org');
 
 const MAX_UPDATES_PER_PUSH = 200;
 const MAX_UPDATES_PER_PULL = 500;
 const MAX_BODY_BYTES = Math.min(parseInt(process.env.YJS_SYNC_BODY_LIMIT_BYTES ?? '10485760', 10), 10485760);
 const SYNC_KEY_PATTERN = /^([a-zA-Z0-9_-]{1,256})~~([a-zA-Z0-9_-]{1,128})~~([0-9]+)~~([0-9]+)\.yjs\.json$/;
+
+// A note id belongs to exactly one workspace: its first push binds it. Without
+// this, a device that boots into the wrong workspace copies its whole cached
+// library in, and the same note then shows up (and deletes) everywhere (F30).
+async function boundWorkspaces(noteIds) {
+  if (!noteIds.length) return new Map();
+  const { rows } = await getPool().query(
+    `SELECT DISTINCT ON (note_id) note_id, workspace_id
+       FROM yjs_doc_updates
+      WHERE note_id = ANY($1::text[])
+      ORDER BY note_id, created_at ASC`,
+    [noteIds]
+  );
+  return new Map(rows.map((row) => [row.note_id, row.workspace_id]));
+}
 
 const UpdateSchema = z.object({
   key: z.string().min(1).max(512),
@@ -151,13 +166,57 @@ async function notesOwnedByWorkspace(noteIds, workspaceId) {
 // note lives in this workspace. Returns the member row on the member path
 // (so downstream role checks still run), or the string 'invited', or null
 // (reply already sent with a 403).
+// Short TTL cache for successful access checks only (membership/invites).
+// Failures are never cached: a revoked user must lose access immediately, and a
+// newly-granted invite must work on its next request. Success staleness is
+// bounded by the TTL (default 2s): a demoted user keeps access for at most that.
+const NOTE_ACCESS_CACHE_TTL_MS = parseInt(process.env.NOTE_ACCESS_CACHE_TTL_MS ?? '2000', 10);
+const noteAccessCache = new Map();
+
+function getNoteAccessCacheKey(userId, workspaceId, noteIds, write) {
+  const sorted = [...noteIds].sort();
+  return `${userId}:${workspaceId}:${write ? 'w' : 'r'}:${sorted.join(',')}`;
+}
+
+function getCachedNoteAccess(key) {
+  const entry = noteAccessCache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() > entry.expiresAt) {
+    noteAccessCache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+}
+
+function setCachedNoteAccess(key, value) {
+  noteAccessCache.set(key, { value, expiresAt: Date.now() + NOTE_ACCESS_CACHE_TTL_MS });
+  if (noteAccessCache.size > 5000) {
+    const now = Date.now();
+    for (const [k, v] of noteAccessCache) {
+      if (now > v.expiresAt) noteAccessCache.delete(k);
+      if (noteAccessCache.size <= 4000) break;
+    }
+  }
+}
+
 async function requireNoteAccess(req, reply, workspaceId, noteIds, { write }) {
+  const cacheKey = getNoteAccessCacheKey(req.userId, workspaceId, noteIds, write);
+  const cached = getCachedNoteAccess(cacheKey);
+  if (cached !== undefined) {
+    // Only successes are cached: a miss would have been fail-closed already.
+    return cached;
+  }
+
   // Look the membership up directly: the shared requireWorkspace* helpers send
   // their own 403, which would short-circuit the invited fallback below.
   const membership = await WorkspaceMember.findOne({ workspaceId, accountId: req.userId }).lean();
   if (membership) {
-    if (!write || ['owner', 'editor'].includes(membership.role)) return membership;
+    if (!write || ['owner', 'editor'].includes(membership.role)) {
+      setCachedNoteAccess(cacheKey, membership);
+      return membership;
+    }
     reply.status(403).send({ error: 'workspace_write_forbidden' });
+    // Failures are never cached: re-check the DB next request.
     return null;
   }
 
@@ -166,21 +225,44 @@ async function requireNoteAccess(req, reply, workspaceId, noteIds, { write }) {
   const invited = await invitedNoteIds(req.userId, noteIds);
   if (invited.size !== noteIds.length) {
     reply.status(403).send({ error: 'not_workspace_member' });
+    // Failures are never cached: re-check the DB next request.
     return null;
+  }
+  // An invite carries a role: a viewer may read the note but must not write it
+  // (F28). Membership above already enforces the same split.
+  if (write) {
+    const rows = await NoteInvitation.find({ userId: req.userId }).lean();
+    const editable = new Set(
+      rows.filter((row) => row.role === 'editor' && noteIds.includes(row.noteId)).map((row) => row.noteId)
+    );
+    if (!noteIds.every((id) => editable.has(id))) {
+      reply.status(403).send({ error: 'note_write_forbidden' });
+      // Failures are never cached: re-check the DB next request.
+      return null;
+    }
   }
   const owned = await notesOwnedByWorkspace([...invited], workspaceId);
   if (owned.size !== noteIds.length) {
     reply.status(403).send({ error: 'note_workspace_mismatch' });
+    // Failures are never cached: re-check the DB next request.
     return null;
   }
+  setCachedNoteAccess(cacheKey, 'invited');
   return 'invited';
 }
 
 async function requirePaidWorkspaceOwner(req, reply, membership) {
   if (isEnterpriseMode()) return true;
   if (membership?.role !== 'owner') return true;
-  const { plan } = await resolveEffectivePlan(req);
-  if (!isFreePlan(plan)) return true;
+  // The pull path already resolved the plan via requireActiveSync: reuse the
+  // request-scoped decision instead of re-querying Subscription/Workspace.
+  if (req.paidOwnerDecision) {
+    if (req.paidOwnerDecision.allowed) return true;
+  } else {
+    const { plan } = await resolveEffectivePlan(req);
+    req.paidOwnerDecision = { allowed: !isFreePlan(plan) };
+    if (req.paidOwnerDecision.allowed) return true;
+  }
   reply.status(402).send({
     error: 'plan_upgrade_required',
     message: 'Cloud sync of a workspace you own requires a paid plan. Upgrade to sync.',
@@ -204,7 +286,9 @@ async function yjsSyncRoutes(app) {
     },
   });
 
-  app.post('/push-batch', { ...protectWrite, ...jsonConfig(parseInt(process.env.YJS_SYNC_WRITE_RATE_LIMIT ?? '60', 10)) }, async (req, reply) => {
+  // ponytail: 240, not 60 — see the note on COMMIT_WRITE_RATE_LIMIT_PER_MINUTE;
+  // the client coalesces only 1.5s, so fast typing outran a 60/min bucket.
+  app.post('/push-batch', { ...protectWrite, ...jsonConfig(parseInt(process.env.YJS_SYNC_WRITE_RATE_LIMIT ?? '240', 10)) }, async (req, reply) => {
     const parsed = BatchPushSchema.safeParse(req.body);
     if (!parsed.success) return validationError(reply, parsed);
     const deviceId = getDeviceId(req, reply);
@@ -218,14 +302,33 @@ async function yjsSyncRoutes(app) {
     if (!await requirePaidWorkspaceOwner(req, reply, membership)) return;
     req.workspaceId = workspaceId;
 
-    for (const { noteId, updates } of notes) {
+    // First write wins: notes already living in another workspace are dropped
+    // instead of duplicated (and instead of failing the whole batch).
+    // The workspace meta doc is named 'meta' in every workspace, so the
+    // first-write-wins note binding would pin it to whichever workspace wrote
+    // first and silently reject the other workspaces' meta docs (no note list
+    // for their members). It is workspace-scoped, not a note: skip it.
+    const isMetaDoc = (noteId) => noteId === 'meta';
+    const bound = await boundWorkspaces(
+      notes.map((n) => n.noteId).filter((id) => !isMetaDoc(id)),
+    );
+    const acceptedNotes = notes.filter((n) => {
+      if (isMetaDoc(n.noteId)) return true;
+      const owner = bound.get(n.noteId);
+      return !owner || owner === workspaceId;
+    });
+    if (acceptedNotes.length !== notes.length) {
+      req.log.info(`[yjs-sync] dropped ${notes.length - acceptedNotes.length} note(s) bound to another workspace`);
+    }
+
+    for (const { noteId, updates } of acceptedNotes) {
       if (updates.some((update) => update.deviceId !== deviceId)) return reply.status(400).send({ error: 'device_id_mismatch' });
       if (updates.some((update) => !validateUpdateKey(noteId, update, deviceId))) {
         return reply.status(400).send({ error: 'malformed_update_key' });
       }
     }
 
-    const storedNotes = notes.map(({ noteId, updates }) => ({
+    const storedNotes = acceptedNotes.map(({ noteId, updates }) => ({
       noteId,
       updates: updates.map((update) => ({
         data: Buffer.from(update.data, 'base64'),
@@ -252,13 +355,27 @@ async function yjsSyncRoutes(app) {
       if (error.code === 'storage_quota_exceeded') {
         return reply.status(507).send({ error: error.code, message: error.message });
       }
+      // The workspace owner's plan grants no cloud storage. Same answer as the
+      // owner-side gate, because retrying can never succeed.
+      if (error.code === 'plan_storage_unavailable') {
+        return reply.status(402).send({
+          error: 'plan_upgrade_required',
+          message: 'Cloud sync of this workspace requires a paid plan on its owner. Upgrade to sync.',
+          upgradeUrl: 'https://beaver.app/sync',
+        });
+      }
       throw error;
     }
     const { accepted, duplicate, acceptedBytes: sizeBytes, checkpoint } = result;
 
     const deviceLabel = String(req.headers['x-device-label'] ?? 'Unknown Device').slice(0, 128);
     try {
-      await Device.findOneAndUpdate({ accountId: req.userId, deviceId }, { label: deviceLabel, lastSeen: new Date() }, { upsert: true, new: true });
+      // Only overwrite the stored label when the client sent a real model;
+      // legacy hardcoded labels ("Beaver Notes (Rust)") must not clobber it.
+      const update = isPlaceholderDeviceLabel(deviceLabel)
+        ? { lastSeen: new Date() }
+        : { label: deviceLabel, lastSeen: new Date() };
+      await Device.findOneAndUpdate({ accountId: req.userId, deviceId }, update, { upsert: true, new: true });
     } catch (err) {
       // The batch is already committed; a device-metadata write failure must
       // not turn a successful push into a 500.
@@ -295,6 +412,10 @@ async function yjsSyncRoutes(app) {
     return reply.status(201).send(response);
   });
 
+  // Pulls skip requireActiveSync: plan gating here is role-aware
+  // (requirePaidWorkspaceOwner), so free invited collaborators may still pull.
+  // Prime the request-scoped plan decision once (Subscription + Workspace +
+  // org lookups) so downstream helpers reuse it instead of re-querying.
   app.post('/pull-batch', { ...protect, ...jsonConfig(parseInt(process.env.YJS_SYNC_READ_RATE_LIMIT ?? '120', 10)) }, async (req, reply) => {
     const parsed = BatchPullSchema.safeParse(req.body ?? {});
     if (!parsed.success) return validationError(reply, parsed);
@@ -316,8 +437,21 @@ async function yjsSyncRoutes(app) {
       }
     }
 
-    const entries = await Promise.all(notes.map(async ({ noteId, checkpoint, limit }) => {
-      const page = await persistence.loadUpdatesAfter(workspaceId, noteId, checkpoint, Math.min(limit, MAX_UPDATES_PER_PULL), cutoffTs);
+    // One query for the whole batch: a per-note query made a 50-note pull cost
+    // 50 round trips, which dominated the per-device tick on a small box.
+    const pages = await persistence.loadUpdatesBatch(
+      workspaceId,
+      notes.map(({ noteId, checkpoint, limit }) => ({
+        noteId,
+        checkpoint,
+        limit: Math.min(limit, MAX_UPDATES_PER_PULL),
+      })),
+      cutoffTs,
+    );
+
+    const response = {};
+    for (const { noteId } of notes) {
+      const page = pages[noteId];
       if (process.env.NODE_ENV !== 'production') {
         console.log(`[pull-batch]   -> ${noteId}: ${page.updates.length} updates, hasMore=${page.hasMore}${page.stale ? ' STALE' : ''}`);
       }
@@ -327,9 +461,9 @@ async function yjsSyncRoutes(app) {
         hasMore: page.hasMore,
       };
       if (page.stale) entry.stale = true;
-      return [noteId, entry];
-    }));
-    return reply.send({ notes: Object.fromEntries(entries) });
+      response[noteId] = entry;
+    }
+    return reply.send({ notes: response });
   });
 
   app.get('/note-ids', { ...protect }, async (req, reply) => {
@@ -339,6 +473,9 @@ async function yjsSyncRoutes(app) {
     return reply.send({ noteIds: await persistence.listNoteIds(workspaceId) });
   });
 
+  // Compaction deletes journal rows, but it must keep working for an account at
+  // its plan device cap, so this stays on the read guard; requireWorkspaceWriter
+  // below is what refuses a viewer.
   app.delete('/updates', { ...protect, bodyLimit: 4096 }, async (req, reply) => {
     const parsed = DeleteSchema.safeParse(req.body ?? {});
     if (!parsed.success) return validationError(reply, parsed);

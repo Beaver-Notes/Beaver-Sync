@@ -123,7 +123,7 @@ async function postStripeWebhook(app, event) {
 async function makeAccountWithFreePlan() {
   const account = await models.Account.create({
     emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY).update(`wh-${crypto.randomBytes(6).toString('hex')}@test.example`).digest('hex'),
-    emailEncrypted: 'e',
+    emailSealed: 'e',
     passwordHash: '$2b$12$test',
     kdfSalt: crypto.randomBytes(32).toString('hex'),
   });

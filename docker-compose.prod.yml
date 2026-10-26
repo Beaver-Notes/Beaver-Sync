@@ -3,6 +3,11 @@ services:
     image: caddy:2-alpine
     container_name: beaver-caddy
     restart: unless-stopped
+    mem_limit: 100m
+    # The Caddyfile's only site address is {$APP_URL}; without it Caddy has no
+    # site block, so fail here rather than start a proxy that serves nothing.
+    environment:
+      - APP_URL=${APP_URL:?APP_URL must be the public https origin for the Caddyfile}
     ports:
       - "80:80"
       - "443:443"
@@ -15,12 +20,18 @@ services:
       - beaver-internal
 
   api:
+    # Built in CI and pulled from GHCR; the local build stays for self-host.
+    image: ${API_IMAGE:-beaver-sync-api:local}
     build:
       context: .
       dockerfile: Dockerfile
     container_name: beaver-sync-api
     restart: unless-stopped
-    depends_on:
+    # 2 GB droplet with no swap: exceeding these ceilings is an OOM kill, so size up the droplet first.
+    mem_limit: 420m
+    # !override drops the seaweedfs entry inherited from docker-compose.yml;
+    # production blob storage is Cloudflare R2, not the local object store.
+    depends_on: !override
       postgres:
         condition: service_healthy
     env_file: .env
@@ -29,7 +40,14 @@ services:
       - PORT=3000
       - HOST=0.0.0.0
       - TRUST_PROXY=true
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
+      - DATABASE_URL=${EXTERNAL_DATABASE_URL:-postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}}
+      - STORAGE_BACKEND=${STORAGE_BACKEND:-cloudflare-r2}
+      - STORAGE_ENDPOINT=${STORAGE_ENDPOINT:?STORAGE_ENDPOINT must be the Cloudflare R2 endpoint on this droplet}
+      - STORAGE_BUCKET_NAME=${STORAGE_BUCKET_NAME:?STORAGE_BUCKET_NAME must be the R2 bucket}
+      - STORAGE_ACCESS_KEY_ID=${STORAGE_ACCESS_KEY_ID:?STORAGE_ACCESS_KEY_ID must be the R2 access key}
+      - STORAGE_SECRET_ACCESS_KEY=${STORAGE_SECRET_ACCESS_KEY:?STORAGE_SECRET_ACCESS_KEY must be the R2 secret key}
+      - STORAGE_FORCE_PATH_STYLE=${STORAGE_FORCE_PATH_STYLE:-false}
+      - NODE_OPTIONS=--max-old-space-size=384
     volumes:
       - beaver_data:/app/keys
     networks:
@@ -42,19 +60,22 @@ services:
       start_period: 10s
 
   ws-relay:
+    image: ${WS_IMAGE:-beaver-sync-ws-relay:local}
     build:
       context: .
       dockerfile: Dockerfile.ws-relay
     container_name: beaver-sync-ws-relay
     restart: unless-stopped
+    mem_limit: 320m
     depends_on:
       api:
         condition: service_healthy
     env_file: .env
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}
+      - DATABASE_URL=${EXTERNAL_DATABASE_URL:-postgresql://${POSTGRES_USER:-beaver}:${POSTGRES_PASSWORD:-beaver}@postgres:5432/${POSTGRES_DB:-beaver}}
       - AUTH_BACKEND_URL=http://api:3000
       - WS_RELAY_PORT=8080
+      - NODE_OPTIONS=--max-old-space-size=256
     command: ["node", "src/ws-relay.js"]
     networks:
       - beaver-internal
@@ -68,6 +89,21 @@ services:
     image: postgres:16-alpine
     container_name: beaver-sync-postgres
     restart: unless-stopped
+    mem_limit: 600m
+    # Each flag must be its own argv token: a single quoted string makes the
+    # entrypoint exec a nonexistent binary and the container crash-loops.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - max_connections=50
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-beaver}
       POSTGRES_USER: ${POSTGRES_USER:-beaver}

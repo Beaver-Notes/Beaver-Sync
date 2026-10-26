@@ -1,8 +1,10 @@
 #!/bin/sh
 set -e
 
-# Auto-generate JWT keys if LEGACY_AUTH_ENABLED=true and keys are missing
-if [ "$LEGACY_AUTH_ENABLED" = "true" ]; then
+# Auto-generate JWT keys if LEGACY_AUTH_ENABLED=true and keys are missing.
+# Unset counts as enabled, matching validateRequiredEnv() in src/server.js —
+# otherwise an .env that omits the flag exits at startup with no keys on disk.
+if [ "$LEGACY_AUTH_ENABLED" != "false" ]; then
   PRIV="${JWT_PRIVATE_KEY_PATH:-./keys/private.pem}"
   PUB="${JWT_PUBLIC_KEY_PATH:-./keys/public.pem}"
   if [ ! -f "$PRIV" ] || [ ! -f "$PUB" ]; then

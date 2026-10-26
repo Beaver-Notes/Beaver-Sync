@@ -3,6 +3,7 @@
 const { z } = require('zod');
 const { query } = require('../db');
 const { NoteActivity, NoteInvitation } = require('../models');
+const { resolveNoteAccess } = require('../lib/note-access');
 
 // Count cap, not a TTL: the client keeps at most 200 local entries per note
 // (see `ACTIVITY_LOG_MAX_PER_NOTE` in the Rust client), so a count cap makes
@@ -27,9 +28,10 @@ const baseRateLimit = {
   bodyLimit: BODY_LIMIT,
 };
 
-// Same gate as comments: any collaborator (editor or viewer) may read.
+// Same gate as comments: any collaborator (editor or viewer) may read, and a
+// member of the note's workspace counts as a collaborator.
 async function requireCollaborator(noteId, userId) {
-  return NoteInvitation.findOne({ noteId, userId }).lean();
+  return resolveNoteAccess(noteId, userId, await NoteInvitation.findOne({ noteId, userId }).lean());
 }
 
 // Only a note-level editor may append. The owner is represented as an editor

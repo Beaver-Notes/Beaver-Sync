@@ -26,18 +26,9 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-      minio:
-        image: minio/minio:RELEASE.2025-02-28T09-55-16Z
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+      # Object storage runs as a plain `docker run` in a step below, not a service
+    # container: GHA services cannot pass a command, and seaweedfs needs
+    # `server -s3 -s3.config=...` to expose the S3 gateway at all.
 
     steps:
       - name: Checkout
@@ -52,33 +43,32 @@ jobs:
       - name: Install dependencies
         run: yarn install --frozen-lockfile
 
-      - name: Create MinIO bucket
+      # Same image + tag as docker-compose.test.yml, so CI and the local test
+      # stack exercise the same object storage. Credentials come from
+      # seaweedfs/s3.json because seaweedfs only reads AWS_* env vars from 3.96.
+      - name: Start SeaweedFS and create the bucket
         run: |
-          echo "Waiting for MinIO to be ready..."
-          for i in $(seq 1 15); do
-            if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
-              echo "MinIO ready on attempt $i"
+          docker run -d --name seaweedfs-ci -p 9000:9000 \
+            -v "$GITHUB_WORKSPACE/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro" \
+            chrislusf/seaweedfs:3.71 \
+            server -dir=/data -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json
+          for i in $(seq 1 30); do
+            # Probe the published S3 port. The master API (9333) is not published,
+            # so probing it from the runner always times out. A bare GET answers
+            # 403 (S3 gateway up, bucket/anon denied), which is the state we want,
+            # hence no curl -f: -f would turn that into a retry.
+            if curl -sS -o /dev/null --max-time 2 http://localhost:9000/ 2>/dev/null; then
+              echo "SeaweedFS ready on attempt $i"
               break
+            fi
+            if [ "$i" = "30" ]; then
+              echo "SeaweedFS never became ready"
+              docker logs seaweedfs-ci || true
+              exit 1
             fi
             sleep 1
           done
-          if ! curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
-            echo "MinIO service not running server (expected: minio/minio needs 'server' cmd) — starting fallback container..."
-            docker run -d --name minio-ci-fallback -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio:RELEASE.2025-02-28T09-55-16Z server /data --console-address ":9001"
-            for i in $(seq 1 30); do
-              if curl -fsS http://localhost:9000/minio/health/live >/dev/null 2>&1; then
-                echo "Fallback MinIO ready on attempt $i"
-                break
-              fi
-              if [ "$i" = "30" ]; then
-                echo "Fallback MinIO never became ready"
-                docker logs minio-ci-fallback || true
-                exit 1
-              fi
-              sleep 1
-            done
-          fi
-          STORAGE_ENDPOINT=http://localhost:9000 STORAGE_BUCKET_NAME=beaver-sync STORAGE_ACCESS_KEY_ID=minioadmin STORAGE_SECRET_ACCESS_KEY=minioadmin STORAGE_FORCE_PATH_STYLE=true node -e "
+          STORAGE_ENDPOINT=http://localhost:9000 STORAGE_BUCKET_NAME=beaver-sync STORAGE_ACCESS_KEY_ID=beaver STORAGE_SECRET_ACCESS_KEY=beaver-dev-secret STORAGE_FORCE_PATH_STYLE=true node -e "
             const { ensureBucket } = require('./src/services/r2');
             ensureBucket().then(() => console.log('bucket ready')).catch(e => { console.error(e.message); process.exit(1); });
           "
@@ -92,8 +82,8 @@ jobs:
           TEST_DATABASE_URL: postgresql://beaver:beaver@localhost:5432/beaver_test
           STORAGE_ENDPOINT: http://localhost:9000
           STORAGE_BUCKET_NAME: beaver-sync
-          STORAGE_ACCESS_KEY_ID: minioadmin
-          STORAGE_SECRET_ACCESS_KEY: minioadmin
+          STORAGE_ACCESS_KEY_ID: beaver
+          STORAGE_SECRET_ACCESS_KEY: beaver-dev-secret
           STORAGE_FORCE_PATH_STYLE: "true"
 
       - name: Audit dependencies (fail on critical)
@@ -134,7 +124,7 @@ jobs:
           echo "history api:" >> "$GITHUB_STEP_SUMMARY"
           docker history beaver-sync-api 2>&1 | head -20 >> "$GITHUB_STEP_SUMMARY" || true
 
-      - name: Up stack against scratch PG/MinIO
+      - name: Up stack against scratch PG/SeaweedFS
         env:
           ENTERPRISE_MODE: "true"
           LICENSE_SECRET: ci-smoke-license-secret-32-chars-long!!

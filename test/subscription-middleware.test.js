@@ -34,7 +34,7 @@ async function makeAccountWithPlan(plan, orgPlan, seats) {
     emailHmac: crypto.createHmac('sha256', process.env.EMAIL_HMAC_KEY)
       .update(`${plan}-${crypto.randomBytes(6).toString('hex')}@test.example`)
       .digest('hex'),
-    emailEncrypted: 'e',
+    emailSealed: 'e',
     passwordHash: '$2b$12$test',
     kdfSalt: crypto.randomBytes(32).toString('hex'),
   });

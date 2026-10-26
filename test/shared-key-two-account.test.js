@@ -206,8 +206,8 @@ test('two accounts share a note key: envelope fan-out, v6 pull, history, assets'
 
   const aliceEmail = `e2e-alice-${crypto.randomBytes(4).toString('hex')}@test.example`;
   const bobEmail = `e2e-bob-${crypto.randomBytes(4).toString('hex')}@test.example`;
-  const alice = await register('pro', { email: aliceEmail });
-  const bob = await register('pro', { email: bobEmail });
+  const alice = await register('team', { email: aliceEmail });
+  const bob = await register('team', { email: bobEmail });
   const outsider = await register('pro');
 
   await query(
@@ -501,10 +501,22 @@ test('two accounts share a note key: envelope fan-out, v6 pull, history, assets'
 
   // Assets are account-prefixed on the server: the collaborator's key schedule
   // is shared, but the blob itself is not addressable cross-account.
+  // A filename-carrying key is account-scoped: the shared prefix is reserved for
+  // hashed keys whose workspace the upload path can derive. The owner's copy is
+  // still readable by a workspace member, or a seeded attachment reads as
+  // "File not found" on every peer.
   const bobAsset = await app.inject({
     method: 'GET', url: `/assets/${flatAssetKey}/content`, headers: bobHeaders,
   });
-  assert.equal(bobAsset.statusCode, 404, 'cross-account asset fetch is not served (account-scoped prefix)');
+  assert.equal(bobAsset.statusCode, 200, bobAsset.body);
+  assert.ok(
+    Buffer.from(bobAsset.rawPayload).equals(assetEnvelopeBytes),
+    'a workspace member fetches the same envelope the uploader stored'
+  );
+  const outsiderAsset = await app.inject({
+    method: 'GET', url: `/assets/${flatAssetKey}/content`, headers: outsiderHeaders,
+  });
+  assert.equal(outsiderAsset.statusCode, 404, 'a non-member cannot fetch a workspace asset');
 
   const aliceListing = await app.inject({
     method: 'GET', url: `/assets?workspaceId=${encodeURIComponent(wsId)}`, headers: aliceHeaders,
@@ -513,7 +525,27 @@ test('two accounts share a note key: envelope fan-out, v6 pull, history, assets'
   const bobListing = await app.inject({
     method: 'GET', url: `/assets?workspaceId=${encodeURIComponent(wsId)}`, headers: bobHeaders,
   });
-  assert.deepEqual(bobListing.json().keys, [], 'B has no copy of the asset in its own account');
+  assert.deepEqual(bobListing.json().keys, [], 'an account-scoped copy stays out of B\'s listing');
+
+  // A hashed key names its workspace, so an upload with no workspace context
+  // still lands in the shared prefix: one object, visible and readable for
+  // every member (the seeding path used to strand it in the uploader's prefix).
+  const hashedAssetKey = `assets--${wsId}--${noteId}--${crypto.randomBytes(32).toString('base64url')}`;
+  const hashedUpload = await json(app, aliceHeaders, 'POST', '/assets/batch', {
+    assets: [{ key: hashedAssetKey, data: assetEnvelopeBytes.toString('base64') }],
+  });
+  assert.equal(hashedUpload.statusCode, 200, hashedUpload.body);
+  const bobHashedListing = await app.inject({
+    method: 'GET', url: `/assets?workspaceId=${encodeURIComponent(wsId)}`, headers: bobHeaders,
+  });
+  assert.ok(
+    bobHashedListing.json().keys.includes(hashedAssetKey),
+    'a hashed workspace key is listed for every member'
+  );
+  const bobHashedFetch = await app.inject({
+    method: 'GET', url: `/assets/${hashedAssetKey}/content`, headers: bobHeaders,
+  });
+  assert.equal(bobHashedFetch.statusCode, 200, bobHashedFetch.body);
 
   // A realistic filename exceeds Fastify's old 100-char maxParamLength once the
   // workspace segment is present. Opaque keys are longer still, so the server

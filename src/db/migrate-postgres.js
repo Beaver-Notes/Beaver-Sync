@@ -116,11 +116,63 @@ async function ensureSchema() {
     try {
       await query('ALTER TABLE note_keys ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0');
     } catch {}
+    // Invitations carry the owning workspace so shared-with-me can resolve a note
+    // before its first push. Nullable, and SET NULL rather than CASCADE so
+    // deleting a workspace cannot silently delete a live share.
+    try {
+      await query('ALTER TABLE note_invitations ADD COLUMN IF NOT EXISTS workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL');
+    } catch {}
     // Activity kind moves into the client-encrypted payload. Legacy rows keep
     // their readable kind; new writes store NULL (drop the NOT NULL so an
     // upgraded database accepts them).
     try {
       await query('ALTER TABLE note_activity ALTER COLUMN kind DROP NOT NULL');
+    } catch {}
+    // 02.6: server-sealed columns renamed from *_encrypted (server holds the key);
+    // dead columns dropped: commits.payload_encrypted, note_comments.anchor_{from,to}
+    // Each rename is guarded on catalog state: schema.postgres.sql runs first and
+    // may have pre-created the _sealed column, so an unconditional RENAME would
+    // fail on the duplicate and silently strand the existing _encrypted data.
+    const renames = [
+      ['accounts', 'email_encrypted', 'email_sealed'],
+      ['accounts', 'totp_secret_encrypted', 'totp_secret_sealed'],
+      ['accounts', 'totp_pending_secret_encrypted', 'totp_pending_secret_sealed'],
+      ['email_aliases', 'email_encrypted', 'email_sealed'],
+      ['audit_logs', 'metadata_encrypted', 'metadata_sealed'],
+      ['sso_configs', 'idp_cert_encrypted', 'idp_cert_sealed'],
+      ['sso_configs', 'sp_private_key_encrypted', 'sp_private_key_sealed'],
+      ['sso_configs', 'oidc_client_secret_encrypted', 'oidc_client_secret_sealed']
+    ];
+    for (const [table, from, to] of renames) {
+      try {
+        await query(`DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_name = '${table}' AND column_name = '${from}')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_name = '${table}' AND column_name = '${to}') THEN
+    ALTER TABLE ${table} RENAME COLUMN ${from} TO ${to};
+  END IF;
+END $$`);
+      } catch {}
+    }
+    try { await query('ALTER TABLE commits DROP COLUMN IF EXISTS payload_encrypted'); } catch {}
+    try { await query('ALTER TABLE note_comments DROP COLUMN IF EXISTS anchor_from'); } catch {}
+    try { await query('ALTER TABLE note_comments DROP COLUMN IF EXISTS anchor_to'); } catch {}
+    // Per-user encrypted reactions (emoji list is note-key encrypted, like bodies).
+    try { await query('ALTER TABLE note_comments DROP COLUMN IF EXISTS reactions'); } catch {}
+    try {
+      await query(`CREATE TABLE IF NOT EXISTS note_comment_reactions (
+        id               TEXT PRIMARY KEY,
+        comment_id       TEXT NOT NULL REFERENCES note_comments(id) ON DELETE CASCADE,
+        user_id          TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        emojis_encrypted TEXT NOT NULL,
+        emojis_iv        TEXT NOT NULL,
+        created_at       TEXT NOT NULL
+      )`);
+    } catch {}
+    try {
+      await query('CREATE INDEX IF NOT EXISTS idx_note_comment_reactions_comment ON note_comment_reactions(comment_id)');
     } catch {}
   } finally {
     try {

@@ -109,6 +109,14 @@ async function authRoutes(app) {
       ...without,
       { deviceId: did, publicKey: kemPublicKey, createdAt: new Date().toISOString() },
     ];
+    // A fresh keypair for a known device invalidates every envelope wrapped to
+    // the old one. Keeping them makes the device hold a workspace key it can
+    // never unwrap, so it reads nothing and the engine eventually advances past
+    // the rows (F29). Dropping them lets the key holders re-provision.
+    const previous = keys.find((d) => d.deviceId === did);
+    if (previous && previous.publicKey !== kemPublicKey) {
+      await query('DELETE FROM workspace_keys WHERE user_id = $1 AND device_id = $2', [req.userId, did]);
+    }
     const update = { deviceKeys: JSON.stringify(next) };
     // kemPublicKey stays the legacy primary (first key) so single-key clients
     // keep working; only seed it when not already present.

@@ -83,23 +83,23 @@ async function makeWs(ownerId, id) {
 
 async function createSsoConfig({ workspaceId, slug, protocol, allowedEmailDomains, idpSsoUrl, oidcIssuer }) {
   // encrypt fields via mlkem for realism
-  let idpCertEncrypted = null, spPrivateKeyEncrypted = null, oidcClientSecretEncrypted = null;
+  let idpCertSealed = null, spPrivateKeySealed = null, oidcClientSecretSealed = null;
   if (protocol === 'saml') {
-    idpCertEncrypted = await mlkem.encryptMetadata('-----BEGIN CERTIFICATE-----\nMIIB fake\n-----END CERTIFICATE-----');
-    spPrivateKeyEncrypted = await mlkem.encryptMetadata('-----BEGIN PRIVATE KEY-----\nMIIB fake\n-----END PRIVATE KEY-----');
+    idpCertSealed = await mlkem.encryptMetadata('-----BEGIN CERTIFICATE-----\nMIIB fake\n-----END CERTIFICATE-----');
+    spPrivateKeySealed = await mlkem.encryptMetadata('-----BEGIN PRIVATE KEY-----\nMIIB fake\n-----END PRIVATE KEY-----');
   }
   if (protocol === 'oidc') {
-    oidcClientSecretEncrypted = await mlkem.encryptMetadata('client-secret');
+    oidcClientSecretSealed = await mlkem.encryptMetadata('client-secret');
   }
   return models.SsoConfig.create({
     workspaceId, protocol, slug,
     idpEntityId: protocol === 'saml' ? 'https://idp.example.com' : null,
     idpSsoUrl: protocol === 'saml' ? (idpSsoUrl ?? 'https://idp.example.com/sso') : null,
-    idpCertEncrypted,
+    idpCertSealed,
     oidcIssuer: protocol === 'oidc' ? (oidcIssuer ?? 'https://oidc.example.com') : null,
     oidcClientId: protocol === 'oidc' ? 'client-id' : null,
-    oidcClientSecretEncrypted,
-    spCert: null, spPrivateKeyEncrypted,
+    oidcClientSecretSealed,
+    spCert: null, spPrivateKeySealed,
     allowedEmailDomains: allowedEmailDomains ?? 'example.com',
     createdAt: new Date(),
   });
@@ -181,7 +181,7 @@ test('saml: JIT links existing account when domain allowlisted', async (t) => {
   const { createEmailHash } = require('../src/lib/crypto');
   const email = 'existing@example.com';
   const h = createEmailHash(email);
-  await models.Account.create({ emailHmac: h, emailEncrypted: await mlkem.encryptMetadata(email), createdAt: new Date() });
+  await models.Account.create({ emailHmac: h, emailSealed: await mlkem.encryptMetadata(email), createdAt: new Date() });
   await models.Subscription.create({ accountId: (await models.Account.findOne({ emailHmac: h }).lean()).id, plan: 'free', status: 'active', storageQuotaBytes: 0, createdAt: new Date() });
   const countBefore = await models.Account.countDocuments({});
   samlValidateImpl = async () => ({ email, nameID: email });
@@ -204,7 +204,7 @@ test('saml: JIT fails closed when domain not allowlisted for existing account', 
   const { createEmailHash } = require('../src/lib/crypto');
   const email = 'victim@example.com';
   const h = createEmailHash(email);
-  await models.Account.create({ emailHmac: h, emailEncrypted: await mlkem.encryptMetadata(email), createdAt: new Date() });
+  await models.Account.create({ emailHmac: h, emailSealed: await mlkem.encryptMetadata(email), createdAt: new Date() });
   samlValidateImpl = async () => ({ email, nameID: email });
   const r = await app.inject({ method: 'POST', url: `/auth/sso/${slug}/acs`, headers: { 'content-type': 'application/json' }, payload: { SAMLResponse: 'valid-saml-token' } });
   assert.equal(r.statusCode, 403);

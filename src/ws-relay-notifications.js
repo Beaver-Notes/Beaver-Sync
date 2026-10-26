@@ -1,8 +1,9 @@
 'use strict';
 
-// LISTEN/NOTIFY fan-out: pushes Postgres sync notifications to connected
-// relay clients in the affected workspace. Receives the relay's room map and
-// text sender rather than reaching into relay module state.
+// LISTEN/NOTIFY fan-out. Sync pings go to every client in the affected
+// workspace; user notifications (comments, mentions, shares) go to the single
+// account they name, whatever workspace it is looking at. Receives the relay's
+// room map and text sender rather than reaching into relay module state.
 
 let _notifyClient = null;
 let _notifyReconnectTimer = null;
@@ -29,6 +30,7 @@ async function startSyncNotificationListener(rooms, sendText) {
       client = await pool.connect();
       _notifyClient = client;
       await client.query('LISTEN sync_notifications');
+      await client.query('LISTEN user_notifications');
       reconnectAttempts = 0;
       if (process.env.NODE_ENV !== 'production') {
         console.log('[ws-relay] Listening for sync notifications on Postgres');
@@ -36,6 +38,19 @@ async function startSyncNotificationListener(rooms, sendText) {
 
       client.on('notification', (msg) => {
         try {
+          if (msg.channel === 'user_notifications') {
+            const { userId, excludeDeviceId, ...rest } = JSON.parse(msg.payload);
+            if (!userId) return;
+            for (const [, room] of rooms) {
+              for (const conn of room.conns) {
+                const ctx = conn.ctx;
+                if (ctx.userId !== userId) continue;
+                if (excludeDeviceId && ctx.deviceId === excludeDeviceId) continue;
+                sendText(conn.ws, { type: 'user-notification', ...rest });
+              }
+            }
+            return;
+          }
           const { workspaceId, noteIds, excludeDeviceId } = JSON.parse(msg.payload);
           if (!workspaceId) return;
 

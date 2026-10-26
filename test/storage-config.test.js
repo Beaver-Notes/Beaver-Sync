@@ -32,7 +32,7 @@ function loadStorageModule(overrides) {
   return loaded;
 }
 
-test('non-production storage defaults to MinIO when no provider is specified', () => {
+test('non-production storage defaults to SeaweedFS when no provider is specified', () => {
   const moduleUnderTest = loadStorageModule({
     NODE_ENV: 'development',
     STORAGE_BACKEND: null,
@@ -41,19 +41,21 @@ test('non-production storage defaults to MinIO when no provider is specified', (
     STORAGE_ACCESS_KEY_ID: null,
     STORAGE_SECRET_ACCESS_KEY: null,
     STORAGE_FORCE_PATH_STYLE: null,
-    MINIO_ENDPOINT: 'http://minio:9000',
-    MINIO_BUCKET_NAME: 'beaver-sync',
-    MINIO_ROOT_USER: 'minioadmin',
-    MINIO_ROOT_PASSWORD: 'minioadmin',
+    SEAWEEDFS_ENDPOINT: null,
+    SEAWEEDFS_BUCKET_NAME: null,
+    SEAWEEDFS_ACCESS_KEY_ID: null,
+    SEAWEEDFS_SECRET_ACCESS_KEY: null,
     R2_ENDPOINT: null,
     R2_BUCKET_NAME: null,
     R2_ACCESS_KEY_ID: null,
     R2_SECRET_ACCESS_KEY: null,
   });
 
-  assert.equal(moduleUnderTest.storageConfig.provider, 'minio');
-  assert.equal(moduleUnderTest.storageConfig.endpoint, 'http://minio:9000');
+  assert.equal(moduleUnderTest.storageConfig.provider, 'seaweedfs');
+  assert.equal(moduleUnderTest.storageConfig.endpoint, 'http://seaweedfs:9000');
   assert.equal(moduleUnderTest.storageConfig.bucket, 'beaver-sync');
+  assert.equal(moduleUnderTest.storageConfig.accessKeyId, 'beaver');
+  assert.equal(moduleUnderTest.storageConfig.secretAccessKey, 'beaver-dev-secret');
   assert.equal(moduleUnderTest.storageConfig.forcePathStyle, true);
 });
 

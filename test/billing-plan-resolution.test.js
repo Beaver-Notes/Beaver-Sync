@@ -48,6 +48,13 @@ test('a configured Apple or Google product id resolves to its tier', () => {
   assert.equal(planFromProductId('google', 'beaver_team'), 'team');
 });
 
+test('a comma-separated product id list resolves every listed interval to the same tier', () => {
+  process.env.APPLE_PRODUCT_PRO = 'com.beaver.notes.pro.monthly,com.beaver.notes.pro.yearly';
+  assert.equal(planFromProductId('apple', 'com.beaver.notes.pro.monthly'), 'pro');
+  assert.equal(planFromProductId('apple', 'com.beaver.notes.pro.yearly'), 'pro');
+  process.env.APPLE_PRODUCT_PRO = 'com.beaver.notes.pro';
+});
+
 test('an unconfigured store product never resolves to a paid tier', () => {
   assert.equal(planFromProductId('apple', 'com.beaver.notes.subscriber.monthly'), null);
   assert.equal(planFromProductId('google', 'someOpaqueSubscriptionId'), null);

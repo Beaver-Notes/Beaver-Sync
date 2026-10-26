@@ -23,6 +23,7 @@ services:
     container_name: beaver-sync-redis
     restart: unless-stopped
     command: redis-server --save "" --appendonly no
+    mem_limit: 100m
     networks: [beaver-internal]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

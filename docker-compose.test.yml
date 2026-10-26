@@ -41,7 +41,12 @@ services:
     image: chrislusf/seaweedfs:3.71
     container_name: beaver-sync-test-seaweedfs
     restart: unless-stopped
-    command: server -dir=/data -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json
+    # -volume.max=16/-master.volumePreallocate=false: the image entrypoint otherwise
+    # passes -volume.max=0, which auto-sizes the cap from free disk minus the 1GB
+    # reserved per existing volume. Once that goes negative the cap collapses to the
+    # current volume count, no volume can be grown, and every PUT to the bucket-named
+    # collection fails with "no free volumes left" (S3 500 InternalError).
+    command: server -dir=/data -volume.max=16 -master.volumePreallocate=false -s3 -s3.port=9000 -s3.config=/etc/seaweedfs/s3.json
     volumes:
       - test_seaweed_data:/data
       - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
@@ -83,7 +88,7 @@ services:
       EMAIL_HMAC_KEY: ${EMAIL_HMAC_KEY:-ci-smoke-email-hmac-key-32-chars-long!!}
       COOKIE_SECRET: ${COOKIE_SECRET:-ci-smoke-cookie-secret-32-chars-long!!!}
       NOTE_HMAC_KEY: ${NOTE_HMAC_KEY:-ci-smoke-note-hmac-key-32-chars-long!!}
-      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-ci-smoke-internal-api-secret-32-chars!!}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-s3}
       STORAGE_ENDPOINT: ${STORAGE_ENDPOINT:-http://seaweedfs:9000}
       STORAGE_PUBLIC_ENDPOINT: ${STORAGE_PUBLIC_ENDPOINT:-http://${LAN_IP:-localhost}:9000}
@@ -93,6 +98,10 @@ services:
       STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
       STORAGE_FORCE_PATH_STYLE: ${STORAGE_FORCE_PATH_STYLE:-true}
       LEGACY_AUTH_ENABLED: ${LEGACY_AUTH_ENABLED:-true}
+      JWT_PRIVATE_KEY_PATH: ${JWT_PRIVATE_KEY_PATH:-/app/keys/private.pem}
+      JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH:-/app/keys/public.pem}
+      WEBAUTHN_RPID: ${WEBAUTHN_RPID:-localhost}
+      WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-http://localhost:4000}
       ALLOWED_ORIGINS: ${TEST_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://${LAN_IP:-127.0.0.1}:5173,http://localhost:5174,http://127.0.0.1:5174}
       APP_URL: ${APP_URL:-http://localhost:4000}
     ports:
@@ -125,7 +134,7 @@ services:
       AUTH_BACKEND_URL: http://api:3000
       WS_RELAY_PORT: ${WS_RELAY_PORT:-8080}
       WS_RELAY_AUTH_TIMEOUT_MS: ${WS_RELAY_AUTH_TIMEOUT_MS:-10000}
-      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-ci-smoke-internal-api-secret-32-chars!!}
     command: ["node", "src/ws-relay.js"]
     ports:
       - "0.0.0.0:8080:8080"

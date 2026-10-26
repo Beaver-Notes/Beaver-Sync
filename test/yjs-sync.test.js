@@ -445,6 +445,39 @@ test('DELETE /yjs/updates is refused for a viewer and deletes nothing', async (t
 
 // Same truthy-reply trap on the membership branch: a non-member must not reach
 // the note-ids query.
+// Every mutating route in the group must answer with the same 403 body shape:
+// /push-batch via requireNoteAccess(write:true), DELETE /updates via
+// requireWorkspaceWriter.
+test('push-batch accepts an editor and refuses viewers and non-members by error shape', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  const base = Date.now();
+  const pushFor = (noteId) => ({
+    workspaceId: 'workspace-1',
+    notes: [{ noteId, updates: [{ key: `${noteId}~~device-a~~${base}~~1.yjs.json`, data: 'YQ==', deviceId: 'device-a', sequence: 1, ts: base }] }],
+  });
+
+  await seedAccount('editor-2');
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['workspace-1', 'editor-2', 'editor', now]);
+  await query('INSERT INTO subscriptions (id, account_id, plan, status, storage_quota_bytes, storage_used_bytes, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)', ['editor-2-sub', 'editor-2', 'pro', 'active', 1000000, 0, now]);
+  const editor = await request(app, await createSession('editor-2', { headers: {} }), '/yjs/push-batch', pushFor('editor-role-note'));
+  assert.equal(editor.statusCode, 201);
+  assert.equal((await query('SELECT COUNT(*)::int AS count FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2', ['workspace-1', 'editor-role-note'])).rows[0].count, 1);
+
+  await seedAccount('viewer-2');
+  await query('INSERT INTO workspace_members (workspace_id, account_id, role, created_at) VALUES ($1, $2, $3, $4)', ['workspace-1', 'viewer-2', 'viewer', now]);
+  const viewer = await request(app, await createSession('viewer-2', { headers: {} }), '/yjs/push-batch', pushFor('viewer-role-note'));
+  assert.equal(viewer.statusCode, 403);
+  assert.equal(viewer.json().error, 'workspace_write_forbidden');
+  assert.equal((await query('SELECT COUNT(*)::int AS count FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2', ['workspace-1', 'viewer-role-note'])).rows[0].count, 0);
+
+  await seedAccount('outsider-2');
+  const outsider = await request(app, await createSession('outsider-2', { headers: {} }), '/yjs/push-batch', pushFor('outsider-role-note'));
+  assert.equal(outsider.statusCode, 403);
+  assert.equal(outsider.json().error, 'not_workspace_member');
+  assert.equal((await query('SELECT COUNT(*)::int AS count FROM yjs_doc_updates WHERE workspace_id=$1 AND note_id=$2', ['workspace-1', 'outsider-role-note'])).rows[0].count, 0);
+});
+
 test('GET /yjs/note-ids is refused for a non-member and returns nothing', async (t) => {
   const app = await buildApp();
   t.after(async () => { await app.close(); });
