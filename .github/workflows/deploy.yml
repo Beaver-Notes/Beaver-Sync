@@ -82,6 +82,10 @@ jobs:
           COOKIE_SECRET: ci-throwaway-cookie-secret-change-me-00000001
           NOTE_HMAC_KEY: ci-throwaway-note-hmac-key-change-me-00000001
           INTERNAL_API_SECRET: ci-throwaway-internal-api-secret-change-me-01
+          # Suites that require('src/server') at import time hit validateRequiredEnv
+          # before setupTestDb runs; locally .env supplies these, CI has no .env.
+          JWT_PRIVATE_KEY_PATH: ./keys/private.pem
+          JWT_PUBLIC_KEY_PATH: ./keys/public.pem
           STORAGE_ENDPOINT: http://localhost:9000
           STORAGE_BUCKET_NAME: beaver-sync
           STORAGE_ACCESS_KEY_ID: beaver
