@@ -53,12 +53,22 @@ async function billingRoutes(app) {
     }
 
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+    // Stripe Tax activation lives in the Stripe dashboard; the env flag is the
+    // kill switch so shipping this code cannot break checkout before then.
+    const automaticTax = process.env.STRIPE_AUTOMATIC_TAX === '1';
     try {
       const session = await stripe.checkout.sessions.create({
         mode: 'subscription',
         customer_email: email,
         client_reference_id: req.userId,
         line_items: [{ price: priceId, quantity: 1 }],
+        ...(automaticTax && {
+          automatic_tax: { enabled: true },
+          // New-customer checkout (customer_email only): customer_update is
+          // invalid without a customer; Stripe Tax needs the billing address.
+          billing_address_collection: 'required',
+          tax_id_collection: { enabled: true },
+        }),
         success_url: 'beavernotes://billing/return?session_id={CHECKOUT_SESSION_ID}',
         cancel_url: 'beavernotes://billing/return?canceled=1',
         metadata: { userId: req.userId, plan, interval },

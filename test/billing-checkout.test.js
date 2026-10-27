@@ -202,3 +202,42 @@ test('checkout requires STRIPE_PRICE env to be set', async (t) => {
   assert.equal(res.json().error, 'billing_not_configured');
   process.env.STRIPE_PRICE_TEAM_MONTHLY = saved;
 });
+
+test('POST /billing/checkout-session adds Stripe Tax config when STRIPE_AUTOMATIC_TAX=1', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  lastCheckoutArgs = null;
+  process.env.STRIPE_AUTOMATIC_TAX = '1';
+  t.after(() => { delete process.env.STRIPE_AUTOMATIC_TAX; });
+  const account = await register('free', { emailVerified: true });
+  const res = await app.inject({
+    method: 'POST', url: '/billing/checkout-session',
+    headers: { authorization: `Bearer ${signToken(account.id)}`, 'content-type': 'application/json' },
+    payload: { plan: 'starter', interval: 'monthly' },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(lastCheckoutArgs.automatic_tax, { enabled: true });
+  // New-customer checkout (customer_email only): customer_update is invalid
+  // without a customer; Stripe needs a required billing address instead.
+  assert.deepEqual(lastCheckoutArgs.billing_address_collection, 'required');
+  assert.equal(lastCheckoutArgs.customer_update, undefined);
+  assert.deepEqual(lastCheckoutArgs.tax_id_collection, { enabled: true });
+});
+
+test('POST /billing/checkout-session omits Stripe Tax config when STRIPE_AUTOMATIC_TAX unset', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+  lastCheckoutArgs = null;
+  delete process.env.STRIPE_AUTOMATIC_TAX;
+  const account = await register('free', { emailVerified: true });
+  const res = await app.inject({
+    method: 'POST', url: '/billing/checkout-session',
+    headers: { authorization: `Bearer ${signToken(account.id)}`, 'content-type': 'application/json' },
+    payload: { plan: 'starter', interval: 'monthly' },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(lastCheckoutArgs.automatic_tax, undefined);
+  assert.equal(lastCheckoutArgs.billing_address_collection, undefined);
+  assert.equal(lastCheckoutArgs.customer_update, undefined);
+  assert.equal(lastCheckoutArgs.tax_id_collection, undefined);
+});
