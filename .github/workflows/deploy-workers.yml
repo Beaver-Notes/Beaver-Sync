@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install notify-inbound deps (postal-mime)
+        run: npm install --no-audit --no-fund
+        working-directory: cloudflare/notify-inbound
       - name: AASA worker
         uses: cloudflare/wrangler-action@v3
         with:
