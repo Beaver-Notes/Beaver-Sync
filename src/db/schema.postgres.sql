@@ -154,15 +154,6 @@ CREATE TABLE IF NOT EXISTS credentials (
   created_at    TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS quick_connect_codes (
-  code       TEXT PRIMARY KEY,
-  secret     TEXT NOT NULL UNIQUE,
-  authorized INTEGER NOT NULL DEFAULT 0,
-  payload    TEXT,
-  expires_at TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS compaction_locks (
   id         TEXT PRIMARY KEY,
   locked_at  TEXT NOT NULL,
@@ -397,7 +388,6 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_apple ON subscriptions(apple_origin
 CREATE INDEX IF NOT EXISTS idx_subscriptions_google ON subscriptions(google_purchase_token);
 CREATE INDEX IF NOT EXISTS idx_devices_account_device ON devices(account_id, device_id);
 CREATE INDEX IF NOT EXISTS idx_credentials_account_id ON credentials(account_id);
-CREATE INDEX IF NOT EXISTS idx_quick_connect_codes_expires ON quick_connect_codes(expires_at);
 CREATE INDEX IF NOT EXISTS idx_compaction_locks_expires ON compaction_locks(expires_at);
 CREATE INDEX IF NOT EXISTS idx_sso_configs_slug ON sso_configs(slug);
 CREATE INDEX IF NOT EXISTS idx_sso_configs_workspace ON sso_configs(workspace_id);

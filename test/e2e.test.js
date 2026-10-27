@@ -18,7 +18,7 @@ process.env.LEGACY_AUTH_ENABLED = 'true';
 
 const { close } = require('../src/db');
 const { setupTestDb, cleanTestDb } = require('./helpers/db');
-const { QuickConnectCode, Account, WebAuthnChallenge, Credential } = require('../src/models');
+const { Account, WebAuthnChallenge, Credential } = require('../src/models');
 const { createEmailHash } = require('../src/lib/crypto');
 
 // Mock @simplewebauthn/server so passkey routes work without a browser
@@ -220,144 +220,6 @@ test('GET /health returns ok with db connected', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// QuickConnect e2e tests (real Postgres)
-// ---------------------------------------------------------------------------
-
-test('quickconnect: initiate stores code and secret in the database', async (t) => {
-  const app = await buildApp();
-  t.after(async () => { await app.close(); });
-
-  const res = await app.inject({
-    method: 'POST',
-    url: '/auth/quickconnect/initiate',
-    headers: { 'content-type': 'application/json' },
-    payload: {},
-  });
-
-  assert.equal(res.statusCode, 201);
-  const body = res.json();
-  assert.match(body.code, /^[A-Z0-9]{3}-[A-Z0-9]{3}$/);
-  assert.equal(body.secret.length, 64);
-  assert.ok(new Date(body.expiresAt) > Date.now());
-
-  const stored = await QuickConnectCode.findOne({ code: body.code });
-  assert.ok(stored);
-  assert.equal(stored.authorized, 0);
-  assert.equal(stored.payload, null);
-  assert.equal(stored.secret.length, 64);
-});
-
-test('quickconnect: full flow initiate → authorize → connect', async (t) => {
-  const app = await buildApp();
-  t.after(async () => { await app.close(); });
-
-  const suffix = crypto.randomBytes(4).toString('hex');
-  const email = `qc-flow-${suffix}@example.com`;
-  const password = 'test-password-12345678';
-
-  const reg = await app.inject({
-    method: 'POST',
-    url: '/auth/register',
-    headers: { 'content-type': 'application/json' },
-    payload: { email, password },
-  });
-  assert.equal(reg.statusCode, 201);
-  const token = reg.json().token;
-
-  const init = await app.inject({
-    method: 'POST',
-    url: '/auth/quickconnect/initiate',
-    headers: { 'content-type': 'application/json' },
-    payload: {},
-  });
-  assert.equal(init.statusCode, 201);
-  const { code, secret } = init.json();
-
-  const testPayload = 'session-token-from-app';
-
-  const authorize = await app.inject({
-    method: 'POST',
-    url: `/auth/quickconnect/authorize/${code}`,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-    payload: { payload: testPayload },
-  });
-  assert.equal(authorize.statusCode, 200);
-  assert.equal(authorize.json().authorized, true);
-
-  const stored = await QuickConnectCode.findOne({ code });
-  assert.ok(stored);
-  assert.equal(stored.authorized, 1);
-  assert.equal(stored.payload, testPayload);
-
-  const connect = await app.inject({
-    method: 'GET',
-    url: `/auth/quickconnect/connect?secret=${secret}`,
-  });
-  assert.equal(connect.statusCode, 200);
-  const connectBody = connect.json();
-  assert.equal(connectBody.authorized, true);
-  assert.equal(connectBody.payload, testPayload);
-
-  const connect2 = await app.inject({
-    method: 'GET',
-    url: `/auth/quickconnect/connect?secret=${secret}`,
-  });
-  assert.equal(connect2.statusCode, 404);
-});
-
-test('quickconnect: authorize already-authorized code returns 409', async (t) => {
-  const app = await buildApp();
-  t.after(async () => { await app.close(); });
-
-  const suffix = crypto.randomBytes(4).toString('hex');
-  const email = `qc-conflict-${suffix}@example.com`;
-  const password = 'test-password-12345678';
-
-  const reg = await app.inject({
-    method: 'POST',
-    url: '/auth/register',
-    headers: { 'content-type': 'application/json' },
-    payload: { email, password },
-  });
-  const token = reg.json().token;
-
-  const init = await app.inject({
-    method: 'POST',
-    url: '/auth/quickconnect/initiate',
-    headers: { 'content-type': 'application/json' },
-    payload: {},
-  });
-  const code = init.json().code;
-
-  await app.inject({
-    method: 'POST',
-    url: `/auth/quickconnect/authorize/${code}`,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-    payload: {},
-  });
-
-  const res = await app.inject({
-    method: 'POST',
-    url: `/auth/quickconnect/authorize/${code}`,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-    payload: {},
-  });
-  assert.equal(res.statusCode, 409);
-  assert.equal(res.json().error, 'already_authorized');
-});
-
-test('quickconnect: connect with unknown secret returns 404', async (t) => {
-  const app = await buildApp();
-  t.after(async () => { await app.close(); });
-
-  const res = await app.inject({
-    method: 'GET',
-    url: '/auth/quickconnect/connect?secret=unknown',
-  });
-  assert.equal(res.statusCode, 404);
-});
-
-// ---------------------------------------------------------------------------
 // Passkey e2e tests (real Postgres, mocked WebAuthn)
 // ---------------------------------------------------------------------------
 
@@ -524,3 +386,37 @@ test('passkey: login complete verifies and issues session', async (t) => {
   assert.equal(body.user.emailHash, emailHash);
   assert.ok(body.user.id);
 });
+
+// Regression: an expired subscription must not block GET /plans — the paywall
+// an expired user needs in order to resubscribe would otherwise 402.
+test('GET /plans returns plan and prices for an expired subscription', async (t) => {
+  const app = await buildApp();
+  t.after(async () => { await app.close(); });
+
+  const reg = await app.inject({
+    method: 'POST',
+    url: '/auth/register',
+    headers: { 'content-type': 'application/json' },
+    payload: { email: 'expired-plans@example.com', password: 'super-secure-password-123' },
+  });
+  assert.equal(reg.statusCode, 201);
+  const { token, user } = reg.json();
+
+  const { Subscription } = require('../src/models');
+  // Registration already provisioned a free/active sub; force it expired.
+  await Subscription.updateOne(
+    { accountId: user.id },
+    { $set: { status: 'expired' } }
+  );
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/plans',
+    headers: { authorization: `Bearer ${token}` },
+  });
+
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(res.json().plan, 'free');
+  assert.ok('prices' in res.json());
+});
+

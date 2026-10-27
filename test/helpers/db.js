@@ -71,7 +71,7 @@ const TABLES = [
   'vault_key_params', 'vault_proof_challenges', 'account_vault_key_params',
   'workspace_join_requests', 'workspace_members', 'workspace_invites', 'workspace_keys',
   'compaction_locks', 'subscriptions', 'commits', 'sessions', 'ws_tickets', 'mfa_challenges',
-  'devices', 'credentials', 'webauthn_challenges', 'quick_connect_codes',
+  'devices', 'credentials', 'webauthn_challenges',
   'email_aliases', 'audit_logs', 'sso_oidc_states', 'sso_configs',
   'asset_reservations',
   'workspaces',

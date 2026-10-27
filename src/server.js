@@ -237,7 +237,6 @@ async function buildApp() {
   await app.register(require('./routes/auth'),        { prefix: '/auth' });
   await app.register(require('./routes/passkey'),     { prefix: '/auth' });
   await app.register(require('./routes/sso'),         { prefix: '/auth' });
-  await app.register(require('./routes/quickconnect'),{ prefix: '/auth' });
   await app.register(require('./routes/commits'),     { prefix: '/commits' });
   await app.register(require('./routes/assets'),      { prefix: '/assets' });
   await app.register(require('./routes/snapshot'),    { prefix: '/snapshot' });

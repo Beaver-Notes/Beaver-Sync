@@ -279,7 +279,7 @@ class MultiQuery {
 
 const ALLOWED_TABLES = new Set([
   'accounts', 'sessions', 'commits', 'workspaces', 'subscriptions',
-  'devices', 'credentials', 'quick_connect_codes', 'compaction_locks',
+  'devices', 'credentials', 'compaction_locks',
   'note_keys', 'workspace_keys', 'org_keys',
   'note_invitations', 'email_aliases',
   'webauthn_challenges', 'workspace_members', 'workspace_invites',
@@ -321,7 +321,6 @@ const ALLOWED_COLUMNS = {
   devices: new Set(['id', 'account_id', 'device_id', 'label', 'last_seen', 'created_at']),
   credentials: new Set(['id', 'account_id', 'credential_id', 'public_key', 'sign_count',
     'device_label', 'created_at']),
-  quick_connect_codes: new Set(['code', 'secret', 'authorized', 'payload', 'expires_at', 'created_at']),
   compaction_locks: new Set(['id', 'locked_at', 'expires_at', 'created_at']),
   note_keys: new Set(['note_id', 'user_id', 'device_id', 'wrapped_key', 'created_at']),
   workspace_keys: new Set(['workspace_id', 'user_id', 'device_id', 'wrapped_key', 'created_at']),
@@ -529,7 +528,6 @@ const CommitMeta = createModel('commits', 'commit_id');
 const Device = createModel('devices');
 const Subscription = createModel('subscriptions');
 const Credential = createModel('credentials');
-const QuickConnectCode = createModel('quick_connect_codes', 'code');
 const CompactionLock = createModel('compaction_locks');
 const NoteKey = createModel('note_keys', '_composite');
 const WorkspaceKey = createModel('workspace_keys', '_composite');
@@ -555,7 +553,7 @@ const OrgInvite = createModel('org_invites');
 
 module.exports = {
   Account, Session, RefreshToken, CommitMeta, Device, Subscription,
-  Credential, QuickConnectCode, CompactionLock,
+  Credential, CompactionLock,
   NoteKey, WorkspaceKey, OrgKey,
   NoteInvitation,
   Workspace, WorkspaceMember, WorkspaceInvite,
