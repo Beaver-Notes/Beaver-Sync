@@ -1,0 +1,19 @@
+{
+  // Deploy from this directory: npx wrangler deploy (no dependencies needed).
+  // Requires the apex DNS record to be proxied (orange cloud) — Workers can
+  // only attach routes to proxied hostnames.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "aasa",
+  "main": "worker.js",
+  "compatibility_date": "2026-01-15",
+  "routes": [
+    {
+      "pattern": "beavernotes.com/.well-known/apple-app-site-association",
+      "zone_name": "beavernotes.com"
+    },
+    {
+      "pattern": "beavernotes.com/apple-app-site-association",
+      "zone_name": "beavernotes.com"
+    }
+  ]
+}
