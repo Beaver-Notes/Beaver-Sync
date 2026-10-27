@@ -1,0 +1,30 @@
+name: Deploy Cloudflare workers
+
+# Edge workers, deployed together so both stay in sync with one push:
+# - cloudflare/aasa — Apple Associated Domains file (passkeys)
+# - cloudflare/notify-inbound — inbound mail for aliases → API webhook
+# Needs repo secrets: CLOUDFLARE_API_TOKEN (Workers Scripts:Edit +
+# Zone → Workers Routes:Edit on beavernotes.com), CLOUDFLARE_ACCOUNT_ID.
+on:
+  push:
+    branches: [main]
+    paths: ["cloudflare/aasa/**", "cloudflare/notify-inbound/**", ".github/workflows/deploy-workers.yml"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: AASA worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloudflare/aasa
+      - name: notify-inbound email worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloudflare/notify-inbound
