@@ -8,7 +8,9 @@ const { resolveEffectivePlan } = require('../lib/plan-resolution');
 async function plansRoutes(app) {
   await app.register(require('../middleware/auth'));
 
-  const protect = { preHandler: [app.authenticate, app.requireActiveSync] };
+  // authenticate only: expired/lapsed accounts must still be able to load
+  // prices + plan flags here, or the paywall they need to resubscribe 402s.
+  const protect = { preHandler: [app.authenticate] };
 
   app.get('/', protect, async (req, reply) => {
     if (isEnterpriseMode()) {
