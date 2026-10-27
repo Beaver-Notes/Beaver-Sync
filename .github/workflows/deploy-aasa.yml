@@ -1,0 +1,21 @@
+name: Deploy AASA worker
+
+# Deploys cloudflare/aasa — the Apple Associated Domains file for passkeys.
+# Needs repo secrets: CLOUDFLARE_API_TOKEN (Workers Scripts:Edit +
+# Zone → Workers Routes:Edit on beavernotes.com), CLOUDFLARE_ACCOUNT_ID.
+on:
+  push:
+    branches: [main]
+    paths: ["cloudflare/aasa/**"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloudflare/aasa
