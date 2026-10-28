@@ -15,7 +15,7 @@ let inflight = null;
 function defaultRetrievePrice(priceId) {
   const Stripe = require('stripe');
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { timeout: 5000 });
-  return stripe.prices.retrieve(priceId).then((p) => ({ amount: p.amount, currency: p.currency }));
+  return stripe.prices.retrieve(priceId);
 }
 
 async function fetchPrices(retrievePrice) {
@@ -29,7 +29,8 @@ async function fetchPrices(retrievePrice) {
       jobs.push(
         Promise.resolve()
           .then(() => retrievePrice(priceId))
-          .then((p) => { out[plan][interval] = { amount: p.amount, currency: p.currency }; })
+          // Stripe's 2025-03-31 basil API renamed Price.amount → unit_amount.
+          .then((p) => { out[plan][interval] = { amount: p.unit_amount ?? p.amount, currency: p.currency }; })
           .catch(() => { out[plan][interval] = null; })
       );
     }

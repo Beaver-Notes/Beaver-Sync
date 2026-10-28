@@ -73,6 +73,15 @@ test('missing env price IDs and Stripe errors become null entries', async () => 
   assert.deepEqual(prices.pro, { monthly: money(1200, 'usd'), yearly: null });
 });
 
+test('maps the current Stripe Price shape (unit_amount) into amount', async () => {
+  key('sk_test');
+  process.env.STRIPE_PRICE_PRO_MONTHLY = 'price_pro_m';
+  const prices = await getPlanPrices(
+    stripeFake({ price_pro_m: { unit_amount: 1200, currency: 'eur' } })
+  );
+  assert.deepEqual(prices.pro.monthly, money(1200, 'eur'));
+});
+
 test('expired TTL refetches and outage falls back to last known prices', async (t) => {
   t.mock.timers.enable({ now: Date.now() });
   key('sk_test');
